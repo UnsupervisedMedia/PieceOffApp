@@ -36,6 +36,16 @@ scripts/check.sh --bundle
 This proves the tree compiles and links. Nothing is launched, so it does not
 replace a native Windows build or runtime test.
 
+## Releases (GitHub Actions)
+
+`.github/workflows/release.yml` builds native bundles for Linux x86_64,
+Windows x86_64, macOS Apple silicon, and macOS Intel when a `v*` tag is pushed.
+The tag must equal `v` plus the version in `crates/pieceoff-app/Cargo.toml`. The
+workflow uploads the archives, a `SHA256SUMS.txt`, a build-provenance
+attestation, and a **draft** release for a maintainer to review and publish.
+Bundles exclude FFmpeg; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
+(`workflow_dispatch`) to build bundles without publishing.
+
 ## Assemble a release bundle
 
 ```sh

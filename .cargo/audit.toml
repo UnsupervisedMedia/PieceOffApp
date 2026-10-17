@@ -1,0 +1,8 @@
+# Keep in sync with the ignore list in deny.toml.
+[advisories]
+ignore = [
+    # quick-xml is only used by wayland-scanner, a build-time proc macro that
+    # parses fixed Wayland protocol XML. Drop when eframe/winit use >=0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
