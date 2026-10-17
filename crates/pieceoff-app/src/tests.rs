@@ -1170,6 +1170,7 @@ fn audio_player_arguments_follow_the_shared_loop_and_speed_with_local_volume() {
 
 #[test]
 fn room_media_http_transfer_uploads_and_downloads_verified_bytes() {
+    let _serial = crate::package::transfer_test_lock();
     let content = b"PieceOff room media transfer test".to_vec();
     let hash = format!("{:x}", Sha256::digest(&content));
     let source = std::env::temp_dir().join(format!("pieceoff-upload-{hash}.png"));
@@ -3354,6 +3355,7 @@ fn read_request_head(reader: &mut BufReader<TcpStream>) -> (String, Vec<String>)
 
 #[test]
 fn an_interrupted_download_resumes_with_a_range_request() {
+    let _serial = crate::package::transfer_test_lock();
     let content: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
     let hash = format!("{:x}", Sha256::digest(&content));
     let cached = std::env::temp_dir()
@@ -3408,6 +3410,7 @@ fn an_interrupted_download_resumes_with_a_range_request() {
 
 #[test]
 fn a_slow_but_steady_transfer_is_not_cut_off_by_a_total_timeout() {
+    let _serial = crate::package::transfer_test_lock();
     // 1.2 s of trickling bytes with a 0.4 s idle limit: only a limit on the
     // whole request would end this.
     let content = vec![9u8; 8];
@@ -3449,6 +3452,7 @@ fn a_slow_but_steady_transfer_is_not_cut_off_by_a_total_timeout() {
 
 #[test]
 fn a_transfer_that_goes_silent_gives_up_after_the_idle_limit() {
+    let _serial = crate::package::transfer_test_lock();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let hash = "d".repeat(64);

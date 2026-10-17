@@ -695,3 +695,12 @@ pub(crate) fn read_puzzle_package_with_extras(
     }
     Ok((snapshot, destination, extras))
 }
+
+/// The progress counters above are process-wide, so a transfer in one test
+/// overwrites the status line other tests assert on. Tests that move media,
+/// or that check the status while a server is running, hold this lock.
+#[cfg(test)]
+pub(crate) fn transfer_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}

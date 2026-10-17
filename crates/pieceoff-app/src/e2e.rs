@@ -15,12 +15,8 @@ use std::hash::{Hash, Hasher};
 
 const STEP: Duration = Duration::from_millis(4);
 
-/// The upload/download progress counters are process-wide, so a transfer in
-/// one test would overwrite the status line another test is asserting on.
-/// Real-server tests therefore run one at a time.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::package::transfer_test_lock()
 }
 
 fn ffmpeg_available() -> bool {
