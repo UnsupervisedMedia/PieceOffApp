@@ -1,0 +1,12 @@
+# Pinned FFmpeg builds for the optional downstream bundle path only. Official
+# PieceOff release bundles exclude FFmpeg by default. Edit with
+# scripts/update-ffmpeg-pins.py, not by hand: each line is
+#   <target> <sha256> <url>
+# FFmpeg n8.1.3-14-g330caae0c1, LGPLv3 static builds from
+# https://github.com/BtbN/FFmpeg-Builds, release autobuild-2026-10-08-13-05.
+# The archive's SHA-256 is checked before anything is unpacked.
+# macOS has no pinned build: see docs/FFMPEG.md.
+linux64 efc5f0db8b76a2b2dd0bc26feb5ffce38dc252af21fd60457ec6ece62797c930 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-08-13-05/ffmpeg-n8.1.3-14-g330caae0c1-linux64-lgpl-8.1.tar.xz
+linuxarm64 e2ce8cfbf57a9526a0e3069ef1ce364acee7fa093c3a350e40079ea92ecec53e https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-08-13-05/ffmpeg-n8.1.3-14-g330caae0c1-linuxarm64-lgpl-8.1.tar.xz
+win64 293bc44ded938a6900060b7d622dc330675fdec0f028f8b2ea6735c64be02b12 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-08-13-05/ffmpeg-n8.1.3-14-g330caae0c1-win64-lgpl-8.1.zip
+winarm64 0d08d87d81edba09817bd466e97361f64e5a2fd99af8315e79550cf0d7911058 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-08-13-05/ffmpeg-n8.1.3-14-g330caae0c1-winarm64-lgpl-8.1.zip

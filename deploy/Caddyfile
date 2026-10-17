@@ -1,0 +1,16 @@
+# TLS termination for the PieceOff room server. Caddy proxies WebSocket
+# upgrades and streams request and response bodies without buffering them, so
+# large media uploads work without further settings.
+{$PIECEOFF_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy pieceoff:28878 {
+		# Send the client's address; the server trusts it when
+		# PIECEOFF_TRUST_PROXY=1 (Caddy replaces any value a client supplied).
+		header_up X-Forwarded-For {remote_host}
+		# Large uploads and downloads can be quiet for a while.
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}

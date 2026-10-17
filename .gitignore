@@ -1,0 +1,9 @@
+/target/
+/pieceoff-data/
+/.pieceoff-runtime/
+/.idea/
+/.vscode/
+.DS_Store
+/dist/
+/docs/superpowers/
+/.venv-media/

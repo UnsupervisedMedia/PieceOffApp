@@ -1,0 +1,52 @@
+# systemd unit for the PieceOff room server.
+#
+#   sudo useradd --system --home-dir /var/lib/pieceoff --shell /usr/sbin/nologin pieceoff
+#   sudo install -m 0755 pieceoff-server /usr/local/bin/pieceoff-server
+#   sudo install -m 0644 deploy/pieceoff-server.service /etc/systemd/system/
+#   sudo install -d -m 0750 -o root -g pieceoff /etc/pieceoff
+#   sudo install -m 0640 -o root -g pieceoff deploy/pieceoff-server.env.example /etc/pieceoff/server.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now pieceoff-server
+#
+# Rooms and uploaded media live in /var/lib/pieceoff (StateDirectory).
+
+[Unit]
+Description=PieceOff room server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pieceoff
+Group=pieceoff
+EnvironmentFile=-/etc/pieceoff/server.env
+Environment=PIECEOFF_DATA_DIR=/var/lib/pieceoff
+ExecStart=/usr/local/bin/pieceoff-server
+Restart=on-failure
+RestartSec=3
+# SIGTERM makes the server save every room before it exits.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StateDirectory=pieceoff
+StateDirectoryMode=0750
+LimitNOFILE=8192
+
+# The server needs the network and its own data directory, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

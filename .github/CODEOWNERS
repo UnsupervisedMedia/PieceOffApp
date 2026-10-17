@@ -1,0 +1,7 @@
+* @UnsupervisedMedia
+/.github/ @UnsupervisedMedia
+/deploy/ @UnsupervisedMedia
+/scripts/ @UnsupervisedMedia
+/Dockerfile @UnsupervisedMedia
+/LICENSE @UnsupervisedMedia
+/SECURITY.md @UnsupervisedMedia

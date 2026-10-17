@@ -1,0 +1,19 @@
+PieceOff @VERSION@ - Windows test build (x86_64 GNU)
+
+To run:
+1. Extract this folder to a location you can write to.
+2. Open PowerShell in the extracted folder.
+3. Run: .\pieceoff.ps1 start
+4. To stop PieceOff, run: .\pieceoff.ps1 stop
+
+This package includes the PieceOff app and room server. FFmpeg is not
+included. To use video or animated PNG/GIF puzzles, install FFmpeg and
+ffprobe separately, then select their folder under **You → Media tools**.
+Animated WebP and still-image puzzles use native decoders.
+
+To play with someone else, one machine runs the server (pieceoff-server.exe,
+TCP port 28878) and everyone types its address into the "Room server" box.
+
+This is an x86_64 Windows GNU build cross-compiled on Linux. It uses Windows
+system DLLs and does not require a separately installed MinGW runtime. It has
+not been launched on Windows by the developers yet: please report problems.

@@ -1,0 +1,52 @@
+# PieceOff room server behind Caddy, which gets and renews a TLS certificate
+# automatically. From this folder:
+#
+#   cp .env.example .env      # set PIECEOFF_DOMAIN
+#   docker compose up -d --build
+#
+# Players then use  wss://<your domain>/ws  as the Server address. The room
+# server itself is not published: only Caddy (ports 80 and 443) is reachable.
+# Point the domain's DNS at this machine first, or Caddy cannot get a
+# certificate.
+
+services:
+  pieceoff:
+    build:
+      context: ..
+    restart: unless-stopped
+    environment:
+      # Everything here is optional; see docs/DEPLOYMENT.md for the full list.
+      PIECEOFF_TRUST_PROXY: "1" # client addresses come from Caddy's X-Forwarded-For
+      PIECEOFF_MEDIA_QUOTA_BYTES: ${PIECEOFF_MEDIA_QUOTA_BYTES:-53687091200}
+      PIECEOFF_MAX_MEDIA_BYTES: ${PIECEOFF_MAX_MEDIA_BYTES:-17179869184}
+      PIECEOFF_ROOM_TTL_DAYS: ${PIECEOFF_ROOM_TTL_DAYS:-90}
+      PIECEOFF_MAX_ROOMS: ${PIECEOFF_MAX_ROOMS:-500}
+      PIECEOFF_MAX_CONNECTIONS: ${PIECEOFF_MAX_CONNECTIONS:-400}
+    volumes:
+      - pieceoff-data:/data
+    # Give the server time to save every room when it is stopped.
+    stop_grace_period: 30s
+    expose:
+      - "28878"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      pieceoff:
+        condition: service_healthy
+    environment:
+      PIECEOFF_DOMAIN: ${PIECEOFF_DOMAIN:?set PIECEOFF_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  pieceoff-data:
+  caddy-data:
+  caddy-config:

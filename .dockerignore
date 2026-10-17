@@ -1,0 +1,13 @@
+target
+dist
+.git
+.github
+pieceoff-data
+.pieceoff-runtime
+.idea
+.vscode
+docs
+scripts
+packaging
+crates/loopjig-app
+crates/loopjig-core
