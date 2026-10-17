@@ -411,9 +411,10 @@ mod tests {
             app_dir: Some(app.clone()),
             ..Search::default()
         };
+        // Compared as paths: Windows joins this with mixed separators.
         assert_eq!(
-            search.resolve(Tool::Ffmpeg).program,
-            in_resources.into_os_string()
+            PathBuf::from(search.resolve(Tool::Ffmpeg).program),
+            in_resources
         );
 
         let beside = root.join("beside");
@@ -423,7 +424,7 @@ mod tests {
             ..Search::default()
         };
         let found = search.resolve(Tool::Ffprobe);
-        assert_eq!(found.program, in_subfolder.into_os_string());
+        assert_eq!(PathBuf::from(found.program), in_subfolder);
         assert_eq!(found.source, ToolSource::Bundled);
     }
 

@@ -15,6 +15,14 @@ use std::hash::{Hash, Hasher};
 
 const STEP: Duration = Duration::from_millis(4);
 
+/// The upload/download progress counters are process-wide, so a transfer in
+/// one test would overwrite the status line another test is asserting on.
+/// Real-server tests therefore run one at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
@@ -254,6 +262,7 @@ fn solve_together(host: &mut Player, guest: &mut Player) {
 
 #[test]
 fn two_players_solve_a_looping_video_leave_rejoin_and_survive_a_server_restart() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -392,6 +401,7 @@ fn server_address(url: &str) -> std::net::SocketAddr {
 
 #[test]
 fn a_server_crash_keeps_every_dropped_piece_and_frees_the_one_in_flight() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -502,6 +512,7 @@ fn a_server_crash_keeps_every_dropped_piece_and_frees_the_one_in_flight() {
 
 #[test]
 fn a_room_the_server_no_longer_has_stops_the_reconnect_loop_and_keeps_the_work_local() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -629,6 +640,7 @@ impl SlowProxy {
 
 #[test]
 fn the_host_dropping_mid_upload_hands_the_upload_to_a_guest_who_has_the_file() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -763,6 +775,7 @@ fn last_pid(dir: &Path) -> u32 {
 #[cfg(unix)]
 #[test]
 fn ffmpeg_killed_mid_playback_is_restarted_and_the_video_keeps_playing() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -818,6 +831,7 @@ fn ffmpeg_killed_mid_playback_is_restarted_and_the_video_keeps_playing() {
 #[cfg(unix)]
 #[test]
 fn a_decoder_that_gave_up_is_started_again_by_the_app_when_ffmpeg_works_again() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;
@@ -865,6 +879,7 @@ fn a_decoder_that_gave_up_is_started_again_by_the_app_when_ffmpeg_works_again() 
 
 #[test]
 fn queue_swap_advance_and_lock_across_two_clients() {
+    let _serial = serial();
     if !ffmpeg_available() {
         eprintln!("Skipping: ffmpeg is not installed.");
         return;

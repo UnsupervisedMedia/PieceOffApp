@@ -773,7 +773,7 @@ fn still_image_inspection_returns_dimensions_and_fingerprint() {
     assert!(!metadata.is_video);
     assert!(!metadata.has_audio);
     assert_eq!(metadata.sha256.len(), 64);
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -793,7 +793,7 @@ fn oversized_gif_is_rejected_before_frame_decode() {
 
     let error = inspect_media(&path).unwrap_err();
     assert!(error.contains("40 megapixels"), "unexpected error: {error}");
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -813,7 +813,7 @@ fn animated_gif_is_detected_for_looping_video_playback() {
         .encode_frames(frames)
         .unwrap();
     assert!(gif_is_animated(&path).unwrap());
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -832,6 +832,10 @@ fn animated_webp_native_decoder_seeks_and_loops() {
         "pieceoff-animated-native-{}.webp",
         std::process::id()
     ));
+    if !ffmpeg_has_encoder("libwebp_anim") {
+        eprintln!("skipping: this ffmpeg build has no libwebp_anim encoder");
+        return;
+    }
     let generated = Command::new("ffmpeg")
         .args([
             "-v",
@@ -919,7 +923,7 @@ fn animated_webp_native_decoder_seeks_and_loops() {
     assert!(error_rx.try_recv().is_err());
     drop(control_tx);
     worker.join().unwrap();
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -995,7 +999,7 @@ fn all_bundled_puzzle_loops_are_valid_seamless_native_animated_webp() {
             seam_step < normal_step * 2.5 + 1.0,
             "{name} seam ({seam_step:.2}) is much larger than a normal step ({normal_step:.2})"
         );
-        std::fs::remove_file(path).unwrap();
+        remove_file_when_released(&path);
     }
 }
 
@@ -1071,7 +1075,7 @@ fn animated_png_is_detected_for_looping_video_playback() {
         saw_blue,
         "PieceOff's FFmpeg path reaches the second APNG frame"
     );
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -1433,7 +1437,7 @@ fn ffmpeg_probes_decodes_loops_and_seeks_a_generated_video() {
             .is_err()
     );
     drop(paused_app);
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
 }
 
 #[test]
@@ -2439,7 +2443,7 @@ fn video_frames_follow_the_room_clock_through_startup_and_the_loop() {
         }
     }
     drop(app);
-    std::fs::remove_file(path).unwrap();
+    remove_file_when_released(&path);
     assert!(
         wrapped && errors_ms.len() > 20,
         "frames kept arriving: {}",
@@ -3559,4 +3563,25 @@ fn grab_margin_picks_a_piece_just_outside_its_edge() {
     let outline = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
     assert_eq!(distance_to_outline(Pos2::new(14.0, 5.0), &outline), 4.0);
     assert_eq!(distance_to_outline(Pos2::new(13.0, 14.0), &outline), 5.0);
+}
+
+/// Windows keeps a file locked briefly after the process that read it is
+/// killed, so deleting a test's media right after dropping the app can fail.
+fn remove_file_when_released(path: &Path) {
+    for _ in 0..50 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+fn ffmpeg_has_encoder(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(name))
+        .unwrap_or(false)
 }
