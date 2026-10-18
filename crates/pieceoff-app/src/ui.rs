@@ -515,8 +515,9 @@ impl PieceOffApp {
         {
             self.help_open = !self.help_open;
         }
+        ui.add_space(ui.available_width());
         if ui
-            .button("Leave")
+            .add(egui::Button::new(RichText::new("Leave").color(Color32::WHITE)).fill(DANGER))
             .on_hover_text("Leave this room")
             .clicked()
         {
