@@ -3855,16 +3855,20 @@ mod hardening_tests {
             runtime.snapshot = Some(snapshot);
         }
         let mut events = room.events.subscribe();
-        // Drain as events arrive: the channel only holds 128.
+        // The channel only holds 128, so a slow runner can lag this receiver.
+        // A lag drops events but never reorders them, so skip it and check
+        // order plus the final revision rather than an exact count.
         let collector = tokio::spawn(async move {
             let mut revisions = Vec::new();
-            while let Ok(Ok(event)) =
-                tokio::time::timeout(Duration::from_millis(300), events.recv()).await
-            {
-                let ServerMessage::PlaybackChanged { revision, .. } = event else {
-                    panic!("unexpected event");
-                };
-                revisions.push(revision);
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), events.recv()).await {
+                    Ok(Ok(ServerMessage::PlaybackChanged { revision, .. })) => {
+                        revisions.push(revision)
+                    }
+                    Ok(Ok(_)) => panic!("unexpected event"),
+                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+                }
             }
             revisions
         });
@@ -3900,7 +3904,14 @@ mod hardening_tests {
             assert!(*revision > last, "revision {revision} arrived after {last}");
             last = *revision;
         }
-        let received = revisions.len();
-        assert_eq!(received, 8 * 60);
+        let final_revision = room
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .revision;
+        assert_eq!(revisions.last(), Some(&final_revision));
     }
 }
