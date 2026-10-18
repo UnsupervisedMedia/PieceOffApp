@@ -66,8 +66,10 @@ build from this checkout. The choice can be supplied directly with
 `./install.sh --release` or `./install.sh --local`; add `--yes` for scripts
 that should not prompt. By default the install goes under
 `~/.local/opt/PieceOff` and adds a `pieceoff` command in `~/.local/bin`.
-Use `--prefix DIR` and `--bin-dir DIR` to change those locations. On Windows,
-download the Windows release zip and use its `pieceoff.ps1` launcher.
+Running `pieceoff` starts both the room server and desktop app; pass `stop`,
+`restart`, or `status` to manage them. Use `--prefix DIR` and `--bin-dir DIR`
+to change the install locations. On Windows, download the Windows release zip
+and use its `pieceoff.ps1` launcher.
 
 ### Requirements
 

@@ -160,8 +160,28 @@ mkdir -p "$DEST"
 cp -R "$PACKAGE/." "$DEST/"
 ln -sfn "$DEST" "$INSTALL_ROOT/current.new"
 mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
-ln -sfn "$INSTALL_ROOT/current/pieceoff.sh" "$BIN_DIR/pieceoff"
+cat >"$INSTALL_ROOT/pieceoff.new" <<'LAUNCHER'
+#!/bin/sh
+set -eu
+SCRIPT=$0
+while [ -L "$SCRIPT" ]; do
+  SCRIPT_DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT")" && pwd)
+  LINK=$(readlink "$SCRIPT")
+  case "$LINK" in
+    /*) SCRIPT=$LINK ;;
+    *) SCRIPT=$SCRIPT_DIR/$LINK ;;
+  esac
+done
+ROOT=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT")" && pwd)
+if [ "$#" -eq 0 ]; then
+  set -- start
+fi
+exec "$ROOT/current/pieceoff.sh" "$@"
+LAUNCHER
+chmod +x "$INSTALL_ROOT/pieceoff.new"
+mv -f "$INSTALL_ROOT/pieceoff.new" "$INSTALL_ROOT/pieceoff"
+ln -sfn "$INSTALL_ROOT/pieceoff" "$BIN_DIR/pieceoff"
 
 echo "PieceOff $VERSION installed in $DEST"
-echo "Run: $BIN_DIR/pieceoff start"
+echo "Run: $BIN_DIR/pieceoff"
 case ":${PATH:-}:" in *":$BIN_DIR:"*) : ;; *) echo "Add $BIN_DIR to PATH to run 'pieceoff' from any terminal." ;; esac
