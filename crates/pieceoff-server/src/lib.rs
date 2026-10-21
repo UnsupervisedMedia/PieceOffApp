@@ -16,8 +16,8 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, ServerMessage, valid_media_dimensions,
-    valid_media_extension,
+    ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, ServerMessage, clean_media_extension,
+    clean_name, clean_title, valid_media_dimensions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -777,18 +777,6 @@ fn has_unavailable_item(snapshot: &RoomSnapshot) -> bool {
 
 fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaItem> {
     snapshot.queue.iter().find(|item| item.sha256 == sha256)
-}
-
-fn clean_media_extension(extension: &str) -> Result<String, String> {
-    let extension = extension
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
-    if valid_media_extension(&extension).is_some() {
-        Ok(extension)
-    } else {
-        Err("Choose a supported image or video format".into())
-    }
 }
 
 async fn websocket_handler(
@@ -1551,24 +1539,6 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     }
 }
 
-fn clean_name(name: &str) -> String {
-    let name: String = name.chars().filter(|c| !c.is_control()).take(24).collect();
-    if name.trim().is_empty() {
-        "Guest".into()
-    } else {
-        name.trim().to_owned()
-    }
-}
-
-fn clean_title(title: &str) -> String {
-    let title: String = title.chars().filter(|c| !c.is_control()).take(80).collect();
-    if title.trim().is_empty() {
-        "Untitled puzzle".into()
-    } else {
-        title.trim().to_owned()
-    }
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1587,29 +1557,6 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message};
-
-    #[test]
-    fn names_are_bounded_and_control_characters_removed() {
-        assert_eq!(clean_name("\nAlice\0"), "Alice");
-        assert_eq!(clean_name(" \t "), "Guest");
-        assert!(clean_name(&"x".repeat(100)).len() <= 24);
-    }
-
-    #[test]
-    fn room_titles_are_bounded() {
-        assert_eq!(clean_title(" \n "), "Untitled puzzle");
-        assert!(clean_title(&"x".repeat(200)).len() <= 80);
-    }
-
-    #[test]
-    fn server_accepts_the_shared_media_extension_set() {
-        for extension in pieceoff_core::SUPPORTED_MEDIA_EXTENSIONS {
-            assert_eq!(clean_media_extension(extension).unwrap(), *extension);
-        }
-        assert_eq!(clean_media_extension(".APNG").unwrap(), "apng");
-        assert!(clean_media_extension("../mp4").is_err());
-        assert!(clean_media_extension("exe").is_err());
-    }
 
     #[tokio::test]
     async fn create_room_rehosts_imported_puzzle_progress() {
