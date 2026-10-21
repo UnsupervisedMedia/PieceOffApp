@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 mod apply;
+mod membership;
 pub use apply::ApplyOutcome;
+pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;
-pub use sanitize::{clean_media_extension, clean_name, clean_title};
+pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
 
 pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_QUEUE_ITEMS: usize = 64;
