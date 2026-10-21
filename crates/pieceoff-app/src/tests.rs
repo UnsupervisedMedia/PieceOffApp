@@ -1502,6 +1502,8 @@ struct DragRig {
     cw: f32,
     ch: f32,
     messages: usize,
+    /// Our pointer as sent to the room; `None` entries are "left the table".
+    cursors_sent: Vec<Option<Pos2>>,
 }
 
 impl DragRig {
@@ -1552,6 +1554,7 @@ impl DragRig {
             cw: snapshot.cell_width(),
             ch: snapshot.cell_height(),
             messages: 0,
+            cursors_sent: Vec::new(),
         };
         // Learn the on-screen mapping from piece 0's mesh.
         let output = rig.frame(Vec::new());
@@ -1638,6 +1641,15 @@ impl DragRig {
                 ClientMessage::RestartPuzzle => self.room.restart("host", 42),
                 ClientMessage::RearrangeTray { arrangement } => {
                     self.room.rearrange_tray(arrangement, 7)
+                }
+                // Live cursors are relayed, not room changes.
+                ClientMessage::Cursor { x, y } => {
+                    self.cursors_sent.push(Some(Pos2::new(x, y)));
+                    continue;
+                }
+                ClientMessage::CursorHidden => {
+                    self.cursors_sent.push(None);
+                    continue;
                 }
                 other => panic!("unexpected message {other:?}"),
             };
@@ -1778,6 +1790,145 @@ fn arranging_the_tray_relays_loose_pieces_and_keeps_placed_ones() {
         slot(rig.app.snapshot.as_ref().unwrap().piece(3).unwrap())
             < slot(rig.app.snapshot.as_ref().unwrap().piece(6).unwrap())
     );
+}
+
+#[test]
+fn the_pointer_is_shared_in_board_coordinates_throttled_and_hidden_off_the_board() {
+    let mut rig = DragRig::new(3, 4);
+    rig.frame(vec![egui::Event::PointerMoved(rig.to_screen(50.0, 60.0))]);
+    rig.relay();
+    let sent = rig
+        .cursors_sent
+        .last()
+        .copied()
+        .flatten()
+        .expect("a cursor");
+    assert!(
+        (sent.x - 50.0).abs() < 0.5 && (sent.y - 60.0).abs() < 0.5,
+        "board coordinates, not screen: {sent:?}"
+    );
+
+    // A pointer that moves every 50 ms frame is sent at most 15 times a second.
+    rig.cursors_sent.clear();
+    for step in 0..20 {
+        let pos = rig.to_screen(50.0 + step as f32, 60.0);
+        rig.frame(vec![egui::Event::PointerMoved(pos)]);
+        rig.relay();
+    }
+    let sends = rig.cursors_sent.len();
+    assert!((8..=16).contains(&sends), "sent {sends} updates in 1 s");
+    // Holding still: the last held-back position goes out, then nothing.
+    for _ in 0..3 {
+        rig.frame(Vec::new());
+        rig.relay();
+    }
+    let last = rig.cursors_sent.last().copied().flatten().unwrap();
+    assert!((last.x - 69.0).abs() < 0.5, "the newest position: {last:?}");
+    let settled = rig.cursors_sent.len();
+    for _ in 0..5 {
+        rig.frame(Vec::new());
+        rig.relay();
+    }
+    assert_eq!(rig.cursors_sent.len(), settled, "a still pointer is quiet");
+
+    // Leaving the window says so, once.
+    rig.cursors_sent.clear();
+    for _ in 0..4 {
+        rig.frame(vec![egui::Event::PointerGone]);
+        rig.relay();
+    }
+    assert_eq!(rig.cursors_sent, vec![None]);
+}
+
+fn painted_texts(output: &egui::FullOutput) -> Vec<String> {
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn other_players_cursors_are_drawn_with_their_names_then_fade_or_hide() {
+    let mut rig = DragRig::new(3, 4);
+    let cursor = |client_id: &str, name: &str, x: f32| ServerMessage::Cursor {
+        client_id: client_id.into(),
+        name: name.into(),
+        x,
+        y: 40.0,
+    };
+    rig.incoming_tx.send(cursor("ada", "Ada", 30.0)).unwrap();
+    // Our own pointer is never drawn, even if the server sent it.
+    rig.incoming_tx.send(cursor("host", "Me", 30.0)).unwrap();
+    rig.relay();
+    let texts = painted_texts(&rig.frame(Vec::new()));
+    assert!(texts.iter().any(|text| text == "Ada"), "{texts:?}");
+    assert!(!texts.iter().any(|text| text == "Me"));
+    assert_eq!(rig.app.cursors.remote.len(), 1);
+
+    // It glides to a new position rather than jumping.
+    let now = rig.time;
+    rig.incoming_tx.send(cursor("ada", "Ada", 130.0)).unwrap();
+    rig.relay();
+    let ada = &rig.app.cursors.remote["ada"];
+    let midway = ada.position(now + 0.03).x;
+    assert!(midway > 30.0 && midway < 130.0, "{midway}");
+    assert_eq!(ada.position(now + 0.5).x, 130.0);
+    assert_eq!(ada.color, player_color("ada"), "a stable colour per player");
+    assert_ne!(player_color("ada"), player_color("bob"));
+
+    // The local setting hides them without forgetting them.
+    let shows_ada =
+        |rig: &mut DragRig| painted_texts(&rig.frame(Vec::new())).contains(&"Ada".to_owned());
+    rig.app.settings.hide_peer_cursors = true;
+    assert!(!shows_ada(&mut rig));
+    rig.app.settings.hide_peer_cursors = false;
+    assert!(shows_ada(&mut rig));
+
+    // Three seconds without news and it is gone.
+    rig.time += 3.0;
+    assert!(!shows_ada(&mut rig));
+    assert!(rig.app.cursors.remote.is_empty());
+
+    // "Left the board" removes one at once.
+    rig.incoming_tx.send(cursor("bob", "Bob", 10.0)).unwrap();
+    rig.relay();
+    assert!(painted_texts(&rig.frame(Vec::new())).contains(&"Bob".to_owned()));
+    rig.incoming_tx
+        .send(ServerMessage::CursorHidden {
+            client_id: "bob".into(),
+        })
+        .unwrap();
+    rig.relay();
+    assert!(rig.app.cursors.remote.is_empty());
+}
+
+#[test]
+fn other_players_cursors_setting_defaults_on_and_persists() {
+    let dir = std::env::temp_dir().join(format!("pieceoff-cursor-settings-{}", std::process::id()));
+    let path = dir.join("settings.json");
+    assert!(
+        !load_settings(&path).hide_peer_cursors,
+        "missing file shows them"
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, b"{}").unwrap();
+    assert!(
+        !load_settings(&path).hide_peer_cursors,
+        "absent key shows them"
+    );
+    save_settings(
+        &path,
+        &Settings {
+            hide_peer_cursors: true,
+            ..Settings::default()
+        },
+    );
+    assert!(load_settings(&path).hide_peer_cursors);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {

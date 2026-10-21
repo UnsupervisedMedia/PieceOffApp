@@ -228,6 +228,7 @@ impl PieceOffApp {
                     }
                     self.client_id = Some(client_id);
                     self.peers.clone_from(&peers);
+                    self.cursors.reset();
                     // The server may have tidied the name we asked for.
                     self.player_name.clone_from(&name);
                     // The server is the player's explicit default now; joining
@@ -397,6 +398,19 @@ impl PieceOffApp {
                     };
                 }
                 ServerMessage::MediaUploadToken { .. } => {}
+                ServerMessage::Cursor {
+                    client_id,
+                    name,
+                    x,
+                    y,
+                } => {
+                    // The server never echoes our own, but be sure.
+                    if self.client_id.as_deref() != Some(client_id.as_str()) {
+                        let now = ctx.input(|input| input.time);
+                        self.cursors.update(client_id, name, x, y, now);
+                    }
+                }
+                ServerMessage::CursorHidden { client_id } => self.cursors.hide(&client_id),
                 ServerMessage::Error { message } => {
                     if message.starts_with("Could not upload room media:") {
                         self.media_uploading = false;
@@ -419,6 +433,7 @@ impl PieceOffApp {
                         self.connected = false;
                         self.client_id = None;
                         self.peers.clear();
+                        self.cursors.reset();
                         self.clear_active_gesture();
                         self.media_uploading = false;
                         if self.room_gone {
