@@ -141,6 +141,23 @@ room uses.
 - Run the image or unit as the provided unprivileged user. Do not expose
   `28878` directly when a proxy is in use.
 
+## Cloudflare (planned)
+
+A hosted instance is planned on Cloudflare Workers, Durable Objects (one per
+room) and R2; the axum server above is unchanged. The room rules run in the
+Durable Object as the `pieceoff-room-wasm` module.
+
+Worker size gate, measured with `scripts/wasm-size.sh` on 2026-10-21 (no
+`wasm-opt`, no brotli installed): **288,099 bytes raw, 96,851 bytes gzip**.
+The free-plan Worker limit is 3 MB compressed, so the room core uses about 3%
+of it.
+
+Plan limits checked against Cloudflare's pricing pages on 2026-10-21: Durable
+Object requests count HTTP requests, RPC calls, WebSocket messages (20 : 1)
+and alarm invocations; each `setAlarm()` is a row written; the free plan allows
+100,000 requests, 13,000 GB-s, and 100,000 SQLite rows written per day, and
+only SQLite-backed Durable Objects. R2 is free to 10 GB with free egress.
+
 ## Limits
 
 - One process, one machine, local disk. A second server is a separate
