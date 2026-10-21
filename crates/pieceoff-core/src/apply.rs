@@ -24,8 +24,11 @@ impl ServerMessage {
 
 impl RoomRuntime {
     /// A runtime holding `snapshot`, with no names, host or in-flight drags.
-    /// Hosts that rebuild a room from storage start here.
-    pub fn from_snapshot(snapshot: RoomSnapshot) -> Self {
+    /// Hosts that rebuild a room from storage start here. The snapshot is
+    /// migrated first, exactly as the axum server does on load, so a stored
+    /// older or damaged snapshot cannot index outside its queue.
+    pub fn from_snapshot(mut snapshot: RoomSnapshot) -> Self {
+        snapshot.migrate();
         Self {
             snapshot: Some(snapshot),
             ..Self::default()
@@ -274,6 +277,48 @@ mod tests {
         assert!(!token.visible_to("b"));
         let other = ServerMessage::PeerLeft { name: "n".into() };
         assert!(other.visible_to("b"));
+    }
+
+    fn old_format_snapshot() -> RoomSnapshot {
+        let mut snapshot = room().snapshot.unwrap();
+        snapshot.queue.clear();
+        snapshot.protocol_version = 7;
+        snapshot
+    }
+
+    #[test]
+    fn from_snapshot_migrates_old_snapshots_so_queue_steps_do_not_panic() {
+        let mut runtime = RoomRuntime::from_snapshot(old_format_snapshot());
+        for message in [ClientMessage::NextItem, ClientMessage::PrevItem] {
+            runtime.apply("host", message, 0).unwrap();
+        }
+        assert_eq!(runtime.snapshot.unwrap().queue.len(), 1);
+    }
+
+    #[test]
+    fn stepping_an_empty_queue_is_an_error_not_a_panic() {
+        let mut snapshot = old_format_snapshot();
+        snapshot.media_sha256.clear();
+        let mut runtime = RoomRuntime {
+            snapshot: Some(snapshot),
+            ..RoomRuntime::default()
+        };
+        for message in [ClientMessage::NextItem, ClientMessage::PrevItem] {
+            assert!(runtime.apply("host", message, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn from_snapshot_clamps_an_out_of_range_current_item() {
+        let mut snapshot = room().snapshot.unwrap();
+        snapshot.migrate();
+        snapshot.current = 5;
+        snapshot.repeat = crate::RepeatMode::All;
+        snapshot.playback.playing = true;
+        snapshot.playback.loop_end_ms = 1;
+        let mut runtime = RoomRuntime::from_snapshot(snapshot);
+        runtime.tick_advance(u64::MAX / 2);
+        assert_eq!(runtime.snapshot.unwrap().current, 0);
     }
 
     #[test]

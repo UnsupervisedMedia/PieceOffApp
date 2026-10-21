@@ -1524,6 +1524,9 @@ impl RoomRuntime {
     ) -> Result<RoomSnapshot, String> {
         let snapshot = self.queue_guard(client_id)?;
         let len = snapshot.queue.len();
+        if len == 0 {
+            return Err("The queue is empty".into());
+        }
         let index = if forward {
             (snapshot.current + 1) % len
         } else {
