@@ -406,6 +406,7 @@ impl PieceOffApp {
                 Color32::WHITE,
             );
             self.share_pointer(None, now, ui.ctx());
+            self.chat.ping_requested = false;
             return None;
         }
         let tray_layout = piece_tray_layout(
@@ -909,6 +910,14 @@ impl PieceOffApp {
             .map(|point| view.to_board(point))
             .filter(|point| scene.contains(point.x, point.y));
         self.share_pointer(on_table, now, ui.ctx());
+        self.maybe_ping(on_table);
+        self.paint_pings(
+            &painter,
+            canvas,
+            |point| view.to_screen(point.x, point.y),
+            now,
+            ui.ctx(),
+        );
         self.paint_remote_cursors(
             &painter,
             |point| view.to_screen(point.x, point.y),

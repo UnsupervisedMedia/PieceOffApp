@@ -49,9 +49,12 @@ pub(crate) struct LiveCursors {
     sent_at: Option<f64>,
 }
 
-/// A colour of its own for each player, the same on every client.
-pub(crate) fn player_color(client_id: &str) -> Color32 {
-    let hue = (pieceoff_core::fnv1a(client_id) % 360) as f32 / 360.0;
+/// A colour of its own for each player, the same on every client and for
+/// cursors, chat, and pings. It comes from the display name because that is
+/// the only thing that survives a reconnect: the server hands out a new
+/// client ID for every connection.
+pub(crate) fn player_color(name: &str) -> Color32 {
+    let hue = (pieceoff_core::fnv1a(name) % 360) as f32 / 360.0;
     egui::ecolor::HsvaGamma {
         h: hue,
         s: 0.7,
@@ -72,7 +75,7 @@ impl LiveCursors {
                 cursor.name = name;
             }
             None => {
-                let color = player_color(&client_id);
+                let color = player_color(&name);
                 self.remote.insert(
                     client_id,
                     RemoteCursor {
