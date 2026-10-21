@@ -16,7 +16,10 @@ fn clock(now_ms: f64) -> u64 {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Reply {
-    Ok { event: ServerMessage, persist: bool },
+    Ok {
+        event: Box<ServerMessage>,
+        persist: bool,
+    },
     Err(String),
 }
 
@@ -59,7 +62,7 @@ impl Room {
         };
         match self.runtime.apply(client_id, message, clock(now_ms)) {
             Ok(out) => reply(Reply::Ok {
-                event: out.event,
+                event: Box::new(out.event),
                 persist: out.persist,
             }),
             Err(message) => reply(Reply::Err(message)),
