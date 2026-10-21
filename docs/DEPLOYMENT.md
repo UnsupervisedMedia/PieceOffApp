@@ -152,6 +152,17 @@ Worker size gate, measured with `scripts/wasm-size.sh` on 2026-10-21 (no
 The free-plan Worker limit is 3 MB compressed, so the room core uses about 3%
 of it.
 
+Local development: `scripts/worker-test.sh` builds the wasm module
+(`worker/build.sh`), type-checks `worker/`, and runs a two-client test against
+`wrangler dev --local` (join, piece leases, release on disconnect, bad frames,
+unknown codes, restart persistence). Nothing is deployed by it. Rooms are
+created with `POST /api/rooms` (a `create_room` body; returns `code` and the
+creator's `client_id`), then clients open `/ws?code=<CODE>[&client=<id>]` and
+send `join_room` first. Not yet in the worker: R2 media transfer, Turnstile and
+per-IP limits, quota and idle cleanup. Production publishing of anything under
+`pieceoff.app` goes through the connected GitHub to Cloudflare Workers Builds
+path, not a direct `wrangler deploy`.
+
 Plan limits checked against Cloudflare's pricing pages on 2026-10-21: Durable
 Object requests count HTTP requests, RPC calls, WebSocket messages (20 : 1)
 and alarm invocations; each `setAlarm()` is a row written; the free plan allows
