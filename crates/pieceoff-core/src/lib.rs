@@ -1570,6 +1570,38 @@ impl RoomRuntime {
         Ok(snapshot.clone())
     }
 
+    /// When `tick_advance` will next have something to do, in the same clock
+    /// as `now_ms`: `now_ms` if the item is already past its end, `None` if
+    /// nothing will advance by itself (paused, repeat-one, no known length).
+    /// Hosts arm a single timer for this instead of polling.
+    pub fn next_tick_deadline(&self, now_ms: u64) -> Option<u64> {
+        let snapshot = self.snapshot.as_ref()?;
+        if !snapshot.playback.playing
+            || snapshot.repeat == RepeatMode::One
+            || snapshot.queue.is_empty()
+        {
+            return None;
+        }
+        let end = if snapshot.playback.loop_end_ms > 0 {
+            snapshot.playback.loop_end_ms
+        } else {
+            snapshot.current_item()?.duration_ms
+        };
+        if end == 0 {
+            return None;
+        }
+        let position = snapshot.playback.position_at(now_ms);
+        if position >= end {
+            return Some(now_ms);
+        }
+        let rate = f64::from(snapshot.playback.rate);
+        if !rate.is_finite() || rate <= 0.0 {
+            return None;
+        }
+        let remaining = ((end - position) as f64 / rate).ceil();
+        Some(now_ms.saturating_add(remaining as u64))
+    }
+
     /// Advance the queue when the current item has played to its end.
     /// Called on a timer; returns the new snapshot when something changed.
     pub fn tick_advance(&mut self, now_ms: u64) -> Option<RoomSnapshot> {

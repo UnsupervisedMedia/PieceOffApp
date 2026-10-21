@@ -178,6 +178,22 @@ impl Room {
             .unwrap_or(false)
     }
 
+    /// Milliseconds timestamp (same clock as `now_ms`) when `tick` will next
+    /// advance the queue, or -1 when nothing will advance on its own.
+    pub fn next_tick_deadline(&self, now_ms: f64) -> f64 {
+        self.runtime
+            .next_tick_deadline(clock(now_ms))
+            .map_or(-1.0, |deadline| deadline as f64)
+    }
+
+    /// Record a player whose WebSocket survived hibernation, without the
+    /// checks `join` makes. Used when rebuilding a room from storage.
+    pub fn restore_player(&mut self, client_id: &str, name: &str) {
+        self.runtime
+            .names
+            .insert(client_id.to_owned(), pieceoff_core::clean_name(name));
+    }
+
     pub fn peer_count(&self) -> u32 {
         self.runtime.names.len() as u32
     }
@@ -346,5 +362,14 @@ mod tests {
         assert!(!Room::visible_to(token, "b"));
         assert!(Room::visible_to(r#"{"type":"peer_left","name":"n"}"#, "b"));
         assert!(!Room::visible_to("garbage", "b"));
+    }
+
+    #[test]
+    fn restore_player_rebuilds_the_roster_and_deadline_is_exposed() {
+        let mut room = created();
+        assert_eq!(room.peer_count(), 0);
+        room.restore_player("p1", "Pat");
+        assert_eq!(room.peer_count(), 1);
+        assert_eq!(room.next_tick_deadline(0.0), -1.0);
     }
 }
