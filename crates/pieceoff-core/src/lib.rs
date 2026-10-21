@@ -4,6 +4,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod sanitize;
+pub use sanitize::{clean_media_extension, clean_name, clean_title};
+
 pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_QUEUE_ITEMS: usize = 64;
 pub const MAX_MEDIA_DIMENSION: u32 = 8192;
