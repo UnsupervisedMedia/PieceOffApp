@@ -4,6 +4,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod apply;
+pub use apply::ApplyOutcome;
+mod sanitize;
+pub use sanitize::{clean_media_extension, clean_name, clean_title};
+
 pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_QUEUE_ITEMS: usize = 64;
 pub const MAX_MEDIA_DIMENSION: u32 = 8192;
@@ -1551,6 +1556,9 @@ impl RoomRuntime {
     ) -> Result<RoomSnapshot, String> {
         let snapshot = self.queue_guard(client_id)?;
         let len = snapshot.queue.len();
+        if len == 0 {
+            return Err("The queue is empty".into());
+        }
         let index = if forward {
             (snapshot.current + 1) % len
         } else {

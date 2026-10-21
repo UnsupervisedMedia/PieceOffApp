@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/pieceoff-core", "crates/pieceoff-app", "crates/pieceoff-server"]
+members = [
+    "crates/pieceoff-core",
+    "crates/pieceoff-app",
+    "crates/pieceoff-server",
+    "crates/pieceoff-room-wasm",
+]
 resolver = "3"
 
 [workspace.package]
