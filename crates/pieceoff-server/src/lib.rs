@@ -819,16 +819,6 @@ async fn websocket_handler(
         .on_upgrade(move |socket| handle_socket(socket, state, address, slot))
 }
 
-fn message_is_visible_to_client(message: &ServerMessage, client_id: &str) -> bool {
-    !matches!(
-        message,
-        ServerMessage::MediaUploadToken {
-            client_id: recipient,
-            ..
-        } if recipient != client_id
-    )
-}
-
 async fn handle_socket(
     mut socket: WebSocket,
     state: AppState,
@@ -937,7 +927,7 @@ async fn handle_socket(
             }
             event = events.recv() => match event {
                 Ok(packet) => {
-                    if message_is_visible_to_client(&packet, &client_id)
+                    if packet.visible_to(&client_id)
                         && send(&mut socket, &packet).await.is_err()
                     {
                         break
@@ -1159,124 +1149,9 @@ async fn dispatch(
     // the lock was released let two players' moves overtake each other, and a
     // client then dropped the older one.
     let mut runtime = room.runtime.lock().await;
-    let (event, persist) = match message {
-        ClientMessage::DragStart { piece_id } => {
-            let (pieces, revision) = runtime.acquire(client_id, piece_id)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragStartSelection { piece_ids } => {
-            let (pieces, revision) = runtime.acquire_selection(client_id, &piece_ids)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::MovePiece { piece_id, x, y } => {
-            let (pieces, revision) = runtime.move_piece(client_id, piece_id, x, y, false)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragEnd { piece_id, x, y } => {
-            let (pieces, revision) = runtime.move_piece(client_id, piece_id, x, y, true)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::MoveSelection {
-            anchor_piece_id,
-            x,
-            y,
-        } => {
-            let (pieces, revision) =
-                runtime.move_selection(client_id, anchor_piece_id, x, y, false)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragEndSelection {
-            anchor_piece_id,
-            x,
-            y,
-        } => {
-            let (pieces, revision) =
-                runtime.move_selection(client_id, anchor_piece_id, x, y, true)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::SetPlayback {
-            playing,
-            position_ms,
-            rate,
-            loop_start_ms,
-            loop_end_ms,
-        } => {
-            let (playback, revision) = runtime.set_playback(
-                client_id,
-                playing,
-                position_ms,
-                rate,
-                loop_start_ms,
-                loop_end_ms,
-                now_ms(),
-            )?;
-            (ServerMessage::PlaybackChanged { playback, revision }, true)
-        }
-        ClientMessage::RestartPuzzle => {
-            let (pieces, revision) = runtime.restart(client_id, now_ms() as u32)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::RearrangeTray { arrangement } => {
-            let (pieces, revision) = runtime.rearrange_tray(arrangement, now_ms() as u32)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::QueueAdd {
-            sha256,
-            extension,
-            title,
-            width,
-            height,
-            duration_ms,
-        } => {
-            let item = MediaItem {
-                sha256: sha256.to_ascii_lowercase(),
-                extension: clean_media_extension(&extension)?,
-                title: clean_title(&title),
-                width,
-                height,
-                duration_ms,
-                available: false,
-                position_ms: 0,
-                loop_start_ms: 0,
-                loop_end_ms: 0,
-            };
-            let snapshot = runtime.queue_add(client_id, item)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::QueueRemove { index } => {
-            let snapshot = runtime.queue_remove(client_id, index, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::QueueMove { from, to } => {
-            let snapshot = runtime.queue_move(client_id, from, to)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SelectItem { index } => {
-            let snapshot = runtime.select_item(client_id, index, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::NextItem => {
-            let snapshot = runtime.step_item(client_id, true, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::PrevItem => {
-            let snapshot = runtime.step_item(client_id, false, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SetRepeat { mode } => {
-            let snapshot = runtime.set_repeat(client_id, mode)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SetVideoLock { locked } => {
-            let snapshot = runtime.set_video_lock(client_id, locked)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
-            return Err("Already joined a room".into());
-        }
-    };
-    let _ = room.events.send(event);
-    Ok(persist)
+    let outcome = runtime.apply(client_id, message, now_ms())?;
+    let _ = room.events.send(outcome.event);
+    Ok(outcome.persist)
 }
 
 async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
@@ -1839,8 +1714,8 @@ mod tests {
             token,
             sha256: None,
         };
-        assert!(message_is_visible_to_client(&message, "next-host"));
-        assert!(!message_is_visible_to_client(&message, "another-player"));
+        assert!(message.visible_to("next-host"));
+        assert!(!message.visible_to("another-player"));
     }
 
     #[tokio::test]
