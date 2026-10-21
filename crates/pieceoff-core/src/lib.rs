@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod apply;
+pub use apply::ApplyOutcome;
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title};
 
