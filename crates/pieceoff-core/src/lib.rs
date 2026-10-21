@@ -4,7 +4,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
+/// Longest chat line, in characters, after the server tidies it.
+pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
 pub const MAX_MEDIA_DIMENSION: u32 = 8192;
 pub const MAX_MEDIA_PIXELS: u64 = 40_000_000;
@@ -883,6 +885,30 @@ pub enum ClientMessage {
     },
     /// The pointer left the table or the window lost focus.
     CursorHidden,
+    /// A line of room chat. The server tidies it, stamps the sender and
+    /// time, and sends it to everyone in the room, the sender included.
+    Chat {
+        text: String,
+    },
+    /// "Look here": a marker at a spot on the table, in board coordinates,
+    /// shown to everyone for a few seconds. Relayed and never stored.
+    Ping {
+        x: f32,
+        y: f32,
+    },
+}
+
+/// One line of room chat as the server relays it. Kept in the room's memory
+/// for players who join later, never in the saved snapshot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatLine {
+    /// Counts up from 1 in each room while the server runs.
+    pub id: u64,
+    pub client_id: String,
+    pub name: String,
+    pub text: String,
+    /// Server clock, milliseconds since the Unix epoch.
+    pub sent_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -935,6 +961,36 @@ pub enum ServerMessage {
     CursorHidden {
         client_id: String,
     },
+    /// A chat line, sent to everyone including its author.
+    Chat(ChatLine),
+    /// Recent chat, oldest first, sent once right after `Welcome`.
+    ChatHistory {
+        lines: Vec<ChatLine>,
+    },
+    /// A player's marker on the table, sent to everyone including them.
+    Ping {
+        client_id: String,
+        name: String,
+        x: f32,
+        y: f32,
+    },
+}
+
+/// Tidy a chat line the way the server does: line breaks become spaces,
+/// other control and text-direction characters go, surrounding space is trimmed, and it is cut to
+/// `MAX_CHAT_CHARS`. `None` when nothing is left to say.
+pub fn clean_chat_text(text: &str) -> Option<String> {
+    let text: String = text
+        .chars()
+        // Line breaks and tabs become spaces so words stay apart.
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect();
+    let text: String = text.trim().chars().take(MAX_CHAT_CHARS).collect();
+    let text = text.trim_end();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 #[derive(Default)]
@@ -2716,5 +2772,84 @@ mod cursor_tests {
         assert!(!scene.contains(0.0, scene.min_y - 1.0));
         assert!(!scene.contains(f32::NAN, 0.0));
         assert!(!scene.contains(0.0, f32::INFINITY));
+    }
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn chat_and_ping_messages_round_trip_in_the_wire_format() {
+        let sent = ClientMessage::Chat { text: "hi".into() };
+        let text = serde_json::to_string(&sent).unwrap();
+        assert_eq!(text, r#"{"type":"chat","text":"hi"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&text).unwrap(),
+            ClientMessage::Chat { text } if text == "hi"
+        ));
+        let ping = serde_json::to_string(&ClientMessage::Ping { x: 1.5, y: 2.0 }).unwrap();
+        assert_eq!(ping, r#"{"type":"ping","x":1.5,"y":2.0}"#);
+
+        let line = ChatLine {
+            id: 7,
+            client_id: "a".into(),
+            name: "Ada".into(),
+            text: "corner piece?".into(),
+            sent_at_ms: 1_700_000_000_000,
+        };
+        let text = serde_json::to_string(&ServerMessage::Chat(line.clone())).unwrap();
+        assert_eq!(
+            text,
+            r#"{"type":"chat","id":7,"client_id":"a","name":"Ada","text":"corner piece?","sent_at_ms":1700000000000}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+            ServerMessage::Chat(back) => assert_eq!(back, line),
+            other => panic!("unexpected {other:?}"),
+        }
+        let history = ServerMessage::ChatHistory {
+            lines: vec![line.clone()],
+        };
+        match serde_json::from_str::<ServerMessage>(&serde_json::to_string(&history).unwrap())
+            .unwrap()
+        {
+            ServerMessage::ChatHistory { lines } => assert_eq!(lines, vec![line]),
+            other => panic!("unexpected {other:?}"),
+        }
+        let relayed = ServerMessage::Ping {
+            client_id: "a".into(),
+            name: "Ada".into(),
+            x: 3.0,
+            y: 4.0,
+        };
+        match serde_json::from_str::<ServerMessage>(&serde_json::to_string(&relayed).unwrap())
+            .unwrap()
+        {
+            ServerMessage::Ping { name, x, y, .. } => {
+                assert_eq!((name.as_str(), x, y), ("Ada", 3.0, 4.0))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_text_is_trimmed_stripped_and_bounded() {
+        assert_eq!(clean_chat_text("  hello  ").as_deref(), Some("hello"));
+        assert_eq!(clean_chat_text("a\nb\tc\u{0}").as_deref(), Some("a b c"));
+        assert_eq!(
+            clean_chat_text("\u{202e}evil\u{2066}").as_deref(),
+            Some("evil")
+        );
+        assert_eq!(clean_chat_text(""), None);
+        assert_eq!(clean_chat_text(" \n\t "), None);
+        assert_eq!(clean_chat_text("\u{7}"), None);
+        let long = "é".repeat(MAX_CHAT_CHARS + 50);
+        assert_eq!(
+            clean_chat_text(&long).unwrap().chars().count(),
+            MAX_CHAT_CHARS
+        );
+        // Cutting never leaves trailing space.
+        let spaced = format!("{} tail", "x".repeat(MAX_CHAT_CHARS - 1));
+        assert!(!clean_chat_text(&spaced).unwrap().ends_with(' '));
     }
 }
