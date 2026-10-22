@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { handleMedia } from "./media";
 import { RoomDO } from "./room";
 
 export { RoomDO };
@@ -66,6 +67,12 @@ export default {
     if (url.pathname === "/health") return new Response("PieceOff rooms are running");
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       return createRoom(request, env);
+    }
+    const media = url.pathname.match(/^\/api\/rooms\/([^/]+)\/media(\/.*)?$/);
+    if (media) {
+      const code = media[1]!.toUpperCase();
+      if (!CODE_RE.test(code)) return json({ error: "Room code not found" }, 404);
+      return handleMedia(request, env, code, media[2] ?? "");
     }
     if (url.pathname === "/ws") {
       const code = (url.searchParams.get("code") ?? "").trim().toUpperCase();

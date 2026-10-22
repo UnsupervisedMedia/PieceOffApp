@@ -5,6 +5,7 @@
   "durable_objects": {
     "bindings": [{ "name": "ROOMS", "class_name": "RoomDO" }]
   },
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "pieceoff-media" }],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO"] }],
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }]
 }
