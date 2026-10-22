@@ -776,6 +776,73 @@ mod tests {
     }
 
     #[test]
+    fn the_host_releases_an_absent_players_name_and_holders() {
+        let mut room = room();
+        room.admit_player("ada", "Ada", Some("ka"), 0).unwrap();
+        create(&mut room, "ada", SPOT).unwrap();
+        drop_at(&mut room, "ada", 5, 300.0, 1000.0);
+        let release = || ClientMessage::ReleaseName { name: "ADA".into() };
+        // Not while she is in the room, and never by anyone but the host.
+        assert!(
+            room.apply("host", release(), 0)
+                .unwrap_err()
+                .contains("is in the room")
+        );
+        room.names.remove("ada");
+        assert_eq!(
+            room.apply("bo", release(), 0).unwrap_err(),
+            "Only the host can release a name"
+        );
+        assert_eq!(snapshot(&room).holders.len(), 1);
+        assert_eq!(room.name_claims.len(), 1);
+        let revision = snapshot(&room).revision;
+        let out = room.apply("host", release(), 0).unwrap();
+        assert!(out.persist);
+        let ServerMessage::PiecesChanged {
+            revision: sent,
+            holders,
+            ..
+        } = out.event
+        else {
+            panic!("a release is announced with the holders")
+        };
+        assert_eq!((sent, holders), (revision + 1, Some(Vec::new())));
+        assert!(room.name_claims.is_empty());
+        // Her pieces are free and so is her name.
+        room.apply("bo", ClientMessage::DragStart { piece_id: 5 }, 0)
+            .unwrap();
+        room.admit_player("new", "Ada", Some("other"), 1).unwrap();
+        room.names.remove("new");
+        room.name_claims.clear();
+        assert!(
+            room.apply("host", release(), 0)
+                .unwrap_err()
+                .starts_with("Nothing is held")
+        );
+    }
+
+    #[test]
+    fn a_lapsing_claim_takes_its_holders_with_it() {
+        let mut room = room();
+        room.admit_player("ada", "Ada", Some("ka"), 0).unwrap();
+        create(&mut room, "ada", SPOT).unwrap();
+        room.names.remove("ada");
+        room.tick_claims(1_000);
+        // Even if the holder's own stamp were later, it goes with the claim.
+        room.tick_holders(2_000).unwrap();
+        assert!(room.tick_claims(1_000 + HOLDER_GRACE_MS));
+        let Some(ServerMessage::PiecesChanged {
+            holders: Some(holders),
+            ..
+        }) = room.tick_holders(1_000 + HOLDER_GRACE_MS)
+        else {
+            panic!("the release is announced")
+        };
+        assert!(holders.is_empty());
+        room.admit_player("bo2", "Ada", Some("kb"), 1).unwrap();
+    }
+
+    #[test]
     fn a_departed_owner_keeps_holders_for_the_grace_period_then_loses_them() {
         let mut room = room();
         create(&mut room, "ada", SPOT).unwrap();
