@@ -1110,6 +1110,7 @@ async fn handle_socket(
             peers,
             snapshot,
             media_upload_token,
+            server_now_ms: now_ms(),
         },
     )
     .await

@@ -928,6 +928,11 @@ pub enum ServerMessage {
         peers: Vec<String>,
         snapshot: RoomSnapshot,
         media_upload_token: Option<String>,
+        /// The server's wall clock when it sent this, so clients can show
+        /// server-stamped times (the solve clock, chat ages) without trusting
+        /// their own clock. Zero when unknown.
+        #[serde(default)]
+        server_now_ms: u64,
     },
     Snapshot {
         snapshot: RoomSnapshot,
@@ -1769,6 +1774,40 @@ fn find_neighbor_merge(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn welcome_server_clock_defaults_to_unknown() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "WEL123".into(),
+            "Welcome".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            2,
+            2,
+            "host".into(),
+        )
+        .unwrap();
+        let welcome = ServerMessage::Welcome {
+            client_id: "c".into(),
+            name: "n".into(),
+            peers: Vec::new(),
+            snapshot,
+            media_upload_token: None,
+            server_now_ms: 42,
+        };
+        // An older server sends no server_now_ms; it parses as unknown (0).
+        let text = serde_json::to_string(&welcome)
+            .unwrap()
+            .replace(",\"server_now_ms\":42", "");
+        assert!(!text.contains("server_now_ms"));
+        match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+            ServerMessage::Welcome { server_now_ms, .. } => assert_eq!(server_now_ms, 0),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     use super::*;
 
     fn queue_room() -> RoomRuntime {

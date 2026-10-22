@@ -157,6 +157,7 @@ fn accepted_room_welcome_is_saved_and_can_refill_the_rejoin_form() {
             peers: Vec::new(),
             snapshot,
             media_upload_token: None,
+            server_now_ms: 0,
         })
         .unwrap();
 
@@ -2481,6 +2482,7 @@ fn player_list_tracks_peers_and_skips_our_own_join_echo() {
             peers: vec!["Ana".into()],
             snapshot,
             media_upload_token: None,
+            server_now_ms: 0,
         },
         joined("Me"),
         joined("Bo"),
