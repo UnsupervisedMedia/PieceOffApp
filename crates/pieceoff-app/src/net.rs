@@ -226,6 +226,7 @@ impl PieceOffApp {
                     {
                         self.selected_pieces.clear();
                         self.show_reference = false;
+                        self.chat.reset();
                     }
                     self.client_id = Some(client_id);
                     self.peers.clone_from(&peers);
@@ -342,10 +343,12 @@ impl PieceOffApp {
                         continue;
                     }
                     self.status = format!("{name} joined the puzzle.");
+                    self.chat.note(format!("{name} joined"));
                     self.peers.push(name);
                 }
                 ServerMessage::PeerLeft { name } => {
                     self.status = format!("{name} left. Their pieces are free to move.");
+                    self.chat.note(format!("{name} left"));
                     if let Some(index) = self.peers.iter().position(|peer| *peer == name) {
                         self.peers.remove(index);
                     }
@@ -366,6 +369,9 @@ impl PieceOffApp {
                             restarted =
                                 everything && had_progress && snapshot.progress_percent() == 0;
                         }
+                    }
+                    if restarted {
+                        self.chat.note("The puzzle was restarted");
                     }
                     if restarted && !is_host {
                         self.status = "The host restarted the puzzle.".into();
@@ -412,6 +418,18 @@ impl PieceOffApp {
                     }
                 }
                 ServerMessage::CursorHidden { client_id } => self.cursors.hide(&client_id),
+                ServerMessage::Chat(line) => {
+                    let own = self.client_id.clone();
+                    self.chat.receive(line, own.as_deref());
+                }
+                ServerMessage::ChatHistory { lines } => {
+                    self.chat.history(lines, &self.player_name);
+                }
+                ServerMessage::Ping { name, x, y, .. } => {
+                    let now = ctx.input(|input| input.time);
+                    self.chat.add_ping(name, x, y, now);
+                    ctx.request_repaint();
+                }
                 ServerMessage::Error { message } => {
                     if message.starts_with("Could not upload room media:") {
                         self.media_uploading = false;

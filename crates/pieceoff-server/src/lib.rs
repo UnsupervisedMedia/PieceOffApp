@@ -16,8 +16,8 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, SceneBounds,
-    ServerMessage, clean_media_extension, valid_media_dimensions, valid_sha256,
+    ChatLine, ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, SceneBounds,
+    ServerMessage, clean_chat_text, clean_media_extension, valid_media_dimensions, valid_sha256,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -116,18 +116,83 @@ const CURSOR_BUFFER: usize = 64;
 /// connections, so many sockets cannot multiply the per-player rate.
 const ROOM_CURSOR_UPDATES_PER_SECOND: f64 = 120.0;
 
+/// Chat lines and pings allowed for a whole room, for the same reason.
+const ROOM_CHAT_PER_SECOND: f64 = 10.0;
+const ROOM_CHAT_BURST: f64 = 20.0;
+
+fn room_cursor_budget() -> TokenBucket {
+    TokenBucket::new(
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        Instant::now(),
+    )
+}
+
+fn room_chat_budget() -> TokenBucket {
+    TokenBucket::new(ROOM_CHAT_PER_SECOND, ROOM_CHAT_BURST, Instant::now())
+}
+
+/// Spend one token from a room-wide budget.
+fn take_room(budget: &std::sync::Mutex<TokenBucket>, now: Instant) -> bool {
+    budget
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .try_take_at(now)
+}
+
 /// Live cursor updates allowed per player: the client sends about 15 a second.
 const CURSOR_UPDATES_PER_SECOND: f64 = 20.0;
 const CURSOR_BURST: f64 = 20.0;
+
+/// Chat lines allowed per player: a burst of five, then one a second.
+const CHAT_LINES_PER_SECOND: f64 = 1.0;
+const CHAT_BURST: f64 = 5.0;
+/// Board pings allowed per player: a burst of three, then one a second.
+const PINGS_PER_SECOND: f64 = 1.0;
+const PING_BURST: f64 = 3.0;
+/// Chat lines a room remembers for players who join later. Only in memory:
+/// chat is never written to the room snapshot.
+const CHAT_HISTORY: usize = 100;
+const CHAT_TOO_FAST: &str = "You are sending chat messages too quickly. Wait a moment.";
+
+/// Recent chat in one room.
+#[derive(Default)]
+struct ChatLog {
+    next_id: u64,
+    lines: std::collections::VecDeque<ChatLine>,
+}
+
+/// Per-connection allowances for the messages that are relayed rather than
+/// applied to the room.
+struct RelayBudgets {
+    cursor: TokenBucket,
+    chat: TokenBucket,
+    ping: TokenBucket,
+}
+
+impl RelayBudgets {
+    fn new(now: Instant) -> Self {
+        Self {
+            cursor: TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, now),
+            chat: TokenBucket::new(CHAT_LINES_PER_SECOND, CHAT_BURST, now),
+            ping: TokenBucket::new(PINGS_PER_SECOND, PING_BURST, now),
+        }
+    }
+}
 
 struct RoomRecord {
     runtime: Mutex<RoomRuntime>,
     events: broadcast::Sender<ServerMessage>,
     cursors: broadcast::Sender<ServerMessage>,
     cursor_budget: std::sync::Mutex<TokenBucket>,
+    chat_budget: std::sync::Mutex<TokenBucket>,
     persist_lock: Mutex<()>,
     media_upload_token: Mutex<Option<String>>,
     last_activity: Arc<Mutex<SystemTime>>,
+    /// Held while a chat line is both recorded and broadcast, and while a
+    /// joiner subscribes and copies the history, so each line reaches a
+    /// joiner exactly once.
+    chat: std::sync::Mutex<ChatLog>,
 }
 
 impl RoomRecord {
@@ -138,9 +203,11 @@ impl RoomRecord {
             events,
             cursors: broadcast::channel(CURSOR_BUFFER).0,
             cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
+            chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(media_upload_token),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
+            chat: std::sync::Mutex::new(ChatLog::default()),
         }
     }
 
@@ -151,9 +218,11 @@ impl RoomRecord {
             events,
             cursors: broadcast::channel(CURSOR_BUFFER).0,
             cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
+            chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(None),
             last_activity: Arc::new(Mutex::new(last_activity)),
+            chat: std::sync::Mutex::new(ChatLog::default()),
         }
     }
 
@@ -878,59 +947,121 @@ async fn websocket_handler(
         })
 }
 
-/// Relay a live cursor message to the rest of the room. Cursors are not
-/// room state: nothing is stored or persisted, and an update that is off the
+/// Relay the messages that are not room state: live cursors, chat, and
+/// board pings. Nothing here is persisted. A cursor or ping that is off the
 /// table or over the player's rate is dropped without a reply (an error would
-/// cost a full snapshot). Returns false for any other message.
-fn room_cursor_budget() -> TokenBucket {
-    TokenBucket::new(
-        ROOM_CURSOR_UPDATES_PER_SECOND,
-        ROOM_CURSOR_UPDATES_PER_SECOND,
-        Instant::now(),
-    )
-}
-
-fn relay_cursor(
+/// cost a full snapshot); a chat line over the rate is refused with an error
+/// so the player knows it was not sent. Returns `None` for any other message,
+/// which goes on to `dispatch`.
+fn relay_ephemeral(
     room: &RoomRecord,
     client_id: &str,
     name: &str,
     table: &SceneBounds,
-    budget: &mut TokenBucket,
+    budgets: &mut RelayBudgets,
     message: &ClientMessage,
     now: Instant,
-) -> bool {
-    let (packet, valid) = match *message {
+) -> Option<Result<(), String>> {
+    let (packet, valid, budget) = match message {
         ClientMessage::Cursor { x, y } => (
             ServerMessage::Cursor {
                 client_id: client_id.to_owned(),
                 name: name.to_owned(),
-                x,
-                y,
+                x: *x,
+                y: *y,
             },
-            table.contains(x, y),
+            table.contains(*x, *y),
+            &mut budgets.cursor,
         ),
         ClientMessage::CursorHidden => (
             ServerMessage::CursorHidden {
                 client_id: client_id.to_owned(),
             },
             true,
+            &mut budgets.cursor,
         ),
-        _ => return false,
+        ClientMessage::Ping { x, y } => (
+            ServerMessage::Ping {
+                client_id: client_id.to_owned(),
+                name: name.to_owned(),
+                x: *x,
+                y: *y,
+            },
+            table.contains(*x, *y),
+            &mut budgets.ping,
+        ),
+        ClientMessage::Chat { text } => {
+            // Nothing worth saying is not worth a refusal either.
+            let Some(text) = clean_chat_text(text) else {
+                return Some(Ok(()));
+            };
+            if !budgets.chat.try_take_at(now) || !take_room(&room.chat_budget, now) {
+                return Some(Err(CHAT_TOO_FAST.into()));
+            }
+            post_chat(room, client_id, name, text);
+            return Some(Ok(()));
+        }
+        _ => return None,
     };
     if !valid {
-        return true;
+        return Some(Ok(()));
     }
     // Every update spends the player's budget and the room's, so opening
-    // more sockets cannot multiply the rate.
-    let allowed = budget.try_take_at(now)
-        && room
-            .cursor_budget
-            .lock()
-            .is_ok_and(|mut room_budget| room_budget.try_take_at(now));
-    if allowed {
-        let _ = room.cursors.send(packet);
+    // more sockets cannot multiply the rate. Cursors go on their own
+    // channel; pings are rare and ride with room events.
+    let is_ping = matches!(packet, ServerMessage::Ping { .. });
+    let room_budget = if is_ping {
+        &room.chat_budget
+    } else {
+        &room.cursor_budget
+    };
+    if budget.try_take_at(now) && take_room(room_budget, now) {
+        let channel = if is_ping { &room.events } else { &room.cursors };
+        let _ = channel.send(packet);
     }
-    true
+    Some(Ok(()))
+}
+
+/// A copy of the room's remembered chat lines.
+fn chat_lines(room: &RoomRecord) -> Vec<ChatLine> {
+    room.chat
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .lines
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// Stamp, remember, and broadcast one chat line.
+fn post_chat(room: &RoomRecord, client_id: &str, name: &str, text: String) {
+    let mut log = room
+        .chat
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    log.next_id += 1;
+    let line = ChatLine {
+        id: log.next_id,
+        client_id: client_id.to_owned(),
+        name: name.to_owned(),
+        text,
+        sent_at_ms: now_ms(),
+    };
+    if log.lines.len() >= CHAT_HISTORY {
+        log.lines.pop_front();
+    }
+    log.lines.push_back(line.clone());
+    let _ = room.events.send(ServerMessage::Chat(line));
+}
+
+/// Subscribe to the room's events and copy its chat so far, as one step: a
+/// line posted meanwhile arrives either in the history or as an event.
+fn subscribe_with_chat(room: &RoomRecord) -> (broadcast::Receiver<ServerMessage>, Vec<ChatLine>) {
+    let log = room
+        .chat
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (room.events.subscribe(), log.lines.iter().cloned().collect())
 }
 
 async fn handle_socket(
@@ -981,7 +1112,7 @@ async fn handle_socket(
         }
     };
     persist_room(&state, &room).await;
-    let mut events = room.events.subscribe();
+    let (mut events, chat_history) = subscribe_with_chat(&room);
     let mut cursor_events = room.cursors.subscribe();
     let welcome = {
         let runtime = room.runtime.lock().await;
@@ -997,13 +1128,26 @@ async fn handle_socket(
         .as_ref()
         .expect("room snapshot exists")
         .scene_bounds();
-    let mut cursor_budget =
-        TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, Instant::now());
+    let mut relay_budgets = RelayBudgets::new(Instant::now());
     let sent = match welcome {
         Ok(welcome) => send(&mut socket, &welcome).await.is_ok(),
         Err(_) => false,
     };
     if !sent {
+        remove_peer(&room, &client_id, &name).await;
+        persist_room(&state, &room).await;
+        return;
+    }
+    if !chat_history.is_empty()
+        && send(
+            &mut socket,
+            &ServerMessage::ChatHistory {
+                lines: chat_history,
+            },
+        )
+        .await
+        .is_err()
+    {
         remove_peer(&room, &client_id, &name).await;
         persist_room(&state, &room).await;
         return;
@@ -1039,6 +1183,14 @@ async fn handle_socket(
                     if let Some(snapshot) = room.runtime.lock().await.snapshot.clone() {
                         if send(&mut socket, &ServerMessage::Snapshot { snapshot }).await.is_err() { break }
                     }
+                    // Missed chat lines are not in the snapshot; resend the
+                    // history (clients merge it by line id).
+                    let lines = chat_lines(&room);
+                    if !lines.is_empty()
+                        && send(&mut socket, &ServerMessage::ChatHistory { lines }).await.is_err()
+                    {
+                        break
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -1060,8 +1212,13 @@ async fn handle_socket(
                         let _ = send(&mut socket, &ServerMessage::Error { message: "Invalid message".into() }).await;
                         continue;
                     };
-                    if relay_cursor(&room, &client_id, &name, &table, &mut cursor_budget, &message, Instant::now()) {
-                        continue;
+                    match relay_ephemeral(&room, &client_id, &name, &table, &mut relay_budgets, &message, Instant::now()) {
+                        Some(Ok(())) => continue,
+                        Some(Err(message)) => {
+                            let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                            continue;
+                        }
+                        None => {}
                     }
                     let queued_sha = match &message {
                         ClientMessage::QueueAdd { sha256, .. } => Some(sha256.to_ascii_lowercase()),
@@ -1891,9 +2048,9 @@ mod tests {
         room.runtime.lock().await.snapshot = Some(snapshot.clone());
         let mut events = room.cursors.subscribe();
         let start = Instant::now();
-        let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, start);
+        let mut budgets = RelayBudgets::new(start);
         let mut relay = |message: ClientMessage, now: Instant| {
-            relay_cursor(&room, "ada", "Ada", &table, &mut budget, &message, now)
+            relay_ephemeral(&room, "ada", "Ada", &table, &mut budgets, &message, now).is_some()
         };
 
         assert!(relay(ClientMessage::Cursor { x: 10.0, y: -4.0 }, start));
@@ -1994,15 +2151,15 @@ mod tests {
         // Twenty sockets, each with a fresh per-player budget, all at once.
         let mut sent = 0;
         for socket in 0..20 {
-            let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, now);
+            let mut budgets = RelayBudgets::new(now);
             let id = format!("p{socket}");
             for _ in 0..CURSOR_BURST as usize {
-                relay_cursor(
+                relay_ephemeral(
                     &room,
                     &id,
                     "P",
                     &table,
-                    &mut budget,
+                    &mut budgets,
                     &ClientMessage::Cursor { x: 1.0, y: 1.0 },
                     now,
                 );
@@ -2018,6 +2175,41 @@ mod tests {
         );
         // Cursor traffic never lands on the room event channel.
         assert!(room_events.try_recv().is_err());
+    }
+
+    #[test]
+    fn many_connections_share_one_room_chat_budget() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "CHT124".into(),
+            "Chat".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let table = snapshot.scene_bounds();
+        let room = RoomRecord::new(None);
+        let now = Instant::now();
+        let mut sent = 0;
+        for socket in 0..20 {
+            let mut budgets = RelayBudgets::new(now);
+            let id = format!("p{socket}");
+            for _ in 0..5 {
+                let chat = ClientMessage::Chat { text: "hi".into() };
+                if let Some(Ok(())) =
+                    relay_ephemeral(&room, &id, "P", &table, &mut budgets, &chat, now)
+                {
+                    sent += 1;
+                }
+            }
+        }
+        assert_eq!(sent, ROOM_CHAT_BURST as usize);
+        assert_eq!(chat_lines(&room).len(), ROOM_CHAT_BURST as usize);
     }
 
     #[tokio::test]
@@ -2067,6 +2259,199 @@ mod tests {
         drop(host);
         let gone = read_message(&mut guest, "cursor_hidden").await;
         assert_eq!(gone["client_id"], host_id.as_str());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn chat_and_pings_are_validated_rate_limited_kept_in_memory_and_never_stored() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "CHAT1234".into(),
+            "Chat".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let table = snapshot.scene_bounds();
+        let room = Arc::new(RoomRecord::new(None));
+        room.runtime.lock().await.snapshot = Some(snapshot.clone());
+        let mut events = room.events.subscribe();
+        let start = Instant::now();
+        let mut budgets = RelayBudgets::new(start);
+        let mut relay = |message: ClientMessage, now: Instant| {
+            relay_ephemeral(&room, "ada", "Ada", &table, &mut budgets, &message, now)
+        };
+        let chat = |text: &str| ClientMessage::Chat { text: text.into() };
+
+        // Tidied, stamped, and sent to everyone, the author included.
+        assert_eq!(relay(chat("  hello\nthere\u{7} "), start), Some(Ok(())));
+        let line = match events.try_recv().unwrap() {
+            ServerMessage::Chat(line) => line,
+            other => panic!("unexpected event {other:?}"),
+        };
+        assert_eq!(
+            (line.id, line.client_id.as_str(), line.name.as_str()),
+            (1, "ada", "Ada")
+        );
+        assert_eq!(line.text, "hello there");
+        assert!(line.sent_at_ms > 0);
+        assert!(ServerMessage::Chat(line).visible_to("ada"));
+
+        // Blank lines go nowhere and cost nothing; long ones are cut.
+        assert_eq!(relay(chat(" \n\t "), start), Some(Ok(())));
+        assert!(events.try_recv().is_err());
+        assert_eq!(relay(chat(&"x".repeat(1000)), start), Some(Ok(())));
+        match events.try_recv().unwrap() {
+            ServerMessage::Chat(line) => {
+                assert_eq!(line.text.chars().count(), pieceoff_core::MAX_CHAT_CHARS)
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+
+        // A burst of five, then refused with a reason, then one a second.
+        for _ in 0..3 {
+            assert_eq!(relay(chat("spam"), start), Some(Ok(())));
+        }
+        assert_eq!(
+            relay(chat("spam"), start),
+            Some(Err(CHAT_TOO_FAST.to_owned()))
+        );
+        assert_eq!(
+            relay(chat("again"), start + Duration::from_millis(1100)),
+            Some(Ok(()))
+        );
+        let mut posted = 0;
+        while let Ok(event) = events.try_recv() {
+            assert!(matches!(event, ServerMessage::Chat(_)));
+            posted += 1;
+        }
+        assert_eq!(posted, 4);
+
+        // Pings: on the table only, to everyone, three then one a second.
+        assert_eq!(
+            relay(ClientMessage::Ping { x: 5.0, y: 6.0 }, start),
+            Some(Ok(()))
+        );
+        match events.try_recv().unwrap() {
+            ServerMessage::Ping {
+                client_id,
+                name,
+                x,
+                y,
+            } => assert_eq!(
+                (client_id.as_str(), name.as_str(), x, y),
+                ("ada", "Ada", 5.0, 6.0)
+            ),
+            other => panic!("unexpected event {other:?}"),
+        }
+        for (x, y) in [(table.max_x + 1.0, 0.0), (f32::NAN, 0.0)] {
+            assert_eq!(relay(ClientMessage::Ping { x, y }, start), Some(Ok(())));
+        }
+        assert!(events.try_recv().is_err(), "off-table pings are dropped");
+        for _ in 0..5 {
+            relay(ClientMessage::Ping { x: 1.0, y: 1.0 }, start);
+        }
+        let mut pinged = 0;
+        while events.try_recv().is_ok() {
+            pinged += 1;
+        }
+        assert_eq!(pinged, PING_BURST as usize - 1, "one was spent above");
+        let ping = ServerMessage::Ping {
+            client_id: "ada".into(),
+            name: "Ada".into(),
+            x: 0.0,
+            y: 0.0,
+        };
+        assert!(ping.visible_to("ada"));
+        drop(relay);
+
+        // Only the last hundred lines are kept, in memory, never on disk.
+        for index in 0..CHAT_HISTORY + 20 {
+            post_chat(&room, "bob", "Bob", format!("line {index}"));
+        }
+        let (_, history) = subscribe_with_chat(&room);
+        assert_eq!(history.len(), CHAT_HISTORY);
+        assert_eq!(
+            history.last().unwrap().text,
+            format!("line {}", CHAT_HISTORY + 19)
+        );
+        assert!(history.windows(2).all(|pair| pair[0].id < pair[1].id));
+        let stored = room.runtime.lock().await.snapshot.clone().unwrap();
+        assert_eq!(stored, snapshot);
+        assert!(!serde_json::to_string(&stored).unwrap().contains("line 1"));
+        // The socket loop relays chat before dispatch; the rules refuse it.
+        assert!(dispatch(&room, "ada", chat("hi")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn players_see_each_others_chat_and_pings_and_late_joiners_get_the_history() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-chat-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut host, code, hash) = queue_test_room(address, b"chat clip").await;
+        let join = |name: &str| {
+            Message::Text(
+                serde_json::json!({
+                    "type":"join_room", "invite_code":code, "name":name,
+                    "media_sha256":hash, "media_extension":""
+                })
+                .to_string()
+                .into(),
+            )
+        };
+        let (mut guest, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        guest.send(join("Guest")).await.unwrap();
+        read_message(&mut guest, "welcome").await;
+        read_message(&mut host, "peer_joined").await;
+
+        let say = |text: &str| {
+            Message::Text(
+                serde_json::json!({"type":"chat", "text":text})
+                    .to_string()
+                    .into(),
+            )
+        };
+        host.send(say("found the corner")).await.unwrap();
+        for socket in [&mut guest, &mut host] {
+            let line = read_message(socket, "chat").await;
+            assert_eq!(line["name"], "Host");
+            assert_eq!(line["text"], "found the corner");
+        }
+        host.send(Message::Text(
+            serde_json::json!({"type":"ping", "x":4.0, "y":5.0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        for socket in [&mut guest, &mut host] {
+            let ping = read_message(socket, "ping").await;
+            assert_eq!(ping["name"], "Host");
+            assert_eq!(
+                (ping["x"].as_f64(), ping["y"].as_f64()),
+                (Some(4.0), Some(5.0))
+            );
+        }
+        guest.send(say("nice")).await.unwrap();
+        read_message(&mut host, "chat").await;
+
+        // Someone joining later is told what was said, oldest first, before
+        // anything new.
+        let (mut late, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        late.send(join("Late")).await.unwrap();
+        read_message(&mut late, "welcome").await;
+        let history = read_message(&mut late, "chat_history").await;
+        let texts: Vec<_> = history["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(texts, ["found the corner", "nice"]);
         let _ = fs::remove_dir_all(data_dir);
     }
 

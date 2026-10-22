@@ -47,6 +47,7 @@ pub(crate) fn hex(bytes: impl AsRef<[u8]>) -> String {
 
 mod audio;
 mod board;
+mod chat;
 mod clip;
 mod controls;
 mod cursors;
@@ -68,6 +69,7 @@ mod ui;
 
 use audio::*;
 use board::*;
+use chat::*;
 use controls::*;
 use cursors::*;
 use decoder::*;
@@ -204,6 +206,8 @@ struct PieceOffApp {
     peers: Vec<String>,
     /// Other players' pointers, and what we last sent of our own.
     cursors: LiveCursors,
+    /// Room chat and board pings.
+    chat: RoomChat,
     help_open: bool,
     /// Pieces already seen in place, so newly placed ones can flash.
     placed_seen: std::collections::HashSet<u32>,
@@ -374,6 +378,7 @@ impl Default for PieceOffApp {
             last_drift_sync: Instant::now(),
             peers: Vec::new(),
             cursors: LiveCursors::default(),
+            chat: RoomChat::default(),
             help_open: false,
             placed_seen: std::collections::HashSet::new(),
             snap_flashes: Vec::new(),
@@ -1123,6 +1128,7 @@ impl PieceOffApp {
         self.snapshot = None;
         self.peers.clear();
         self.cursors.reset();
+        self.chat.reset();
         self.media_ready = false;
         self.media_uploading = false;
         self.client_id = None;
