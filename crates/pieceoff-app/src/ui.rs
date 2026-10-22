@@ -478,6 +478,7 @@ impl PieceOffApp {
                 self.settings.hide_solve_timer = !timer;
                 self.persist_settings();
             }
+            self.effects_controls(ui);
             if !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, "Reference image");
             }
@@ -1196,5 +1197,45 @@ impl PieceOffApp {
         if in_room || self.clip_plan.is_some() {
             self.show_toast(ctx);
         }
+    }
+}
+
+impl PieceOffApp {
+    /// The sound effects volume and mute, separate from the clip's audio.
+    fn effects_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Effects")
+                .on_hover_text("Snap, join, finish, chat and ping sounds");
+            ui.spacing_mut().slider_width = 110.0;
+            let mut volume = self.effects.volume;
+            let slider = ui
+                .add(egui::Slider::new(&mut volume, 0..=100).show_value(false))
+                .on_hover_text(format!("Effects volume {volume}%"));
+            if slider.changed() {
+                self.effects.set_level(volume, false);
+            }
+            let released = slider.drag_stopped() || (slider.changed() && !slider.dragged());
+            let silent = !self.effects.audible();
+            let toggled = ui
+                .button(RichText::new(if silent { "🔇" } else { "🔊" }).size(16.0))
+                .on_hover_text(if self.effects.muted {
+                    "Unmute effects"
+                } else {
+                    "Mute effects"
+                })
+                .clicked();
+            if toggled {
+                self.effects
+                    .set_level(self.effects.volume, !self.effects.muted);
+            }
+            if released || toggled {
+                self.settings.effects_volume = Some(self.effects.volume);
+                self.settings.effects_muted = self.effects.muted;
+                self.persist_settings();
+                // Let the new level be heard.
+                let now = ui.input(|input| input.time);
+                self.effects.play(Effect::Snap, now);
+            }
+        });
     }
 }

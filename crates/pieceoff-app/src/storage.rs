@@ -57,6 +57,10 @@ pub(crate) struct Settings {
     pub(crate) server_url: Option<String>,
     pub(crate) audio_volume: Option<u8>,
     pub(crate) audio_muted: bool,
+    /// Sound effects volume (0–100), separate from the clip's audio; clamped
+    /// on load. `None` means the default.
+    pub(crate) effects_volume: Option<u8>,
+    pub(crate) effects_muted: bool,
     pub(crate) video_quality: VideoQuality,
     /// Delay added to the audio, in milliseconds, for slow output devices.
     pub(crate) audio_offset_ms: i32,

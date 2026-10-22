@@ -54,6 +54,7 @@ mod playback;
 mod probe;
 mod queue_ui;
 mod server_addr;
+mod sfx;
 mod storage;
 mod transport;
 mod ui;
@@ -69,6 +70,7 @@ use net::*;
 use package::*;
 use playback::*;
 use probe::*;
+use sfx::*;
 use storage::*;
 use transport::*;
 use ui::*;
@@ -199,6 +201,8 @@ struct PieceOffApp {
     cursors: LiveCursors,
     /// Room chat and board pings.
     chat: RoomChat,
+    /// Snap, join, finish, chat and ping sounds, separate from the clip's audio.
+    effects: SoundEffects,
     help_open: bool,
     /// Pieces already seen in place, so newly placed ones can flash.
     placed_seen: std::collections::HashSet<u32>,
@@ -279,6 +283,7 @@ impl Default for PieceOffApp {
         };
         let (library, library_notice) = Library::load(library_dir);
         let controls = Controls::from_settings(&settings.keybindings);
+        let effects = SoundEffects::new(settings.effects_volume, settings.effects_muted);
         let (server_url, server_url_source) = server_addr::initial_server_url(
             settings.server_url.as_deref(),
             std::env::var("PIECEOFF_SERVER_URL").ok().as_deref(),
@@ -371,6 +376,7 @@ impl Default for PieceOffApp {
             peers: Vec::new(),
             cursors: LiveCursors::default(),
             chat: RoomChat::default(),
+            effects,
             help_open: false,
             placed_seen: std::collections::HashSet::new(),
             snap_flashes: Vec::new(),

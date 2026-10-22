@@ -4057,3 +4057,106 @@ fn a_players_colour_follows_their_name_so_it_survives_a_reconnect() {
     assert_eq!(chat.pings[0].color, before);
     assert_ne!(player_color("Ada"), player_color("Bob"));
 }
+
+#[test]
+fn room_events_play_snap_join_finish_chat_and_ping_effects_once() {
+    let mut rig = DragRig::new(3, 4);
+    let (cw, ch) = (rig.cw, rig.ch);
+    // Moving a piece somewhere empty is silent.
+    rig.drag(0, 2.0 * cw + 20.0, 1.0 * ch, egui::Modifiers::NONE);
+    assert!(
+        rig.app.effects.played.is_empty(),
+        "{:?}",
+        rig.app.effects.played
+    );
+    // Its neighbour joins it: one join, heard when the server confirms.
+    let anchor = rig.piece(0);
+    rig.drag(
+        1,
+        anchor.x + cw + 6.0,
+        anchor.y - 5.0,
+        egui::Modifiers::NONE,
+    );
+    assert_eq!(rig.app.effects.played, vec![Effect::Join]);
+    rig.app.effects.played.clear();
+    // Snapping into place clicks; the last piece chimes instead.
+    rig.drag_to_target(2);
+    assert_eq!(rig.app.effects.played, vec![Effect::Snap]);
+    for id in [0, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+        rig.drag_to_target(id);
+    }
+    assert!(rig.app.snapshot.as_ref().unwrap().completed());
+    assert_eq!(rig.app.effects.played.last(), Some(&Effect::Complete));
+    assert_eq!(
+        rig.app
+            .effects
+            .played
+            .iter()
+            .filter(|effect| **effect == Effect::Complete)
+            .count(),
+        1
+    );
+    rig.app.effects.played.clear();
+
+    // A restart scatters everything without a sound.
+    rig.app.restart_puzzle();
+    rig.relay();
+    assert!(!rig.app.snapshot.as_ref().unwrap().completed());
+    // A whole-room snapshot (join or lag resync) is silent too, even when
+    // it shows pieces placed that were loose here.
+    let mut resync = rig.room.snapshot.clone().unwrap();
+    resync.pieces[0].placed = true;
+    resync.revision += 1;
+    rig.incoming_tx
+        .send(ServerMessage::Snapshot { snapshot: resync })
+        .unwrap();
+    rig.relay();
+    assert!(
+        rig.app.effects.played.is_empty(),
+        "{:?}",
+        rig.app.effects.played
+    );
+
+    // Chat from others blips; our own lines and the history do not.
+    rig.frame(Vec::new());
+    for packet in [
+        ServerMessage::Chat(chat_line(1, "host", "Host", "mine")),
+        ServerMessage::ChatHistory {
+            lines: vec![chat_line(2, "ada", "Ada", "earlier")],
+        },
+        ServerMessage::Chat(chat_line(3, "ada", "Ada", "hi")),
+        // A burst inside the rate limit plays once.
+        ServerMessage::Chat(chat_line(4, "ada", "Ada", "hi again")),
+        ServerMessage::Ping {
+            client_id: "host".into(),
+            name: "Host".into(),
+            x: 1.0,
+            y: 1.0,
+        },
+    ] {
+        rig.incoming_tx.send(packet).unwrap();
+    }
+    rig.relay();
+    assert_eq!(rig.app.effects.played, vec![Effect::Chat, Effect::Ping]);
+
+    // Muted effects stay quiet.
+    rig.app.effects.played.clear();
+    rig.app.effects.set_level(50, true);
+    rig.frame(Vec::new());
+    rig.incoming_tx
+        .send(ServerMessage::Chat(chat_line(5, "ada", "Ada", "anyone?")))
+        .unwrap();
+    rig.relay();
+    assert!(rig.app.effects.played.is_empty());
+}
+
+#[test]
+fn effects_settings_are_clamped_on_load_and_default_on() {
+    let settings: Settings =
+        serde_json::from_str(r#"{"effects_volume": 255, "effects_muted": false}"#).unwrap();
+    let effects = SoundEffects::new(settings.effects_volume, settings.effects_muted);
+    assert_eq!(effects.volume, 100);
+    let defaults = SoundEffects::new(Settings::default().effects_volume, false);
+    assert!(defaults.audible());
+    assert_eq!(defaults.volume, DEFAULT_EFFECTS_VOLUME);
+}
