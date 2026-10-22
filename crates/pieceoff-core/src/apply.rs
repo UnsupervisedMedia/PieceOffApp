@@ -52,6 +52,27 @@ impl RoomRuntime {
         message: ClientMessage,
         now_ms: u64,
     ) -> Result<ApplyOutcome, String> {
+        if self.is_spectator(client_id) {
+            return Err("You are watching this room; only players can change it.".into());
+        }
+        // Settling changes are what the timelapse records; the layout just
+        // before the first pickup is where it starts.
+        let settles = matches!(
+            message,
+            ClientMessage::DragEnd { .. }
+                | ClientMessage::DragEndSelection { .. }
+                | ClientMessage::RearrangeTray { .. }
+                | ClientMessage::UpdateHolder { .. }
+        );
+        let restarts = matches!(message, ClientMessage::RestartPuzzle);
+        if settles
+            || matches!(
+                message,
+                ClientMessage::DragStart { .. } | ClientMessage::DragStartSelection { .. }
+            )
+        {
+            self.start_timelapse();
+        }
         let stats_before = self
             .snapshot
             .as_ref()
@@ -209,6 +230,10 @@ impl RoomRuntime {
             ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
                 return Err("Already joined a room".into());
             }
+            // Hosts answer this to the asker alone, rate-limited.
+            ClientMessage::RequestTimelapse => {
+                return Err("Timelapse requests are answered by the host".into());
+            }
             // Hosts relay these before applying; they are never room state.
             ClientMessage::Cursor { .. }
             | ClientMessage::CursorHidden
@@ -221,6 +246,13 @@ impl RoomRuntime {
         // need a per-second clock message.
         // Holders ride along the same way, so a restart that clears them or
         // a holder change reaches everyone in the one event.
+        if let ServerMessage::PiecesChanged { pieces, .. } = &event {
+            if restarts {
+                self.timelapse = crate::Timelapse::default();
+            } else if settles {
+                self.record_timelapse(pieces, now_ms);
+            }
+        }
         if let ServerMessage::PiecesChanged { stats, holders, .. } = &mut event {
             let now = self.snapshot.as_ref().map(|snapshot| &snapshot.stats);
             if now != stats_before.as_ref() {
@@ -320,6 +352,7 @@ mod tests {
                     name: "n".into(),
                     media_sha256: "hash".into(),
                     media_extension: "png".into(),
+                    spectator: false,
                 },
                 0,
             )
@@ -355,7 +388,10 @@ mod tests {
         };
         assert!(token.visible_to("a"));
         assert!(!token.visible_to("b"));
-        let other = ServerMessage::PeerLeft { name: "n".into() };
+        let other = ServerMessage::PeerLeft {
+            name: "n".into(),
+            spectator: false,
+        };
         assert!(other.visible_to("b"));
     }
 

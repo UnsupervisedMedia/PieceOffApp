@@ -10,14 +10,18 @@ mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title};
 mod holders;
 mod stats;
+mod timelapse;
 pub use holders::{
     HOLDER_DEFAULT_CELLS, HOLDER_GRACE_MS, HOLDER_MAX_CELLS, HOLDER_MIN_CELLS,
     MAX_HOLDER_LABEL_CHARS, MAX_HOLDERS_PER_PLAYER, MAX_HOLDERS_PER_ROOM, PieceHolder,
     clean_holder_label,
 };
 pub use stats::{MAX_SOLVE_PLAYERS, PlayerSolveStats, SolveStats};
+pub use timelapse::{
+    MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
+};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -825,6 +829,9 @@ pub enum ClientMessage {
         name: String,
         media_sha256: String,
         media_extension: String,
+        /// Join to watch: see everything, change nothing (protocol v13).
+        #[serde(default)]
+        spectator: bool,
     },
     DragStart {
         piece_id: u32,
@@ -942,6 +949,9 @@ pub enum ClientMessage {
     DeleteHolder {
         holder_id: u32,
     },
+    /// Ask for the current solve's timelapse; the host answers this
+    /// connection alone with `ServerMessage::Timelapse` (protocol v13).
+    RequestTimelapse,
 }
 
 /// One line of room chat as the server relays it. Kept in the room's memory
@@ -966,6 +976,12 @@ pub enum ServerMessage {
         peers: Vec<String>,
         snapshot: RoomSnapshot,
         media_upload_token: Option<String>,
+        /// Whether this connection joined to watch (protocol v13).
+        #[serde(default)]
+        spectator: bool,
+        /// Who else is watching, by name.
+        #[serde(default)]
+        spectators: Vec<String>,
         /// The server's wall clock when it sent this, so clients can show
         /// server-stamped times (the solve clock, chat ages) without trusting
         /// their own clock. Zero when unknown.
@@ -977,9 +993,14 @@ pub enum ServerMessage {
     },
     PeerJoined {
         name: String,
+        /// They came to watch, not to play.
+        #[serde(default)]
+        spectator: bool,
     },
     PeerLeft {
         name: String,
+        #[serde(default)]
+        spectator: bool,
     },
     PiecesChanged {
         pieces: Vec<Piece>,
@@ -1032,6 +1053,10 @@ pub enum ServerMessage {
         x: f32,
         y: f32,
     },
+    /// The current solve's timelapse, sent only to whoever asked.
+    Timelapse {
+        timelapse: Timelapse,
+    },
 }
 
 /// Tidy a chat line the way the server does: line breaks become spaces,
@@ -1070,7 +1095,13 @@ pub fn clean_chat_text(text: &str) -> Option<String> {
 #[derive(Default)]
 pub struct RoomRuntime {
     pub snapshot: Option<RoomSnapshot>,
+    /// Players in the room by client id. Spectators are not here.
     pub names: HashMap<String, String>,
+    /// Spectators by client id: they see the room but cannot change it.
+    pub spectators: HashMap<String, String>,
+    /// Where pieces settled during the current solve. Host-only: saved
+    /// with the room, sent on request, never in a snapshot.
+    pub timelapse: Timelapse,
     pub host_id: Option<String>,
     drag_groups: HashMap<String, Vec<u32>>,
 }
@@ -1856,6 +1887,8 @@ mod tests {
             peers: Vec::new(),
             snapshot,
             media_upload_token: None,
+            spectator: false,
+            spectators: Vec::new(),
             server_now_ms: 42,
         };
         // An older server sends no server_now_ms; it parses as unknown (0).

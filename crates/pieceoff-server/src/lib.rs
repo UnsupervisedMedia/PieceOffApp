@@ -16,8 +16,9 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ChatLine, ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, SceneBounds, ServerMessage,
-    clean_chat_text, clean_media_extension, clean_name, clean_title, valid_media_dimensions,
+    ChatLine, ClientMessage, MAX_ROOM_SPECTATORS, MediaItem, RoomRuntime, RoomSnapshot,
+    SceneBounds, ServerMessage, StoredRoom, clean_chat_text, clean_media_extension, clean_name,
+    clean_title, valid_media_dimensions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -145,6 +146,12 @@ const PING_BURST: f64 = 3.0;
 /// chat is never written to the room snapshot.
 const CHAT_HISTORY: usize = 100;
 const CHAT_TOO_FAST: &str = "You are sending chat messages too quickly. Wait a moment.";
+/// Timelapse requests allowed per connection: a log can run to a few hundred
+/// kilobytes, so two in a row, then one every ten seconds.
+const TIMELAPSE_REQUESTS_PER_SECOND: f64 = 0.1;
+const TIMELAPSE_BURST: f64 = 2.0;
+const TIMELAPSE_TOO_FAST: &str = "Timelapse requested too often. Try again in a few seconds.";
+const SPECTATORS_CANNOT_PING: &str = "Spectators can chat but cannot ping the board.";
 
 /// Recent chat in one room.
 #[derive(Default)]
@@ -159,6 +166,7 @@ struct RelayBudgets {
     cursor: TokenBucket,
     chat: TokenBucket,
     ping: TokenBucket,
+    timelapse: TokenBucket,
 }
 
 impl RelayBudgets {
@@ -167,6 +175,7 @@ impl RelayBudgets {
             cursor: TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, now),
             chat: TokenBucket::new(CHAT_LINES_PER_SECOND, CHAT_BURST, now),
             ping: TokenBucket::new(PINGS_PER_SECOND, PING_BURST, now),
+            timelapse: TokenBucket::new(TIMELAPSE_REQUESTS_PER_SECOND, TIMELAPSE_BURST, now),
         }
     }
 }
@@ -924,15 +933,26 @@ async fn websocket_handler(
 /// cost a full snapshot); a chat line over the rate is refused with an error
 /// so the player knows it was not sent. Returns `None` for any other message,
 /// which goes on to `dispatch`.
+#[allow(clippy::too_many_arguments)]
 fn relay_ephemeral(
     room: &RoomRecord,
     client_id: &str,
     name: &str,
+    spectator: bool,
     table: &SceneBounds,
     budgets: &mut RelayBudgets,
     message: &ClientMessage,
     now: Instant,
 ) -> Option<Result<(), String>> {
+    // Spectators chat but do not point: their cursors are not shown to
+    // players, and the board is not theirs to ping.
+    if spectator {
+        match message {
+            ClientMessage::Cursor { .. } | ClientMessage::CursorHidden => return Some(Ok(())),
+            ClientMessage::Ping { .. } => return Some(Err(SPECTATORS_CANNOT_PING.into())),
+            _ => {}
+        }
+    }
     let (packet, valid, budget) = match message {
         ClientMessage::Cursor { x, y } => (
             ServerMessage::Cursor {
@@ -1069,30 +1089,33 @@ async fn handle_socket(
         .await;
         return;
     }
-    let (room, room_code, name, created) = match connect_room(&state, &client_id, first).await {
-        Ok(value) => value,
-        Err(message) => {
-            // Every unknown code is a guess; spend from this address's budget.
-            if is_join && message == ROOM_NOT_FOUND {
-                if let Some(address) = address {
-                    state.join_failure_limiter.try_take(address, 1.0);
+    let (room, room_code, name, created, spectator) =
+        match connect_room(&state, &client_id, first).await {
+            Ok(value) => value,
+            Err(message) => {
+                // Every unknown code is a guess; spend from this address's budget.
+                if is_join && message == ROOM_NOT_FOUND {
+                    if let Some(address) = address {
+                        state.join_failure_limiter.try_take(address, 1.0);
+                    }
                 }
+                let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                return;
             }
-            let _ = send(&mut socket, &ServerMessage::Error { message }).await;
-            return;
-        }
-    };
+        };
     persist_room(&state, &room).await;
     let (mut events, chat_history) = subscribe_with_chat(&room);
     let mut cursor_events = room.cursors.subscribe();
-    let peers = {
+    let (peers, spectators) = {
         let runtime = room.runtime.lock().await;
-        runtime
-            .names
-            .iter()
-            .filter(|(id, _)| *id != &client_id)
-            .map(|(_, name)| name.clone())
-            .collect()
+        let others = |people: &HashMap<String, String>| -> Vec<String> {
+            people
+                .iter()
+                .filter(|(id, _)| *id != &client_id)
+                .map(|(_, name)| name.clone())
+                .collect()
+        };
+        (others(&runtime.names), others(&runtime.spectators))
     };
     let snapshot = room
         .runtime
@@ -1117,6 +1140,8 @@ async fn handle_socket(
             peers,
             snapshot,
             media_upload_token,
+            spectator,
+            spectators,
             server_now_ms: now_ms(),
         },
     )
@@ -1142,11 +1167,13 @@ async fn handle_socket(
         return;
     }
     if !created {
-        let _ = room
-            .events
-            .send(ServerMessage::PeerJoined { name: name.clone() });
+        let _ = room.events.send(ServerMessage::PeerJoined {
+            name: name.clone(),
+            spectator,
+        });
     }
-    println!("{} joined room {} as {}", name, room_code, client_id);
+    let role = if spectator { "spectator" } else { "player" };
+    println!("{name} joined room {room_code} as {role} {client_id}");
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     heartbeat.tick().await;
@@ -1201,7 +1228,12 @@ async fn handle_socket(
                         let _ = send(&mut socket, &ServerMessage::Error { message: "Invalid message".into() }).await;
                         continue;
                     };
-                    match relay_ephemeral(&room, &client_id, &name, &table, &mut relay_budgets, &message, Instant::now()) {
+                    if matches!(message, ClientMessage::RequestTimelapse) {
+                        let reply = timelapse_reply(&room, &mut relay_budgets, Instant::now()).await;
+                        if send(&mut socket, &reply).await.is_err() { break }
+                        continue;
+                    }
+                    match relay_ephemeral(&room, &client_id, &name, spectator, &table, &mut relay_budgets, &message, Instant::now()) {
                         Some(Ok(())) => continue,
                         Some(Err(message)) => {
                             let _ = send(&mut socket, &ServerMessage::Error { message }).await;
@@ -1243,7 +1275,7 @@ async fn connect_room(
     state: &AppState,
     client_id: &str,
     first: ClientMessage,
-) -> Result<(Arc<RoomRecord>, String, String, bool), String> {
+) -> Result<(Arc<RoomRecord>, String, String, bool, bool), String> {
     match first {
         ClientMessage::CreateRoom {
             name,
@@ -1321,13 +1353,14 @@ async fn connect_room(
                 }
                 rooms.insert(invite_code.clone(), room.clone());
             }
-            Ok((room, invite_code, name, true))
+            Ok((room, invite_code, name, true, false))
         }
         ClientMessage::JoinRoom {
             invite_code,
             name,
             media_sha256,
             media_extension: _,
+            spectator,
         } => {
             let invite_code = invite_code.trim().to_ascii_uppercase();
             let room = state
@@ -1346,29 +1379,56 @@ async fn connect_room(
                 if media_sha256 != snapshot.media_sha256 && !snapshot.media_available {
                     return Err("The room media is still uploading. Wait for the host and try joining again.".into());
                 }
+                if spectator {
+                    // Watchers never host, never count toward the clock or
+                    // the player limit, and never get an upload token.
+                    if runtime.spectators.len() >= MAX_ROOM_SPECTATORS {
+                        return Err(format!(
+                            "This room already has {MAX_ROOM_SPECTATORS} spectators"
+                        ));
+                    }
+                    runtime
+                        .spectators
+                        .insert(client_id.to_owned(), clean_name(&name));
+                    return Ok((room.clone(), invite_code, clean_name(&name), false, true));
+                }
                 if runtime.names.len() >= 8 {
                     return Err("This room already has 8 players".into());
                 }
                 runtime
                     .names
                     .insert(client_id.to_owned(), clean_name(&name));
+                let clock_before = runtime.snapshot.as_ref().map(|s| s.stats.clone());
                 runtime.sync_clock_to_players(now_ms());
                 let host_present = runtime
                     .snapshot
                     .as_ref()
                     .is_some_and(|snapshot| runtime.names.contains_key(&snapshot.host_id));
-                if !host_present {
-                    if let Some(snapshot) = runtime.snapshot.as_mut() {
+                let watched = !runtime.spectators.is_empty();
+                if let Some(snapshot) = runtime.snapshot.as_mut() {
+                    let mut changed = false;
+                    if !host_present {
                         snapshot.host_id = client_id.to_owned();
-                        snapshot.revision += 1;
+                        changed = true;
                         if has_unavailable_item(snapshot) {
                             *room.media_upload_token.lock().await =
                                 Some(Uuid::new_v4().to_string());
                         }
                     }
+                    let clock_changed = clock_before.as_ref() != Some(&snapshot.stats);
+                    if changed || clock_changed {
+                        snapshot.revision += 1;
+                    }
+                    // Spectators already here see the clock resume and the
+                    // new host; the joiner itself gets the Welcome.
+                    if watched && (changed || clock_changed) {
+                        let _ = room.events.send(ServerMessage::Snapshot {
+                            snapshot: snapshot.clone(),
+                        });
+                    }
                 }
             }
-            Ok((room, invite_code, clean_name(&name), false))
+            Ok((room, invite_code, clean_name(&name), false, false))
         }
         _ => Err("First message must create or join a room".into()),
     }
@@ -1423,21 +1483,55 @@ async fn dispatch(
 async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
     let _guard = room.persist_lock.lock().await;
     room.touch().await;
-    let Some(snapshot) = room
-        .runtime
-        .lock()
-        .await
-        .snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.for_storage(now_ms()))
-    else {
-        return;
+    let stored = {
+        let runtime = room.runtime.lock().await;
+        let Some(snapshot) = runtime
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.for_storage(now_ms()))
+        else {
+            return;
+        };
+        StoredRoom {
+            snapshot,
+            timelapse: runtime.timelapse.clone(),
+        }
     };
     let dir = (*state.data_dir).clone();
-    let _ = tokio::task::spawn_blocking(move || persist_snapshot(&dir, &snapshot)).await;
+    let _ = tokio::task::spawn_blocking(move || persist_stored(&dir, &stored)).await;
 }
 
+/// The timelapse for one connection, or a refusal when it asks too often.
+async fn timelapse_reply(
+    room: &RoomRecord,
+    budgets: &mut RelayBudgets,
+    now: Instant,
+) -> ServerMessage {
+    if !budgets.timelapse.try_take_at(now) {
+        return ServerMessage::Error {
+            message: TIMELAPSE_TOO_FAST.into(),
+        };
+    }
+    ServerMessage::Timelapse {
+        timelapse: room.runtime.lock().await.timelapse.clone(),
+    }
+}
+
+#[cfg(test)]
 fn persist_snapshot(data_dir: &Path, snapshot: &RoomSnapshot) -> std::io::Result<()> {
+    persist_stored(
+        data_dir,
+        &StoredRoom {
+            snapshot: snapshot.clone(),
+            timelapse: Default::default(),
+        },
+    )
+}
+
+/// Save a room atomically. Compact JSON: the timelapse is long lists of
+/// numbers that pretty-printing would triple.
+fn persist_stored(data_dir: &Path, stored: &StoredRoom) -> std::io::Result<()> {
+    let snapshot = &stored.snapshot;
     fs::create_dir_all(data_dir)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1449,7 +1543,7 @@ fn persist_snapshot(data_dir: &Path, snapshot: &RoomSnapshot) -> std::io::Result
     );
     let destination = data_dir.join(format!("{basename}.json"));
     let temporary = data_dir.join(format!("{basename}.tmp"));
-    let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(stored).map_err(std::io::Error::other)?;
     fs::write(&temporary, bytes)?;
     fs::rename(&temporary, &destination)?;
     // Commit the uniquely named new snapshot first. This keeps replacement
@@ -1485,16 +1579,17 @@ async fn load_rooms(state: &AppState) {
                     .unwrap_or_else(|_| SystemTime::now());
                 fs::read(entry.path())
                     .ok()
-                    .and_then(|bytes| serde_json::from_slice::<RoomSnapshot>(&bytes).ok())
-                    .map(|snapshot| (snapshot, modified))
+                    .and_then(|bytes| serde_json::from_slice::<StoredRoom>(&bytes).ok())
+                    .map(|stored| (stored, modified))
             })
-            .filter(|(snapshot, _)| {
+            .filter(|(StoredRoom { snapshot, .. }, _)| {
                 matches!(
                     snapshot.protocol_version,
                     2..=pieceoff_core::PROTOCOL_VERSION
                 ) && valid_media_dimensions(snapshot.width, snapshot.height)
             })
-            .map(|(mut snapshot, modified)| {
+            .map(|(mut stored, modified)| {
+                let snapshot = &mut stored.snapshot;
                 snapshot.migrate();
                 // The media file and room snapshot are committed separately.
                 // If the process stops after the content-addressed file is
@@ -1505,18 +1600,18 @@ async fn load_rooms(state: &AppState) {
                         media_path(&directory, &item.sha256, &item.extension).is_file();
                 }
                 snapshot.sync_current_mirror();
-                (snapshot, modified)
+                stored.timelapse.sanitize(&stored.snapshot);
+                (stored, modified)
             })
             .fold(
-                HashMap::<String, (RoomSnapshot, SystemTime)>::new(),
-                |mut latest, (snapshot, modified)| {
+                HashMap::<String, (StoredRoom, SystemTime)>::new(),
+                |mut latest, (stored, modified)| {
                     let entry = latest
-                        .entry(snapshot.invite_code.clone())
-                        .or_insert_with(|| (snapshot.clone(), modified));
-                    if snapshot.revision > entry.0.revision
-                        || (snapshot.revision == entry.0.revision && modified > entry.1)
-                    {
-                        *entry = (snapshot, modified);
+                        .entry(stored.snapshot.invite_code.clone())
+                        .or_insert_with(|| (stored.clone(), modified));
+                    let (revision, current) = (stored.snapshot.revision, entry.0.snapshot.revision);
+                    if revision > current || (revision == current && modified > entry.1) {
+                        *entry = (stored, modified);
                     }
                     latest
                 },
@@ -1527,7 +1622,14 @@ async fn load_rooms(state: &AppState) {
     .await
     .unwrap_or_default();
     let mut rooms = state.rooms.write().await;
-    for (mut snapshot, last_activity) in snapshots {
+    for (
+        StoredRoom {
+            mut snapshot,
+            timelapse,
+        },
+        last_activity,
+    ) in snapshots
+    {
         for piece in &mut snapshot.pieces {
             piece.held_by = None;
         }
@@ -1535,6 +1637,7 @@ async fn load_rooms(state: &AppState) {
         let mut runtime = RoomRuntime::default();
         runtime.host_id = Some(snapshot.host_id.clone());
         runtime.snapshot = Some(snapshot);
+        runtime.timelapse = timelapse;
         rooms.insert(
             code,
             Arc::new(RoomRecord::with_runtime(runtime, last_activity)),
@@ -1642,18 +1745,28 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     // Events go out under the room lock so they leave in revision order (see
     // `dispatch`).
     let mut runtime = room.runtime.lock().await;
+    if let Some(name) = runtime.spectators.remove(client_id) {
+        let _ = room.events.send(ServerMessage::PeerLeft {
+            name,
+            spectator: true,
+        });
+        return;
+    }
     runtime.forget_drag(client_id);
     let name = runtime
         .names
         .remove(client_id)
         .unwrap_or_else(|| fallback_name.to_owned());
     // The last player out pauses the solve clock.
+    let clock_before = runtime.snapshot.as_ref().map(|s| s.stats.clone());
     runtime.sync_clock_to_players(now_ms());
     let next_host = runtime.names.keys().next().cloned();
+    let watched = !runtime.spectators.is_empty();
     let mut changed_snapshot = None;
     let mut upload_assignment = None;
     if let Some(snapshot) = runtime.snapshot.as_mut() {
-        let mut changed = false;
+        // Spectators left behind must see the clock stop.
+        let mut changed = watched && clock_before.as_ref() != Some(&snapshot.stats);
         for piece in &mut snapshot.pieces {
             if piece.held_by.as_deref() == Some(client_id) {
                 piece.held_by = None;
@@ -1676,7 +1789,10 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
             changed_snapshot = Some(snapshot.clone());
         }
     }
-    let _ = room.events.send(ServerMessage::PeerLeft { name });
+    let _ = room.events.send(ServerMessage::PeerLeft {
+        name,
+        spectator: false,
+    });
     let _ = room.cursors.send(ServerMessage::CursorHidden {
         client_id: client_id.to_owned(),
     });
@@ -1747,7 +1863,7 @@ mod tests {
         };
         let wire_message = serde_json::to_string(&request).unwrap();
         let decoded_message: ClientMessage = serde_json::from_str(&wire_message).unwrap();
-        let (_, invite_code, _, is_host) = connect_room(&state, "new-host", decoded_message)
+        let (_, invite_code, _, is_host, _) = connect_room(&state, "new-host", decoded_message)
             .await
             .unwrap();
         let room = state.rooms.read().await.get(&invite_code).cloned().unwrap();
@@ -1920,7 +2036,7 @@ mod tests {
         let state = AppState::new(data_dir.clone());
         load_rooms(&state).await;
         let client_id = "replacement-host";
-        let (room, _, _, created) = connect_room(
+        let (room, _, _, created, _) = connect_room(
             &state,
             client_id,
             ClientMessage::JoinRoom {
@@ -1928,6 +2044,7 @@ mod tests {
                 name: "Replacement host".into(),
                 media_sha256: hash,
                 media_extension: "mp4".into(),
+                spectator: false,
             },
         )
         .await
@@ -2135,7 +2252,17 @@ mod tests {
         let start = Instant::now();
         let mut budgets = RelayBudgets::new(start);
         let mut relay = |message: ClientMessage, now: Instant| {
-            relay_ephemeral(&room, "ada", "Ada", &table, &mut budgets, &message, now).is_some()
+            relay_ephemeral(
+                &room,
+                "ada",
+                "Ada",
+                false,
+                &table,
+                &mut budgets,
+                &message,
+                now,
+            )
+            .is_some()
         };
 
         assert!(relay(ClientMessage::Cursor { x: 10.0, y: -4.0 }, start));
@@ -2243,6 +2370,7 @@ mod tests {
                     &room,
                     &id,
                     "P",
+                    false,
                     &table,
                     &mut budgets,
                     &ClientMessage::Cursor { x: 1.0, y: 1.0 },
@@ -2287,7 +2415,7 @@ mod tests {
             for _ in 0..5 {
                 let chat = ClientMessage::Chat { text: "hi".into() };
                 if let Some(Ok(())) =
-                    relay_ephemeral(&room, &id, "P", &table, &mut budgets, &chat, now)
+                    relay_ephemeral(&room, &id, "P", false, &table, &mut budgets, &chat, now)
                 {
                     sent += 1;
                 }
@@ -2369,7 +2497,16 @@ mod tests {
         let start = Instant::now();
         let mut budgets = RelayBudgets::new(start);
         let mut relay = |message: ClientMessage, now: Instant| {
-            relay_ephemeral(&room, "ada", "Ada", &table, &mut budgets, &message, now)
+            relay_ephemeral(
+                &room,
+                "ada",
+                "Ada",
+                false,
+                &table,
+                &mut budgets,
+                &message,
+                now,
+            )
         };
         let chat = |text: &str| ClientMessage::Chat { text: text.into() };
 
@@ -2614,6 +2751,7 @@ mod tests {
             name: "Guest".into(),
             media_sha256: String::new(),
             media_extension: String::new(),
+            spectator: false,
         };
         assert!(
             connect_room(&state, "early-guest", guest.clone())
@@ -4193,7 +4331,7 @@ mod hardening_tests {
             initial_snapshot: None,
             duration_ms: 0,
         };
-        let (_, first_code, _, _) = connect_room(&state, "host-1", create("First"))
+        let (_, first_code, _, _, _) = connect_room(&state, "host-1", create("First"))
             .await
             .unwrap();
         let error = connect_room(&state, "host-2", create("Second"))
@@ -4316,7 +4454,7 @@ mod hardening_tests {
     async fn shutting_down_saves_every_room_for_the_next_start() {
         let config = test_config();
         let state = AppState::from_config(&config);
-        let (room, code, _, _) = connect_room(
+        let (room, code, _, _, _) = connect_room(
             &state,
             "host",
             ClientMessage::CreateRoom {
@@ -4366,7 +4504,7 @@ mod hardening_tests {
     async fn the_solve_clock_pauses_in_an_empty_room_and_survives_a_restart() {
         let config = test_config();
         let state = AppState::from_config(&config);
-        let (room, code, _, _) = connect_room(
+        let (room, code, _, _, _) = connect_room(
             &state,
             "host",
             ClientMessage::CreateRoom {
@@ -4435,6 +4573,7 @@ mod hardening_tests {
                 name: "Guest".into(),
                 media_sha256: "c".repeat(64),
                 media_extension: "png".into(),
+                spectator: false,
             },
         )
         .await
@@ -4449,7 +4588,7 @@ mod hardening_tests {
     async fn holders_reserve_pieces_survive_a_restart_and_are_released_after_the_grace() {
         let config = test_config();
         let state = AppState::from_config(&config);
-        let (room, code, _, _) = connect_room(
+        let (room, code, _, _, _) = connect_room(
             &state,
             "host",
             ClientMessage::CreateRoom {
@@ -4475,6 +4614,7 @@ mod hardening_tests {
                 name: "Guest".into(),
                 media_sha256: "d".repeat(64),
                 media_extension: "png".into(),
+                spectator: false,
             },
         )
         .await
@@ -4665,5 +4805,369 @@ mod hardening_tests {
             .unwrap()
             .revision;
         assert_eq!(revisions.last(), Some(&final_revision));
+    }
+
+    fn create_message(title: &str, hash: char) -> ClientMessage {
+        ClientMessage::CreateRoom {
+            name: "Host".into(),
+            title: title.into(),
+            media_sha256: hash.to_string().repeat(64),
+            media_extension: "png".into(),
+            width: 64,
+            height: 48,
+            rows: 2,
+            columns: 2,
+            initial_snapshot: None,
+            duration_ms: 0,
+        }
+    }
+
+    fn watch_message(code: &str, name: &str, hash: char) -> ClientMessage {
+        ClientMessage::JoinRoom {
+            invite_code: code.into(),
+            name: name.into(),
+            media_sha256: hash.to_string().repeat(64),
+            media_extension: "png".into(),
+            spectator: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn spectators_watch_apart_from_players_and_are_capped() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _, _) = connect_room(&state, "host", create_message("Watched", 'e'))
+            .await
+            .unwrap();
+        let (_, _, name, created, spectator) =
+            connect_room(&state, "watcher", watch_message(&code, "Cy", 'e'))
+                .await
+                .unwrap();
+        assert_eq!((name.as_str(), created, spectator), ("Cy", false, true));
+        {
+            let runtime = room.runtime.lock().await;
+            assert_eq!(runtime.names.len(), 1);
+            assert!(runtime.is_spectator("watcher"));
+        }
+        // A spectator changes nothing.
+        let refused = dispatch(&room, "watcher", ClientMessage::DragStart { piece_id: 0 }).await;
+        assert!(refused.is_err());
+        dispatch(&room, "host", ClientMessage::DragStart { piece_id: 0 })
+            .await
+            .unwrap();
+        assert!(
+            room.runtime
+                .lock()
+                .await
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .stats
+                .running()
+        );
+
+        // Only a spectator left: the clock pauses and nobody new hosts.
+        let mut events = room.events.subscribe();
+        remove_peer(&room, "host", "Host").await;
+        {
+            let runtime = room.runtime.lock().await;
+            let snapshot = runtime.snapshot.as_ref().unwrap();
+            assert!(!snapshot.stats.running());
+            assert_eq!(snapshot.host_id, "host");
+        }
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            ServerMessage::PeerLeft {
+                spectator: false,
+                ..
+            }
+        ));
+        // The spectator still here is told the clock stopped.
+        match events.try_recv().unwrap() {
+            ServerMessage::Snapshot { snapshot } => assert!(!snapshot.stats.running()),
+            other => panic!("expected the paused clock, got {other:?}"),
+        }
+        // Another spectator does not resume it either.
+        connect_room(&state, "watcher-2", watch_message(&code, "Di", 'e'))
+            .await
+            .unwrap();
+        assert!(
+            !room
+                .runtime
+                .lock()
+                .await
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .stats
+                .running()
+        );
+
+        for index in 2..MAX_ROOM_SPECTATORS {
+            connect_room(&state, &format!("w{index}"), watch_message(&code, "W", 'e'))
+                .await
+                .unwrap();
+        }
+        let full = connect_room(&state, "one-too-many", watch_message(&code, "X", 'e')).await;
+        assert_eq!(
+            full.err().unwrap(),
+            format!("This room already has {MAX_ROOM_SPECTATORS} spectators")
+        );
+        // Players have their own limit: a full gallery does not stop one.
+        let player = ClientMessage::JoinRoom {
+            invite_code: code.clone(),
+            name: "Eve".into(),
+            media_sha256: "e".repeat(64),
+            media_extension: "png".into(),
+            spectator: false,
+        };
+        connect_room(&state, "eve", player).await.unwrap();
+        let runtime = room.runtime.lock().await;
+        let snapshot = runtime.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.host_id, "eve");
+        assert!(snapshot.stats.running());
+        drop(runtime);
+
+        // A spectator leaving is announced as one and touches nothing else.
+        let revision = room
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .revision;
+        remove_peer(&room, "watcher", "Cy").await;
+        loop {
+            match events.try_recv() {
+                Ok(ServerMessage::PeerLeft { name, spectator }) if name == "Cy" => {
+                    assert!(spectator);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("no spectator PeerLeft: {error:?}"),
+            }
+        }
+        assert_eq!(
+            room.runtime
+                .lock()
+                .await
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .revision,
+            revision
+        );
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn spectators_chat_but_their_cursors_and_pings_go_nowhere() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, _, _, _, _) = connect_room(&state, "host", create_message("Quiet", 'f'))
+            .await
+            .unwrap();
+        let table = room
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .scene_bounds();
+        let mut events = room.events.subscribe();
+        let mut cursors = room.cursors.subscribe();
+        let now = Instant::now();
+        let mut budgets = RelayBudgets::new(now);
+        for message in [
+            ClientMessage::Cursor { x: 1.0, y: 1.0 },
+            ClientMessage::CursorHidden,
+        ] {
+            let result =
+                relay_ephemeral(&room, "w", "Cy", true, &table, &mut budgets, &message, now);
+            assert_eq!(result, Some(Ok(())));
+        }
+        assert!(cursors.try_recv().is_err());
+        let ping = ClientMessage::Ping { x: 1.0, y: 1.0 };
+        let result = relay_ephemeral(&room, "w", "Cy", true, &table, &mut budgets, &ping, now);
+        assert_eq!(result, Some(Err(SPECTATORS_CANNOT_PING.to_string())));
+        let chat = ClientMessage::Chat {
+            text: "nice edge work".into(),
+        };
+        let result = relay_ephemeral(&room, "w", "Cy", true, &table, &mut budgets, &chat, now);
+        assert_eq!(result, Some(Ok(())));
+        match events.try_recv().unwrap() {
+            ServerMessage::Chat(line) => assert_eq!(line.name, "Cy"),
+            other => panic!("expected chat, got {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn the_timelapse_is_saved_with_the_room_and_cleared_by_a_restart() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _, _) = connect_room(&state, "host", create_message("Lapse", '1'))
+            .await
+            .unwrap();
+        dispatch(&room, "host", ClientMessage::DragStart { piece_id: 1 })
+            .await
+            .unwrap();
+        dispatch(
+            &room,
+            "host",
+            ClientMessage::DragEnd {
+                piece_id: 1,
+                x: 5.0,
+                y: 6.0,
+            },
+        )
+        .await
+        .unwrap();
+        let recorded = room.runtime.lock().await.timelapse.clone();
+        assert_eq!(recorded.start.len(), 4);
+        assert_eq!(recorded.frames.len(), 1);
+        // Never part of what clients are sent.
+        let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
+        let wire = serde_json::to_string(&ServerMessage::Snapshot { snapshot }).unwrap();
+        assert!(!wire.contains("timelapse"));
+
+        persist_all(&state).await;
+        let restored = AppState::from_config(&config);
+        load_rooms(&restored).await;
+        let reloaded = restored.rooms.read().await.get(&code).unwrap().clone();
+        assert_eq!(reloaded.runtime.lock().await.timelapse, recorded);
+
+        // The host of the restored room restarts the puzzle: a new run.
+        connect_room(
+            &restored,
+            "host-2",
+            ClientMessage::JoinRoom {
+                invite_code: code.clone(),
+                name: "Host".into(),
+                media_sha256: "1".repeat(64),
+                media_extension: "png".into(),
+                spectator: false,
+            },
+        )
+        .await
+        .unwrap();
+        dispatch(&reloaded, "host-2", ClientMessage::RestartPuzzle)
+            .await
+            .unwrap();
+        assert!(reloaded.runtime.lock().await.timelapse.is_empty());
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    async fn next_of(socket: &mut Socket, wanted: &str) -> serde_json::Value {
+        use futures_util::StreamExt;
+        loop {
+            let text = match socket.next().await {
+                Some(Ok(tungstenite::Message::Text(text))) => text.to_string(),
+                Some(Ok(_)) => continue,
+                other => panic!("expected {wanted}, got {other:?}"),
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if value["type"] == wanted {
+                return value;
+            }
+        }
+    }
+
+    async fn send_json(socket: &mut Socket, value: serde_json::Value) {
+        socket
+            .send(tungstenite::Message::Text(value.to_string().into()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spectator_asks_for_the_timelapse_and_is_rate_limited() {
+        let config = test_config();
+        let (_, url) = serve(&config).await;
+        let mut host = open(&url, &[]).await.unwrap();
+        send_json(
+            &mut host,
+            serde_json::json!({
+                "type": "create_room", "name": "Host", "title": "Wire",
+                "media_sha256": "2".repeat(64), "media_extension": "png",
+                "width": 64, "height": 48, "rows": 2, "columns": 2,
+            }),
+        )
+        .await;
+        let welcome = next_of(&mut host, "welcome").await;
+        assert_eq!(welcome["spectator"], false);
+        let code = welcome["snapshot"]["invite_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut watcher = open(&url, &[]).await.unwrap();
+        send_json(
+            &mut watcher,
+            serde_json::json!({
+                "type": "join_room", "invite_code": code, "name": "Cy",
+                "media_sha256": "2".repeat(64), "media_extension": "png",
+                "spectator": true,
+            }),
+        )
+        .await;
+        let welcome = next_of(&mut watcher, "welcome").await;
+        assert_eq!(welcome["spectator"], true);
+        assert_eq!(welcome["peers"], serde_json::json!(["Host"]));
+        assert!(welcome["media_upload_token"].is_null());
+        let joined = next_of(&mut host, "peer_joined").await;
+        assert_eq!(
+            (joined["name"].as_str(), joined["spectator"].as_bool()),
+            (Some("Cy"), Some(true))
+        );
+
+        send_json(
+            &mut host,
+            serde_json::json!({"type": "drag_start", "piece_id": 0}),
+        )
+        .await;
+        send_json(
+            &mut host,
+            serde_json::json!({"type": "drag_end", "piece_id": 0, "x": 3.0, "y": 4.0}),
+        )
+        .await;
+        // The spectator sees the move.
+        next_of(&mut watcher, "pieces_changed").await;
+        next_of(&mut watcher, "pieces_changed").await;
+        // And cannot make one.
+        send_json(
+            &mut watcher,
+            serde_json::json!({"type": "drag_start", "piece_id": 1}),
+        )
+        .await;
+        let refused = next_of(&mut watcher, "error").await;
+        assert!(refused["message"].as_str().unwrap().contains("watching"));
+
+        for _ in 0..TIMELAPSE_BURST as usize {
+            send_json(
+                &mut watcher,
+                serde_json::json!({"type": "request_timelapse"}),
+            )
+            .await;
+            let reply = next_of(&mut watcher, "timelapse").await;
+            let timelapse = &reply["timelapse"];
+            assert_eq!(timelapse["start"].as_array().unwrap().len(), 4);
+            // Dropped near its home cell, it snapped there.
+            assert_eq!(
+                timelapse["frames"][0]["moves"],
+                serde_json::json!([[0, 0, 0]])
+            );
+        }
+        send_json(
+            &mut watcher,
+            serde_json::json!({"type": "request_timelapse"}),
+        )
+        .await;
+        let refused = next_of(&mut watcher, "error").await;
+        assert_eq!(refused["message"], TIMELAPSE_TOO_FAST);
+        let _ = fs::remove_dir_all(&config.data_dir);
     }
 }
