@@ -3042,4 +3042,40 @@ mod chat_tests {
         let spaced = format!("{} tail", "x".repeat(MAX_CHAT_CHARS - 1));
         assert!(!clean_chat_text(&spaced).unwrap().ends_with(' '));
     }
+
+    /// Pins today's jigsaw contours bit for bit, so rooms and packages made
+    /// before cut styles existed keep exactly the same shapes.
+    #[test]
+    fn jigsaw_contours_are_pinned() {
+        let mut snapshot = RoomSnapshot::create(
+            "id".into(),
+            "invite".into(),
+            "test".into(),
+            "c".repeat(64),
+            "png".into(),
+            1000,
+            700,
+            5,
+            7,
+            "host".into(),
+        )
+        .unwrap();
+        snapshot.shape_seed = 0x1234_5678;
+        let mut hash = 0x811c_9dc5u32;
+        let mut count = 0;
+        for piece in &snapshot.pieces {
+            for point in piece_outline(&snapshot, piece) {
+                for bits in [point[0].to_bits(), point[1].to_bits()] {
+                    hash = (hash ^ bits).wrapping_mul(0x0100_0193);
+                }
+                count += 1;
+            }
+        }
+        let interior = snapshot.piece(8).unwrap();
+        let outline = piece_outline(&snapshot, interior);
+        assert_eq!((count, hash), (11200, 0x5db0_5345));
+        assert_eq!(outline[40], [71.585434, 46.382824]);
+        assert_eq!(outline[120], [102.03611, 66.50823]);
+        assert_eq!(outline[290], [33.80201, 54.395454]);
+    }
 }
