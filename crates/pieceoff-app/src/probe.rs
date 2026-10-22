@@ -174,7 +174,7 @@ pub(crate) fn hash_media(
         }
         hasher.update(&buffer[..count]);
     }
-    metadata.sha256 = format!("{:x}", hasher.finalize());
+    metadata.sha256 = hex(hasher.finalize());
     Ok(metadata)
 }
 
