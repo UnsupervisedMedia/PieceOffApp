@@ -77,6 +77,11 @@ HTTPS for media transfer automatically.
     it. Untick More → **Show solve timer** to hide the readout clock. Finish
     a puzzle resumed from the library and its card on the shelf shows the
     best time.
+17. With sound on, snap a piece into place, join two pieces, chat, and ping:
+    each should make its own short sound on both clients (chat only on the
+    other one), and finishing should chime once. Arrange the tray, restart,
+    and rejoin: all silent. More → **Effects** changes their volume without
+    touching the clip's volume, and works in a still-image room.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the
@@ -95,7 +100,9 @@ not replace a GUI/audio-device playtest with real users.
 
 ## Silent test runs
 
-`cargo test` never plays audio: audio output is disabled under `cfg(test)`. For
+`cargo test` never plays audio: audio output, sound effects included, is
+disabled under `cfg(test)`; effects are tested by inspecting their samples and
+which events trigger them. For
 visual/GUI runs use `scripts/visual-dev.sh`, which forces `PIECEOFF_NO_AUDIO=1`.
 When generating test clips by hand, use no audio track (`-an`) or a silent one
 (`-f lavfi -i anullsrc`), never a tone.
