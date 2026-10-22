@@ -4,6 +4,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod apply;
+pub use apply::ApplyOutcome;
+mod sanitize;
+pub use sanitize::{clean_media_extension, clean_name, clean_title};
+
 pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_QUEUE_ITEMS: usize = 64;
 pub const MAX_MEDIA_DIMENSION: u32 = 8192;
@@ -532,7 +537,7 @@ impl RoomSnapshot {
 }
 
 /// Every piece in the shared loose-piece tray, in a shuffled order seeded from
-/// the room identity plus `salt` (0 for a new room; a fresh value on restart).
+/// the room identity plus `shuffle_seed` (0 for a new room; a fresh value on restart).
 /// No piece starts in its own slot, so a new puzzle is never partly solved.
 #[allow(clippy::too_many_arguments)]
 fn scattered_pieces(
@@ -543,7 +548,7 @@ fn scattered_pieces(
     height: u32,
     rows: u16,
     columns: u16,
-    salt: u32,
+    shuffle_seed: u32,
 ) -> Vec<Piece> {
     let count = rows as usize * columns as usize;
     let tray = piece_tray_layout(width, height, rows, columns);
@@ -559,7 +564,7 @@ fn scattered_pieces(
         random = (random ^ byte as u32).wrapping_mul(0x0100_0193);
     }
     random ^= ((rows as u32) << 16) | columns as u32;
-    random ^= salt.wrapping_mul(0x9e37_79b9);
+    random ^= shuffle_seed.wrapping_mul(0x9e37_79b9);
     if random == 0 {
         random = 0x9e37_79b9;
     }
@@ -1083,8 +1088,12 @@ impl RoomRuntime {
     }
 
     /// Host-only: scatter every piece back into the tray with a fresh shuffle
-    /// and drop all drag leases. `salt` varies the arrangement between restarts.
-    pub fn restart(&mut self, client_id: &str, salt: u32) -> Result<(Vec<Piece>, u64), String> {
+    /// and drop all drag leases. `shuffle_seed` varies the arrangement between restarts.
+    pub fn restart(
+        &mut self,
+        client_id: &str,
+        shuffle_seed: u32,
+    ) -> Result<(Vec<Piece>, u64), String> {
         let snapshot = self.snapshot.as_mut().ok_or("Room is not ready")?;
         // `snapshot.host_id` is authoritative: it is what clients see and what
         // a promoted host (after a server restart) updates.
@@ -1099,7 +1108,7 @@ impl RoomRuntime {
             snapshot.height,
             snapshot.rows,
             snapshot.columns,
-            salt | 1,
+            shuffle_seed | 1,
         );
         snapshot.revision += 1;
         self.drag_groups.clear();
@@ -1107,13 +1116,13 @@ impl RoomRuntime {
     }
 
     /// Lay every loose, unheld, single-piece group back into free tray slots.
-    /// `salt` varies a shuffle between calls. Slots already covered by pieces
+    /// `shuffle_seed` varies a shuffle between calls. Slots already covered by pieces
     /// that stay put (for instance a section assembled inside the tray) are
     /// skipped, so nothing ends up stacked.
     pub fn rearrange_tray(
         &mut self,
         arrangement: TrayArrangement,
-        salt: u32,
+        shuffle_seed: u32,
     ) -> Result<(Vec<Piece>, u64), String> {
         let snapshot = self.snapshot.as_mut().ok_or("Room is not ready")?;
         let mut group_sizes: HashMap<u32, usize> = HashMap::new();
@@ -1146,7 +1155,7 @@ impl RoomRuntime {
                 (kind, piece.row, piece.column)
             }),
             TrayArrangement::Shuffle => {
-                let mut random = 0x811c_9dc5u32 ^ salt.wrapping_mul(0x9e37_79b9);
+                let mut random = 0x811c_9dc5u32 ^ shuffle_seed.wrapping_mul(0x9e37_79b9);
                 for byte in snapshot.id.bytes().chain(snapshot.invite_code.bytes()) {
                     random = (random ^ u32::from(byte)).wrapping_mul(0x0100_0193);
                 }
@@ -1519,6 +1528,9 @@ impl RoomRuntime {
     ) -> Result<RoomSnapshot, String> {
         let snapshot = self.queue_guard(client_id)?;
         let len = snapshot.queue.len();
+        if len == 0 {
+            return Err("The queue is empty".into());
+        }
         let index = if forward {
             (snapshot.current + 1) % len
         } else {
@@ -2485,9 +2497,10 @@ mod tests {
 
     #[test]
     fn shuffle_is_deterministic_per_salt_and_differs_between_salts() {
-        let layout = |salt| {
+        let layout = |shuffle_seed| {
             let mut room = room();
-            room.rearrange_tray(TrayArrangement::Shuffle, salt).unwrap();
+            room.rearrange_tray(TrayArrangement::Shuffle, shuffle_seed)
+                .unwrap();
             positions(&room.snapshot.as_ref().unwrap().pieces)
         };
         assert_eq!(layout(3), layout(3));
