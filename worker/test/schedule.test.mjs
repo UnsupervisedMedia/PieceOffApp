@@ -8,6 +8,7 @@ const base = {
   flushMs: 5_000,
   deadline: -1,
   joinedSockets: 0,
+  cleanupAt: null,
   sweepMs: 20_000,
   minGapMs: 100,
   maxAheadMs: 7 * 24 * 3_600_000,
@@ -38,6 +39,15 @@ describe("alarmTarget", () => {
   it("never schedules closer than the minimum gap", () => {
     const target = alarmTarget({ ...base, joinedSockets: 1, deadline: base.now });
     assert.equal(target, base.now + 100);
+  });
+
+  it("wakes for the cleanup deadline even when nobody is connected", () => {
+    assert.equal(alarmTarget({ ...base, cleanupAt: 1_300_000 }), 1_300_000);
+  });
+
+  it("picks the earlier of cleanup and a pending flush", () => {
+    const target = alarmTarget({ ...base, dirtySince: 998_000, cleanupAt: 1_300_000 });
+    assert.equal(target, 1_003_000);
   });
 
   it("clamps a far-future deadline to the maximum lead", () => {

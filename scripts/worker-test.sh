@@ -8,4 +8,4 @@ cd "$ROOT/worker"
 ./build.sh
 if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then npm ci --no-audit --no-fund; fi
 npx tsc --noEmit
-exec node --test test/schedule.test.mjs test/media-state.test.mjs test/two-clients.test.mjs test/media.test.mjs
+exec node --test test/schedule.test.mjs test/media-state.test.mjs test/two-clients.test.mjs test/media.test.mjs test/cleanup.test.mjs test/lifecycle.test.mjs
