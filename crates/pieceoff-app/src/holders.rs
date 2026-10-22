@@ -43,6 +43,25 @@ pub(crate) struct HolderTool {
     pub(crate) create_requested: bool,
     /// Labels being typed in the Holders menu, by holder ID.
     pub(crate) label_edits: HashMap<u32, String>,
+    /// A name the host is typing to release, in the players menu.
+    pub(crate) release_input: String,
+}
+
+/// Names whose player is away and whose holders are still kept, which the
+/// host may release so the player can rejoin from another device. Empty for
+/// everyone but the host.
+pub(crate) fn releasable_names(holders: &[PieceHolder], is_host: bool, me: &str) -> Vec<String> {
+    if !is_host {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = holders
+        .iter()
+        .filter(|holder| holder.owner_away_since_ms.is_some() && holder.owner != me)
+        .map(|holder| holder.owner.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 pub(crate) fn holder_rect(holder: &PieceHolder) -> Rect {
@@ -307,6 +326,35 @@ impl PieceOffApp {
                 }
             });
         }
+        let away = releasable_names(&holders, is_host, &self.player_name);
+        if away.is_empty() {
+            return;
+        }
+        ui.separator();
+        for name in away {
+            ui.horizontal(|ui| {
+                ui.label(format!("{name} (away)"));
+                if ui
+                    .button("Release name")
+                    .on_hover_text(format!(
+                        "Free {name}'s name now and remove their holders, so they can rejoin from another device"
+                    ))
+                    .clicked()
+                {
+                    self.release_name(&name);
+                }
+            });
+        }
+    }
+
+    /// Ask the server to free an absent player's name (host only).
+    pub(crate) fn release_name(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.send(ClientMessage::ReleaseName { name: name.into() });
+        self.status = format!("Released the name {name}.");
     }
 }
 
@@ -381,6 +429,24 @@ mod tests {
             100.0,
         );
         assert_eq!(big.size(), Vec2::new(1200.0, 1200.0));
+    }
+
+    #[test]
+    fn only_the_host_may_release_away_players_names() {
+        let mut ada = holder("Ada");
+        ada.owner_away_since_ms = Some(1);
+        let mut ada_too = ada.clone();
+        ada_too.id = 4;
+        let bo = holder("Bo");
+        let mut host = holder("Host");
+        host.owner_away_since_ms = Some(1);
+        let holders = vec![ada, bo, ada_too, host];
+        assert_eq!(
+            releasable_names(&holders, true, "Host"),
+            vec!["Ada".to_string()]
+        );
+        assert!(releasable_names(&holders, false, "Bo").is_empty());
+        assert!(releasable_names(&[holder("Bo")], true, "Host").is_empty());
     }
 
     #[test]

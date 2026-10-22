@@ -953,6 +953,11 @@ pub enum ClientMessage {
     DeleteHolder {
         holder_id: u32,
     },
+    /// The host frees an absent player's name: its claim and holders go, so
+    /// anyone may play under it again.
+    ReleaseName {
+        name: String,
+    },
 }
 
 /// One line of room chat as the server relays it. Kept in the room's memory

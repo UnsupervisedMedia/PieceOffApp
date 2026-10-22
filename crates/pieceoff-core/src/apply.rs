@@ -206,6 +206,10 @@ impl RoomRuntime {
                 let revision = self.delete_holder(client_id, holder_id)?;
                 (pieces_changed(Vec::new(), revision), true)
             }
+            ClientMessage::ReleaseName { name } => {
+                let revision = self.release_name(client_id, &name)?;
+                (pieces_changed(Vec::new(), revision), true)
+            }
             ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
                 return Err("Already joined a room".into());
             }
