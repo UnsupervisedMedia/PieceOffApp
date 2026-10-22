@@ -5133,6 +5133,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: "host-key".into(),
+                cut_style: Default::default(),
             },
         )
         .await
