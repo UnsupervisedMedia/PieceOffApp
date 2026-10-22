@@ -16,8 +16,8 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, ServerMessage, clean_media_extension,
-    clean_name, clean_title, valid_media_dimensions,
+    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, ServerMessage,
+    clean_media_extension, clean_name, clean_title, valid_media_dimensions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -396,6 +396,30 @@ fn application(state: AppState) -> Router {
         .route("/ws", get(websocket_handler))
         .route("/media/{sha256}", get(download_media).put(upload_media))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct SocketQuery {
+    /// The protocol version the client speaks. Clients older than this check
+    /// send none and are let through as before.
+    protocol: Option<u16>,
+}
+
+/// Why a client speaking `client` cannot use this server, if it cannot.
+fn protocol_mismatch(client: Option<u16>) -> Option<String> {
+    let client = client?;
+    if client == PROTOCOL_VERSION {
+        return None;
+    }
+    let newer = if client < PROTOCOL_VERSION {
+        "server"
+    } else {
+        "app"
+    };
+    Some(format!(
+        "This PieceOff {newer} is newer (app protocol v{client}, server protocol \
+         v{PROTOCOL_VERSION}). Update so the app and the room server match."
+    ))
 }
 
 #[derive(Deserialize)]
@@ -791,6 +815,7 @@ fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaI
 async fn websocket_handler(
     State(state): State<AppState>,
     upgrade: WebSocketUpgrade,
+    Query(query): Query<SocketQuery>,
     request: axum::extract::Request,
 ) -> Response {
     // Present when served with connect info (the real server); absent in
@@ -825,7 +850,16 @@ async fn websocket_handler(
     upgrade
         .max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| handle_socket(socket, state, address, slot))
+        .on_upgrade(move |mut socket| async move {
+            // Refuse a mismatched app up front, with a message every version
+            // can show, instead of messages it cannot parse.
+            if let Some(message) = protocol_mismatch(query.protocol) {
+                let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+            handle_socket(socket, state, address, slot).await
+        })
 }
 
 async fn handle_socket(
@@ -1437,6 +1471,16 @@ async fn send(socket: &mut WebSocket, packet: &ServerMessage) -> Result<(), axum
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mismatched_app_protocols_are_refused_with_a_reason() {
+        assert_eq!(protocol_mismatch(None), None);
+        assert_eq!(protocol_mismatch(Some(PROTOCOL_VERSION)), None);
+        let older_app = protocol_mismatch(Some(PROTOCOL_VERSION - 1)).unwrap();
+        assert!(older_app.contains("server is newer"), "{older_app}");
+        let newer_app = protocol_mismatch(Some(PROTOCOL_VERSION + 1)).unwrap();
+        assert!(newer_app.contains("app is newer"), "{newer_app}");
+    }
+
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -2186,6 +2230,40 @@ mod tests {
     type TestSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
     /// Start a server on a free port; returns its address and state.
+    #[tokio::test]
+    async fn an_app_on_another_protocol_is_told_to_update() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-proto-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut old_app, _) = connect_async(format!(
+            "ws://{address}/ws?protocol={}",
+            PROTOCOL_VERSION - 1
+        ))
+        .await
+        .unwrap();
+        let error = read_message(&mut old_app, "error").await;
+        assert!(
+            error["message"].as_str().unwrap().contains("Update"),
+            "{error}"
+        );
+        // The matching version gets through to the room handshake.
+        let (mut app, _) = connect_async(format!("ws://{address}/ws?protocol={PROTOCOL_VERSION}"))
+            .await
+            .unwrap();
+        app.send(Message::Text(
+            serde_json::json!({
+                "type":"join_room", "invite_code":"NOPE00", "name":"A",
+                "media_sha256":"", "media_extension":""
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = read_message(&mut app, "error").await;
+        assert_eq!(reply["message"], ROOM_NOT_FOUND);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     async fn queue_test_server(data_dir: &std::path::Path) -> (std::net::SocketAddr, AppState) {
         let state = AppState::new(data_dir.to_path_buf());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
