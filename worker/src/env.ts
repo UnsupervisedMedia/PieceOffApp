@@ -8,6 +8,10 @@ export interface Env {
   FLUSH_MS?: string;
   /** A joined socket silent this long is dropped (default 90000). */
   IDLE_SOCKET_MS?: string;
+  /** An empty room is deleted this long after its last player leaves (default 60 min). */
+  IDLE_CLEANUP_MS?: string;
+  /** A room whose creator never connects is deleted after this long (default 15 min). */
+  UNCLAIMED_MS?: string;
   /** Media a room may hold, stored plus in flight (default 1 GiB). */
   ROOM_MEDIA_QUOTA_BYTES?: string;
   /** Largest single media file (default: the room quota). */

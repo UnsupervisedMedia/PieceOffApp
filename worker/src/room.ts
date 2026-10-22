@@ -12,6 +12,7 @@ import {
   planUpload,
   recordPart,
 } from "./media-state.ts";
+import { cleanupDeadline } from "./lifecycle.ts";
 import { alarmTarget, shouldSetAlarm } from "./schedule.ts";
 
 initSync({ module: wasmModule });
@@ -20,6 +21,8 @@ initSync({ module: wasmModule });
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_FLUSH_MS = 5_000;
 const DEFAULT_IDLE_SOCKET_MS = 90_000;
+const DEFAULT_IDLE_CLEANUP_MS = 60 * 60_000;
+const DEFAULT_UNCLAIMED_MS = 15 * 60_000;
 /** Clients ping about this often; the sweep runs at most this far apart. */
 const MAX_SWEEP_MS = 20_000;
 /** An alarm is never set closer than this, so a stuck deadline cannot spin. */
@@ -99,16 +102,27 @@ export class RoomDO extends DurableObject<Env> {
   private uploadToken: string | null = null;
   private dirtySince: number | null = null;
   private lastSeen = new Map<string, number>();
+  /** When the room last became empty (or was created); null while anyone is in it. */
+  private emptySince: number | null = null;
   private readonly flushMs: number;
   private readonly idleSocketMs: number;
+  private readonly idleCleanupMs: number;
+  private readonly unclaimedMs: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.flushMs = Number(env.FLUSH_MS) > 0 ? Number(env.FLUSH_MS) : DEFAULT_FLUSH_MS;
     this.idleSocketMs =
       Number(env.IDLE_SOCKET_MS) > 0 ? Number(env.IDLE_SOCKET_MS) : DEFAULT_IDLE_SOCKET_MS;
+    this.idleCleanupMs =
+      Number(env.IDLE_CLEANUP_MS) > 0 ? Number(env.IDLE_CLEANUP_MS) : DEFAULT_IDLE_CLEANUP_MS;
+    this.unclaimedMs =
+      Number(env.UNCLAIMED_MS) > 0 ? Number(env.UNCLAIMED_MS) : DEFAULT_UNCLAIMED_MS;
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
-    this.ctx.blockConcurrencyWhile(async () => this.restore());
+    this.ctx.blockConcurrencyWhile(async () => {
+      this.restore();
+      await this.schedule();
+    });
   }
 
   /** Load from storage, then drop anyone who is no longer actually connected. */
@@ -132,6 +146,8 @@ export class RoomDO extends DurableObject<Env> {
     this.secrets = JSON.parse(this.readKv("secrets") ?? "{}") as Record<string, string>;
     this.pending = this.readKv("pending");
     this.uploadToken = this.readKv("upload_token");
+    const storedEmpty = this.readKv("empty_since");
+    this.emptySince = storedEmpty === null ? null : Number(storedEmpty);
     for (const [clientId, name] of Object.entries(this.roster)) {
       this.wasm(() => this.room.restore_player(clientId, name));
     }
@@ -157,6 +173,8 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
     for (const clientId of gone) this.releasePlayer(clientId, this.roster[clientId] ?? "");
+    // After a deploy nobody is connected: the idle clock starts now.
+    if (live.size === 0 && this.emptySince === null) this.setEmptySince(Date.now());
     if (gone.size > 0) {
       this.writeRoster();
       this.writeSecrets();
@@ -190,9 +208,11 @@ export class RoomDO extends DurableObject<Env> {
     this.uploadToken = crypto.randomUUID();
     this.writeKv("pending", clientId);
     this.writeKv("room_id", roomId);
+    this.setEmptySince(Date.now());
     this.writeKv("upload_token", this.uploadToken);
     this.writeSecrets();
     this.flush();
+    await this.schedule(); // arms the unclaimed-room expiry
     return { ok: true, resumeToken };
   }
 
@@ -448,6 +468,7 @@ export class RoomDO extends DurableObject<Env> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return this.sendError(ws, "Binary frames are not supported");
     if (utf8Length(message) > MAX_FRAME_BYTES) return this.sendError(ws, "Message too large");
+    if (!this.initialized) return this.sendError(ws, ROOM_NOT_FOUND);
     const attachment = ws.deserializeAttachment() as Attachment | null;
     if (attachment === null) return this.sendError(ws, "Unknown connection");
     this.lastSeen.set(attachment.clientId, Date.now());
@@ -477,6 +498,11 @@ export class RoomDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const now = Date.now();
+    const expiry = this.cleanupAt();
+    if (expiry !== null && now >= expiry) {
+      await this.destroy();
+      return;
+    }
     await this.sweepSilentSockets(now);
     if (this.dirtySince !== null && now >= this.dirtySince + this.flushMs) this.flush();
     // Only advance playback while someone is watching; join catches up.
@@ -488,6 +514,69 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
     await this.schedule();
+  }
+
+  private cleanupAt(): number | null {
+    if (!this.initialized) return null;
+    return cleanupDeadline({
+      joinedSockets: this.joinedCount(),
+      emptySince: this.emptySince,
+      idleMs: this.idleCleanupMs,
+      unclaimed: this.pending !== null,
+      unclaimedMs: this.unclaimedMs,
+    });
+  }
+
+  private setEmptySince(time: number | null): void {
+    this.emptySince = time;
+    this.writeKv("empty_since", time === null ? "" : String(time));
+  }
+
+  /**
+   * Delete the room: abort unfinished uploads, delete every R2 object under
+   * the room's prefix, then wipe the Durable Object's storage. R2 goes first
+   * so a failure leaves the record that says what still needs deleting; the
+   * thrown error makes the runtime retry the alarm.
+   */
+  private async destroy(): Promise<void> {
+    this.initialized = false; // new connections now see "room not found"
+    for (const socket of this.ctx.getWebSockets()) {
+      try {
+        socket.close(1001, "room expired");
+      } catch {
+        // already closed
+      }
+    }
+    const roomId = this.readKv("room_id");
+    this.ensureMediaTables();
+    for (const row of this.ctx.storage.sql.exec("SELECT * FROM uploads").toArray()) {
+      const upload = this.toUpload(row);
+      if (upload.r2UploadId === "" || roomId === null) continue;
+      try {
+        await this.env.MEDIA.resumeMultipartUpload(this.mediaKey(upload.sha256), upload.r2UploadId).abort();
+      } catch (error) {
+        console.error("aborting a multipart upload failed", String(error));
+      }
+    }
+    if (roomId !== null) {
+      const prefix = `room/${roomId}/`;
+      let cursor: string | undefined;
+      do {
+        const page = await this.env.MEDIA.list({ prefix, cursor, limit: 1000 });
+        if (page.objects.length > 0) await this.env.MEDIA.delete(page.objects.map((o) => o.key));
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor !== undefined);
+    }
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.room = new Room();
+    this.roster = {};
+    this.secrets = {};
+    this.pending = null;
+    this.uploadToken = null;
+    this.dirtySince = null;
+    this.emptySince = null;
+    this.lastSeen.clear();
   }
 
   /** Drop players whose socket has said nothing (not even a ping) for too long. */
@@ -583,6 +672,7 @@ export class RoomDO extends DurableObject<Env> {
     ws.serializeAttachment(attachment);
     this.lastSeen.set(clientId, attachment.joinedAt);
     this.roster[clientId] = attachment.name;
+    this.setEmptySince(null);
     if (this.pending === clientId) {
       this.pending = null;
       this.writeKv("pending", "");
@@ -610,7 +700,10 @@ export class RoomDO extends DurableObject<Env> {
     this.writeRoster();
     this.writeSecrets();
     this.markDirty();
-    if (this.joinedCount() === 0) this.flush();
+    if (this.joinedCount() === 0) {
+      this.setEmptySince(Date.now());
+      this.flush();
+    }
     await this.schedule();
   }
 
@@ -756,6 +849,7 @@ export class RoomDO extends DurableObject<Env> {
       flushMs: this.flushMs,
       deadline: this.wasm(() => this.room.next_tick_deadline(now)),
       joinedSockets: this.joinedCount(),
+      cleanupAt: this.cleanupAt(),
       sweepMs: Math.min(MAX_SWEEP_MS, Math.max(250, Math.floor(this.idleSocketMs / 3))),
       minGapMs: MIN_ALARM_GAP_MS,
       maxAheadMs: MAX_ALARM_AHEAD_MS,

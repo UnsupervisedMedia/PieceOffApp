@@ -8,6 +8,8 @@ export interface ScheduleInput {
   deadline: number;
   /** Sockets that have joined. Playback and liveness only matter with some. */
   joinedSockets: number;
+  /** When the room should be deleted, or null. Counts even when empty. */
+  cleanupAt: number | null;
   /** How often to look for dead sockets while players are connected. */
   sweepMs: number;
   /** Never schedule closer than this, so a stuck deadline cannot spin. */
@@ -27,6 +29,7 @@ export function alarmTarget(input: ScheduleInput): number | null {
     target = target === null ? time : Math.min(target, time);
   };
   if (input.dirtySince !== null) consider(input.dirtySince + input.flushMs);
+  if (input.cleanupAt !== null) consider(input.cleanupAt);
   if (input.joinedSockets > 0) {
     if (input.deadline >= 0) consider(input.deadline);
     consider(input.now + input.sweepMs);

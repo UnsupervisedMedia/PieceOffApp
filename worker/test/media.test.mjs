@@ -1,7 +1,7 @@
 // R2 media upload/download through `wrangler dev --local`.
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -29,6 +29,7 @@ describe("room media", () => {
   });
   after(async () => {
     await server?.stop();
+    await rm(dir, { recursive: true, force: true });
   });
 
   const api = (code, suffix, init = {}) =>
