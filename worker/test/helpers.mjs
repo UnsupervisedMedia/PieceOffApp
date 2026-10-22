@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +25,7 @@ export function freePort() {
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function startServer(port, persistDir, vars = {}) {
-  const varArgs = Object.entries({ FLUSH_MS: 500, ...vars }).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
+  const varArgs = Object.entries({ FLUSH_MS: 500, DEV_ALLOW_UNVERIFIED_CREATE: 1, ...vars }).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
   const child = spawn(
     "npx",
     ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", "0", "--persist-to", persistDir, ...varArgs],
@@ -99,11 +100,13 @@ export async function connect(port, code, query = "") {
         }, ms);
       }),
     pending: () => inbox.length,
-    isClosed: () => closed,
+    // Locally, wrangler's proxy can leave a server-closed socket in CLOSING
+    // until the process exits, so a received close frame counts as closed.
+    isClosed: () => closed || ws.readyState >= WebSocket.CLOSING,
     close: () => ws.close(),
     waitClosed: async () => {
-      for (let i = 0; i < 80 && !closed; i++) await delay(100);
-      return closed;
+      for (let i = 0; i < 80 && !(closed || ws.readyState >= WebSocket.CLOSING); i++) await delay(100);
+      return closed || ws.readyState >= WebSocket.CLOSING;
     },
   };
 }
@@ -140,3 +143,35 @@ export const joinMessage = (code, name, resumeToken, sha = SHA) => ({
   ...(resumeToken ? { resume_token: resumeToken } : {}),
 });
 
+
+/** Plain HTTP request with full control of headers (fetch forbids `Origin`). */
+export function rawRequest(port, method, urlPath, headers = {}, body = null) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: "127.0.0.1", port, method, path: urlPath, headers },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () =>
+          resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString("utf8") }),
+        );
+      },
+    );
+    request.on("error", reject);
+    if (body !== null) request.write(body);
+    request.end();
+  });
+}
+
+export const createBody = JSON.stringify({
+  type: "create_room",
+  name: "Host",
+  title: "Puzzle",
+  media_sha256: SHA,
+  media_extension: "mp4",
+  width: 640,
+  height: 360,
+  rows: 3,
+  columns: 4,
+  duration_ms: 5000,
+});

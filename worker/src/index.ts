@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import { handleMedia } from "./media";
 import { RoomDO } from "./room";
+import { originAllowed, verifyTurnstile } from "./security";
 
 export { RoomDO };
 
@@ -22,16 +23,42 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function clientIp(request: Request): string {
+  return request.headers.get("cf-connecting-ip") ?? "local";
+}
+
+/** Browser origins must be this site or listed; native clients send none. */
+function checkOrigin(request: Request, env: Env): Response | null {
+  const host = new URL(request.url).host;
+  return originAllowed(request.headers.get("origin"), host, env.ALLOWED_ORIGINS ?? "")
+    ? null
+    : json({ error: "Origin not allowed" }, 403);
+}
+
 /**
- * Gate for room creation. Plan 1B-2 replaces this with Turnstile verification
- * and a per-IP rate limit; until then creation is open on local dev only.
+ * Gate for room creation: per-address rate limit first (so abuse does not
+ * cost a Turnstile call), then Turnstile. With no Turnstile secret configured
+ * creation is refused, unless the local-development bypass is on.
  */
-async function verifyCreateAllowed(_request: Request, _env: Env): Promise<boolean> {
-  return true;
+async function checkCreateAllowed(request: Request, env: Env): Promise<Response | null> {
+  const ip = clientIp(request);
+  const { success } = await env.CREATE_LIMITER.limit({ key: ip });
+  if (!success) return json({ error: "Too many rooms created. Try again later." }, 429);
+  if (env.TURNSTILE_SECRET) {
+    const ok = await verifyTurnstile({
+      secret: env.TURNSTILE_SECRET,
+      token: request.headers.get("x-turnstile-token") ?? "",
+      ip: ip === "local" ? "" : ip,
+      url: env.TURNSTILE_VERIFY_URL,
+    });
+    return ok ? null : json({ error: "Verification failed" }, 403);
+  }
+  return env.DEV_ALLOW_UNVERIFIED_CREATE === "1" ? null : json({ error: "Not allowed" }, 403);
 }
 
 async function createRoom(request: Request, env: Env): Promise<Response> {
-  if (!(await verifyCreateAllowed(request, env))) return json({ error: "Not allowed" }, 403);
+  const denied = checkOrigin(request, env) ?? (await checkCreateAllowed(request, env));
+  if (denied) return denied;
   const declared = Number(request.headers.get("content-length") ?? "0");
   if (declared > MAX_BODY) return json({ error: "Message too large" }, 413);
   const text = await request.text();
@@ -70,6 +97,8 @@ export default {
     }
     const media = url.pathname.match(/^\/api\/rooms\/([^/]+)\/media(\/.*)?$/);
     if (media) {
+      const refused = checkOrigin(request, env);
+      if (refused) return refused;
       const code = media[1]!.toUpperCase();
       if (!CODE_RE.test(code)) return json({ error: "Room code not found" }, 404);
       return handleMedia(request, env, code, media[2] ?? "");
@@ -77,7 +106,15 @@ export default {
     if (url.pathname === "/ws") {
       const code = (url.searchParams.get("code") ?? "").trim().toUpperCase();
       if (!CODE_RE.test(code)) return json({ error: "Room code not found" }, 404);
-      return env.ROOMS.get(env.ROOMS.idFromName(code)).fetch(request);
+      const refused = checkOrigin(request, env);
+      if (refused) return refused;
+      const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
+      // Guessing codes is the only way to find a room: budget the misses.
+      if (!(await stub.exists())) {
+        const { success } = await env.LOOKUP_LIMITER.limit({ key: clientIp(request) });
+        if (!success) return json({ error: "Too many lookups. Try again later." }, 429);
+      }
+      return stub.fetch(request);
     }
     return new Response("Not found", { status: 404 });
   },
