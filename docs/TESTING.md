@@ -91,8 +91,10 @@ HTTPS for media transfer automatically.
     board, the tray, or another holder shows red and is refused. Rename and
     remove it under **Holders**; removing leaves the pieces where they are.
     The owner leaves: the holder says "(away)" and still holds its pieces;
-    rejoining under the same name reclaims it. The host's **Clear** removes
-    anyone's, and Play again clears all of them.
+    rejoining under the same name reclaims it. A client with other settings
+    (another `PIECEOFF_CLIENT_DIR`) joining under the owner's name is refused
+    "That name is taken in this room". The host's **Clear** removes anyone's,
+    and Play again clears all of them.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the

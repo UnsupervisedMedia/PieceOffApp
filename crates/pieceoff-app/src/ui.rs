@@ -1037,6 +1037,7 @@ impl PieceOffApp {
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),
                     media_extension: self.media_extension.clone(),
+                    player_key: self.settings.player_key.clone(),
                 };
                 self.connect(message);
             } else if let Some(remaining) = reconnect_at.checked_duration_since(Instant::now()) {

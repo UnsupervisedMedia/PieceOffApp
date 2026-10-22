@@ -320,6 +320,7 @@ mod tests {
                     name: "n".into(),
                     media_sha256: "hash".into(),
                     media_extension: "png".into(),
+                    player_key: String::new(),
                 },
                 0,
             )

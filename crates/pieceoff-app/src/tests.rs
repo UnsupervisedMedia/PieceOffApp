@@ -1497,6 +1497,28 @@ fn ghost_setting_defaults_off_and_persists() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn each_device_gets_one_private_player_key_and_sends_it() {
+    let key = new_player_key();
+    assert!(valid_player_key(&key), "{key}");
+    assert_ne!(key, new_player_key());
+    assert!(!valid_player_key("") && !valid_player_key(&"g".repeat(32)));
+    let dir = std::env::temp_dir().join(format!("pieceoff-key-{}", std::process::id()));
+    let path = dir.join("settings.json");
+    save_settings(
+        &path,
+        &Settings {
+            player_key: key.clone(),
+            ..Settings::default()
+        },
+    );
+    assert_eq!(load_settings(&path).player_key, key);
+    let _ = std::fs::remove_dir_all(dir);
+    // A fresh app always has one.
+    let app = PieceOffApp::default();
+    assert!(valid_player_key(&app.settings.player_key));
+}
+
 /// Drives the real board UI with synthetic pointer events, with the core
 /// room logic standing in for the server.
 struct DragRig {
