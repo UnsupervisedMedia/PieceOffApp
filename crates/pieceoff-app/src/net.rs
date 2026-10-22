@@ -210,7 +210,9 @@ impl PieceOffApp {
                     peers,
                     snapshot,
                     media_upload_token,
+                    server_now_ms,
                 } => {
+                    board::set_server_clock(server_now_ms);
                     if !valid_media_dimensions(snapshot.width, snapshot.height) {
                         self.network = None;
                         self.connected = false;

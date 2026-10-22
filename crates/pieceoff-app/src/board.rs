@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// An outline thinned to every `stride`th point, with its triangulation.
 pub(crate) struct ShapeDetail {
@@ -370,7 +371,7 @@ impl PieceOffApp {
         let stats = &snapshot.stats;
         stats
             .started
-            .then(|| Duration::from_millis(stats.elapsed_at(wall_clock_ms())))
+            .then(|| Duration::from_millis(stats.elapsed_at(server_clock_ms())))
     }
 
     fn render_room(
@@ -1106,6 +1107,26 @@ pub(crate) fn completion_lines(
 
 /// The local wall clock in milliseconds since the Unix epoch, the scale the
 /// server stamps the solve clock with.
+/// How far the server's wall clock is ahead of ours, learned at each welcome.
+static SERVER_CLOCK_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Remember the server's clock from a welcome; zero means it did not say.
+pub(crate) fn set_server_clock(server_now_ms: u64) {
+    if server_now_ms > 0 {
+        let offset = server_now_ms as i64 - wall_clock_ms() as i64;
+        SERVER_CLOCK_OFFSET_MS.store(offset, Ordering::Relaxed);
+    }
+}
+
+/// Our best guess at the server's wall clock now. Use it for anything the
+/// server stamped (the solve clock, chat times) so a client whose own clock
+/// is off still shows the right numbers.
+pub(crate) fn server_clock_ms() -> u64 {
+    (wall_clock_ms() as i64)
+        .saturating_add(SERVER_CLOCK_OFFSET_MS.load(Ordering::Relaxed))
+        .max(0) as u64
+}
+
 pub(crate) fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
