@@ -353,6 +353,7 @@ mod tests {
                     media_sha256: "hash".into(),
                     media_extension: "png".into(),
                     spectator: false,
+                    player_key: String::new(),
                 },
                 0,
             )

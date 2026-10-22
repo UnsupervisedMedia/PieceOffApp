@@ -8,6 +8,11 @@ mod apply;
 pub use apply::ApplyOutcome;
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title};
+mod claims;
+pub use claims::{
+    MAX_NAME_CLAIMS, MAX_PLAYER_KEY_BYTES, MAX_ROOM_PLAYERS, NAME_TAKEN, NameClaim,
+    REPLACED_BY_NEW_CONNECTION,
+};
 mod holders;
 mod stats;
 mod timelapse;
@@ -823,6 +828,9 @@ pub enum ClientMessage {
         /// Length of the first video, so the server can advance the queue.
         #[serde(default)]
         duration_ms: u64,
+        /// This device's private player key; see `NameClaim`.
+        #[serde(default)]
+        player_key: String,
     },
     JoinRoom {
         invite_code: String,
@@ -832,6 +840,9 @@ pub enum ClientMessage {
         /// Join to watch: see everything, change nothing (protocol v13).
         #[serde(default)]
         spectator: bool,
+        /// This device's private player key; empty from older clients.
+        #[serde(default)]
+        player_key: String,
     },
     DragStart {
         piece_id: u32,
@@ -1103,6 +1114,9 @@ pub struct RoomRuntime {
     /// with the room, sent on request, never in a snapshot.
     pub timelapse: Timelapse,
     pub host_id: Option<String>,
+    /// Which player key owns each name in this room (see `claims`). Host
+    /// state only: hosts persist it beside the snapshot, never send it.
+    pub name_claims: Vec<NameClaim>,
     drag_groups: HashMap<String, Vec<u32>>,
 }
 

@@ -1,8 +1,9 @@
 //! Piece holders: a player's own sorting areas on the table (protocol v12).
 //!
 //! A holder is a rectangle on the table that belongs to one player, by
-//! display name (there is no stable player id; solve credits key by name
-//! too). A loose piece whose centre lies inside someone else's holder is
+//! display name (solve credits key by name too). Name claims (`claims`) keep
+//! a name with the device that first used it in the room, so nobody else can
+//! join under it and take over its holders. A loose piece whose centre lies inside someone else's holder is
 //! reserved: other players can see it but cannot pick it up. The owner moves
 //! pieces in and out freely, and anyone may drop a piece into a holder (it is
 //! then reserved for the owner). Placed pieces are never reserved.
@@ -261,8 +262,10 @@ impl RoomRuntime {
     }
 
     /// Move, resize or rename the caller's own holder. Moving it carries the
-    /// loose groups inside it along, except any group someone is dragging.
-    /// Returns the pieces that moved.
+    /// loose groups inside it along, except a group someone is dragging, a
+    /// group another player's holder reserves (it straddles both), and a
+    /// group that would land in another player's holder. Returns the pieces
+    /// that moved.
     #[allow(clippy::too_many_arguments)]
     pub fn update_holder(
         &mut self,
@@ -307,9 +310,11 @@ impl RoomRuntime {
                         .iter()
                         .filter(|piece| piece.group_id == *group)
                         .all(|piece| !piece.placed && piece.held_by.is_none())
+                        && snapshot.reserved_from(*group, Some(&owner)).is_none()
                 })
                 .collect();
             groups.sort_unstable();
+            let (half_w, half_h) = (snapshot.cell_width() * 0.5, snapshot.cell_height() * 0.5);
             for group in groups {
                 let (gx, gy) = snapshot.clamp_move(
                     snapshot
@@ -320,6 +325,21 @@ impl RoomRuntime {
                     dx,
                     dy,
                 );
+                let lands_in_another = snapshot
+                    .pieces
+                    .iter()
+                    .filter(|piece| piece.group_id == group)
+                    .any(|piece| {
+                        let (cx, cy) = (piece.x + gx + half_w, piece.y + gy + half_h);
+                        snapshot.holders.iter().any(|holder| {
+                            holder.id != holder_id
+                                && holder.owner != owner
+                                && holder.contains(cx, cy)
+                        })
+                    });
+                if lands_in_another {
+                    continue;
+                }
                 for piece in &mut snapshot.pieces {
                     if piece.group_id == group {
                         piece.x += gx;
@@ -366,15 +386,18 @@ impl RoomRuntime {
     /// player who has gone are kept for `HOLDER_GRACE_MS`, so coming back
     /// under the same name reclaims them; after that they are removed and
     /// their pieces stay where they lie. Hosts call this on a timer. Returns
-    /// the event to broadcast when holders were released.
+    /// the event to broadcast (and persist) when an owner went away, came
+    /// back, or had their holders released.
     pub fn tick_holders(&mut self, now_ms: u64) -> Option<ServerMessage> {
         let present: HashSet<&str> = self.names.values().map(String::as_str).collect();
         let snapshot = self.snapshot.as_mut()?;
+        let mut changed = false;
         for holder in &mut snapshot.holders {
             if present.contains(holder.owner.as_str()) {
-                holder.owner_away_since_ms = None;
+                changed |= holder.owner_away_since_ms.take().is_some();
             } else if holder.owner_away_since_ms.is_none() {
                 holder.owner_away_since_ms = Some(now_ms);
+                changed = true;
             }
         }
         let before = snapshot.holders.len();
@@ -383,7 +406,7 @@ impl RoomRuntime {
                 .owner_away_since_ms
                 .is_none_or(|since| now_ms.saturating_sub(since) < HOLDER_GRACE_MS)
         });
-        if snapshot.holders.len() == before {
+        if !changed && snapshot.holders.len() == before {
             return None;
         }
         snapshot.revision += 1;
@@ -664,6 +687,77 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_holder_leaves_a_group_that_straddles_another_players_holder() {
+        let mut room = room();
+        let ada = create(&mut room, "ada", SPOT).unwrap();
+        create(&mut room, "bo", (-1200.0, 800.0, 1000.0, 800.0)).unwrap();
+        let snap = room.snapshot.as_mut().unwrap();
+        // Pieces 0 and 1 joined: 0's centre in Bo's holder, 1's in Ada's.
+        for (id, x) in [(0, -400.0), (1, -200.0)] {
+            let piece = snap.piece_mut(id).unwrap();
+            piece.group_id = 0;
+            piece.x = x;
+            piece.y = 800.0;
+        }
+        let before = snapshot(&room).pieces.clone();
+        let out = room
+            .apply(
+                "ada",
+                ClientMessage::UpdateHolder {
+                    holder_id: ada,
+                    x: -200.0,
+                    y: 1700.0,
+                    width: 1000.0,
+                    height: 800.0,
+                    label: "Edges".into(),
+                },
+                0,
+            )
+            .unwrap();
+        let ServerMessage::PiecesChanged { pieces, .. } = out.event else {
+            panic!()
+        };
+        assert!(pieces.is_empty());
+        assert_eq!(snapshot(&room).pieces, before);
+    }
+
+    #[test]
+    fn moving_a_holder_never_drops_a_group_into_another_players_holder() {
+        let mut room = room();
+        let ada = create(&mut room, "ada", SPOT).unwrap();
+        // Bo's holder is where Ada's piece would land if Ada shrinks hers.
+        create(&mut room, "bo", (-700.0, 2400.0, 1000.0, 800.0)).unwrap();
+        drop_at(&mut room, "ada", 5, 700.0, 1500.0);
+        drop_at(&mut room, "ada", 6, -100.0, 900.0);
+        let kept = snapshot(&room).piece(5).unwrap().clone();
+        let out = room
+            .apply(
+                "ada",
+                ClientMessage::UpdateHolder {
+                    holder_id: ada,
+                    x: -1400.0,
+                    y: 2000.0,
+                    width: 400.0,
+                    height: 400.0,
+                    label: "Edges".into(),
+                },
+                0,
+            )
+            .unwrap();
+        let ServerMessage::PiecesChanged { pieces, .. } = out.event else {
+            panic!()
+        };
+        // Piece 6 comes along; piece 5 would have landed in Bo's, so stays.
+        assert_eq!(pieces.iter().map(|p| p.id).collect::<Vec<_>>(), vec![6]);
+        assert_eq!(snapshot(&room).piece(5).unwrap(), &kept);
+        let snap = snapshot(&room);
+        assert_eq!(
+            snap.holder_of(snap.piece(6).unwrap()).map(|h| h.id),
+            Some(ada)
+        );
+    }
+
+    #[test]
     fn deleting_releases_pieces_in_place_and_the_host_may_clear_any() {
         let mut room = room();
         let holder = create(&mut room, "ada", SPOT).unwrap();
@@ -687,7 +781,21 @@ mod tests {
         create(&mut room, "ada", SPOT).unwrap();
         drop_at(&mut room, "ada", 5, 300.0, 1000.0);
         room.names.remove("ada");
-        assert!(room.tick_holders(1_000).is_none());
+        // Going away is announced, once, so everyone sees "(away)".
+        let revision = snapshot(&room).revision;
+        let Some(ServerMessage::PiecesChanged {
+            holders: Some(holders),
+            revision: sent,
+            ..
+        }) = room.tick_holders(1_000)
+        else {
+            panic!("going away is announced with the holders")
+        };
+        assert_eq!(
+            (sent, holders[0].owner_away_since_ms),
+            (revision + 1, Some(1_000))
+        );
+        assert!(room.tick_holders(1_500).is_none());
         assert_eq!(snapshot(&room).holders[0].owner_away_since_ms, Some(1_000));
         // Still reserved while Ada is away.
         assert!(
@@ -696,10 +804,14 @@ mod tests {
         );
         // Ada comes back under a new connection and reclaims it.
         room.names.insert("ada-2".into(), "Ada".into());
-        assert!(room.tick_holders(2_000).is_none());
+        assert!(
+            room.tick_holders(2_000).is_some(),
+            "coming back is announced"
+        );
         assert_eq!(snapshot(&room).holders[0].owner_away_since_ms, None);
+        assert!(room.tick_holders(2_500).is_none());
         room.names.remove("ada-2");
-        room.tick_holders(3_000);
+        room.tick_holders(3_000).unwrap();
         assert!(room.tick_holders(3_000 + HOLDER_GRACE_MS - 1).is_none());
         let revision = snapshot(&room).revision;
         let event = room.tick_holders(3_000 + HOLDER_GRACE_MS).unwrap();

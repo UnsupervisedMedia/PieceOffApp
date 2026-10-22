@@ -6,8 +6,9 @@ use eframe::egui::{
 use futures_util::{SinkExt, StreamExt};
 
 use pieceoff_core::{
-    ClientMessage, Piece, PlaybackState, RepeatMode, RoomSnapshot, ServerMessage, TrayArrangement,
-    piece_outline, piece_tray_layout, valid_media_dimensions, valid_media_extension,
+    ClientMessage, Piece, PlaybackState, REPLACED_BY_NEW_CONNECTION, RepeatMode, RoomSnapshot,
+    ServerMessage, TrayArrangement, piece_outline, piece_tray_layout, valid_media_dimensions,
+    valid_media_extension,
 };
 
 use serde::{Deserialize, Serialize};
@@ -262,6 +263,9 @@ struct PieceOffApp {
     /// The server said the room code is unknown while we were reconnecting:
     /// the room expired or the server lost it, so retrying cannot help.
     room_gone: bool,
+    /// The server closed this connection because the same player joined the
+    /// room again from another window; reconnecting would take it back.
+    replaced_elsewhere: bool,
     /// When the video decoder was first seen stopped, for automatic retries.
     decoder_dead_since: Option<Instant>,
     /// The "could not restart" message has been shown for this stoppage.
@@ -283,6 +287,12 @@ impl Default for PieceOffApp {
             load_settings(&settings_path())
         };
         settings.mouse = settings.mouse.clone().sanitized();
+        if !valid_player_key(&settings.player_key) {
+            settings.player_key = new_player_key();
+            if !cfg!(test) && !settings.player_key.is_empty() {
+                save_settings(&settings_path(), &settings);
+            }
+        }
         media_tools::set_chosen_directory(settings.ffmpeg_dir.clone().map(PathBuf::from));
         let audio_offset_ms = Arc::new(std::sync::atomic::AtomicI32::new(
             settings.audio_offset_ms.clamp(-500, 500),
@@ -427,6 +437,7 @@ impl Default for PieceOffApp {
             button_panning: false,
             last_move_sent_at: f64::NEG_INFINITY,
             room_gone: false,
+            replaced_elsewhere: false,
             decoder_dead_since: None,
             decoder_gave_up_reported: false,
             tools: Vec::new(),
@@ -834,6 +845,7 @@ impl PieceOffApp {
                 Box::new(snapshot)
             }),
             duration_ms: self.media_duration_ms,
+            player_key: self.settings.player_key.clone(),
         };
         self.media_ready = false;
         self.media_uploading = true;
@@ -959,6 +971,7 @@ impl PieceOffApp {
             media_sha256: self.media_hash.clone(),
             media_extension: self.media_extension.clone(),
             spectator: self.watch_only,
+            player_key: self.settings.player_key.clone(),
         };
         self.connect(message);
     }
@@ -1165,6 +1178,7 @@ impl PieceOffApp {
         self.reconnect_at = None;
         self.reconnect_attempt = 0;
         self.room_gone = false;
+        self.replaced_elsewhere = false;
         self.decoder_restarts_after_error = 0;
         self.decoder_recovering = false;
         if let Some(decoder) = &self.decoder_playing {

@@ -16,7 +16,7 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ChatLine, ClientMessage, MAX_ROOM_SPECTATORS, MediaItem, RoomRuntime, RoomSnapshot,
+    ChatLine, ClientMessage, MediaItem, REPLACED_BY_NEW_CONNECTION, RoomRuntime, RoomSnapshot,
     SceneBounds, ServerMessage, StoredRoom, clean_chat_text, clean_media_extension, clean_name,
     clean_title, valid_media_dimensions,
 };
@@ -193,6 +193,9 @@ struct RoomRecord {
     /// joiner subscribes and copies the history, so each line reaches a
     /// joiner exactly once.
     chat: std::sync::Mutex<ChatLog>,
+    /// Client ids whose player joined again on a new connection; their old
+    /// socket closes when it sees its id here.
+    replaced: broadcast::Sender<String>,
 }
 
 impl RoomRecord {
@@ -208,6 +211,7 @@ impl RoomRecord {
             media_upload_token: Mutex::new(media_upload_token),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
             chat: std::sync::Mutex::new(ChatLog::default()),
+            replaced: broadcast::channel(16).0,
         }
     }
 
@@ -223,6 +227,7 @@ impl RoomRecord {
             media_upload_token: Mutex::new(None),
             last_activity: Arc::new(Mutex::new(last_activity)),
             chat: std::sync::Mutex::new(ChatLog::default()),
+            replaced: broadcast::channel(16).0,
         }
     }
 
@@ -1103,6 +1108,7 @@ async fn handle_socket(
                 return;
             }
         };
+    let mut replaced = room.replaced.subscribe();
     persist_room(&state, &room).await;
     let (mut events, chat_history) = subscribe_with_chat(&room);
     let mut cursor_events = room.cursors.subscribe();
@@ -1186,7 +1192,21 @@ async fn handle_socket(
                 {
                     break;
                 }
+                // Backstop for a replacement announced before this socket
+                // subscribed: a replaced connection is no longer seated.
+                if !spectator && !room.runtime.lock().await.names.contains_key(&client_id) {
+                    let _ = send(&mut socket, &ServerMessage::Error { message: REPLACED_BY_NEW_CONNECTION.into() }).await;
+                    break;
+                }
             }
+            gone = replaced.recv() => match gone {
+                Ok(gone) if gone == client_id => {
+                    let _ = send(&mut socket, &ServerMessage::Error { message: REPLACED_BY_NEW_CONNECTION.into() }).await;
+                    break;
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             event = events.recv() => match event {
                 Ok(packet) => {
                     if packet.visible_to(&client_id)
@@ -1271,6 +1291,24 @@ async fn handle_socket(
     persist_room(&state, &room).await;
 }
 
+/// The stored form of a player key: a hex SHA-256 digest, salted with the
+/// room id so the same device cannot be linked across rooms on disk. `None`
+/// for an empty key (an older client).
+fn player_key_hash(room_id: &str, key: &str) -> Result<Option<String>, String> {
+    if key.is_empty() {
+        return Ok(None);
+    }
+    if key.len() > pieceoff_core::MAX_PLAYER_KEY_BYTES {
+        return Err("Invalid player key".into());
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"pieceoff-player-key\0");
+    digest.update(room_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(key.as_bytes());
+    Ok(Some(format!("{:x}", digest.finalize())))
+}
+
 async fn connect_room(
     state: &AppState,
     client_id: &str,
@@ -1288,12 +1326,14 @@ async fn connect_room(
             columns,
             initial_snapshot,
             duration_ms,
+            player_key,
         } => {
             if !valid_sha256(&media_sha256) {
                 return Err("Invalid media fingerprint".into());
             }
             let name = clean_name(&name);
             let room_id = Uuid::new_v4().to_string();
+            let key_hash = player_key_hash(&room_id, &player_key)?;
             let invite_code = new_invite_code();
             let clean_title = clean_title(&title);
             let clean_extension = clean_media_extension(&media_extension)?;
@@ -1334,7 +1374,7 @@ async fn connect_room(
             {
                 let mut runtime = room.runtime.lock().await;
                 runtime.host_id = Some(client_id.to_owned());
-                runtime.names.insert(client_id.to_owned(), name.clone());
+                runtime.admit_player(client_id, &name, key_hash.as_deref(), now_ms())?;
                 runtime.snapshot = Some(snapshot);
                 // An imported puzzle's clock carries on with its host here.
                 runtime.sync_clock_to_players(now_ms());
@@ -1361,6 +1401,7 @@ async fn connect_room(
             media_sha256,
             media_extension: _,
             spectator,
+            player_key,
         } => {
             let invite_code = invite_code.trim().to_ascii_uppercase();
             let room = state
@@ -1379,25 +1420,22 @@ async fn connect_room(
                 if media_sha256 != snapshot.media_sha256 && !snapshot.media_available {
                     return Err("The room media is still uploading. Wait for the host and try joining again.".into());
                 }
+                let key_hash = player_key_hash(&snapshot.id, &player_key)?;
                 if spectator {
                     // Watchers never host, never count toward the clock or
                     // the player limit, and never get an upload token.
-                    if runtime.spectators.len() >= MAX_ROOM_SPECTATORS {
-                        return Err(format!(
-                            "This room already has {MAX_ROOM_SPECTATORS} spectators"
-                        ));
-                    }
-                    runtime
-                        .spectators
-                        .insert(client_id.to_owned(), clean_name(&name));
+                    runtime.admit_spectator(client_id, &clean_name(&name), key_hash.as_deref())?;
                     return Ok((room.clone(), invite_code, clean_name(&name), false, true));
                 }
-                if runtime.names.len() >= 8 {
-                    return Err("This room already has 8 players".into());
+                let replaced = runtime.admit_player(
+                    client_id,
+                    &clean_name(&name),
+                    key_hash.as_deref(),
+                    now_ms(),
+                )?;
+                for old in replaced {
+                    let _ = room.replaced.send(old);
                 }
-                runtime
-                    .names
-                    .insert(client_id.to_owned(), clean_name(&name));
                 let clock_before = runtime.snapshot.as_ref().map(|s| s.stats.clone());
                 runtime.sync_clock_to_players(now_ms());
                 let host_present = runtime
@@ -1494,6 +1532,7 @@ async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
         };
         StoredRoom {
             snapshot,
+            name_claims: runtime.name_claims.clone(),
             timelapse: runtime.timelapse.clone(),
         }
     };
@@ -1523,6 +1562,7 @@ fn persist_snapshot(data_dir: &Path, snapshot: &RoomSnapshot) -> std::io::Result
         data_dir,
         &StoredRoom {
             snapshot: snapshot.clone(),
+            name_claims: Vec::new(),
             timelapse: Default::default(),
         },
     )
@@ -1606,12 +1646,16 @@ async fn load_rooms(state: &AppState) {
             .fold(
                 HashMap::<String, (StoredRoom, SystemTime)>::new(),
                 |mut latest, (stored, modified)| {
-                    let entry = latest
-                        .entry(stored.snapshot.invite_code.clone())
-                        .or_insert_with(|| (stored.clone(), modified));
-                    let (revision, current) = (stored.snapshot.revision, entry.0.snapshot.revision);
-                    if revision > current || (revision == current && modified > entry.1) {
-                        *entry = (stored, modified);
+                    let code = stored.snapshot.invite_code.clone();
+                    let revision = stored.snapshot.revision;
+                    match latest.get(&code) {
+                        Some((kept, kept_modified))
+                            if revision < kept.snapshot.revision
+                                || (revision == kept.snapshot.revision
+                                    && modified <= *kept_modified) => {}
+                        _ => {
+                            latest.insert(code, (stored, modified));
+                        }
                     }
                     latest
                 },
@@ -1622,14 +1666,12 @@ async fn load_rooms(state: &AppState) {
     .await
     .unwrap_or_default();
     let mut rooms = state.rooms.write().await;
-    for (
-        StoredRoom {
+    for (stored, last_activity) in snapshots {
+        let StoredRoom {
             mut snapshot,
+            name_claims,
             timelapse,
-        },
-        last_activity,
-    ) in snapshots
-    {
+        } = stored;
         for piece in &mut snapshot.pieces {
             piece.held_by = None;
         }
@@ -1638,6 +1680,8 @@ async fn load_rooms(state: &AppState) {
         runtime.host_id = Some(snapshot.host_id.clone());
         runtime.snapshot = Some(snapshot);
         runtime.timelapse = timelapse;
+        runtime.name_claims = name_claims;
+        runtime.name_claims.truncate(pieceoff_core::MAX_NAME_CLAIMS);
         rooms.insert(
             code,
             Arc::new(RoomRecord::with_runtime(runtime, last_activity)),
@@ -1753,10 +1797,11 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
         return;
     }
     runtime.forget_drag(client_id);
-    let name = runtime
-        .names
-        .remove(client_id)
-        .unwrap_or_else(|| fallback_name.to_owned());
+    // A connection replaced by its player's new one was unseated then; the
+    // player has not left, so nobody is told.
+    let seated = runtime.names.remove(client_id);
+    let left = seated.is_some();
+    let name = seated.unwrap_or_else(|| fallback_name.to_owned());
     // The last player out pauses the solve clock.
     let clock_before = runtime.snapshot.as_ref().map(|s| s.stats.clone());
     runtime.sync_clock_to_players(now_ms());
@@ -1789,10 +1834,12 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
             changed_snapshot = Some(snapshot.clone());
         }
     }
-    let _ = room.events.send(ServerMessage::PeerLeft {
-        name,
-        spectator: false,
-    });
+    if left {
+        let _ = room.events.send(ServerMessage::PeerLeft {
+            name,
+            spectator: false,
+        });
+    }
     let _ = room.cursors.send(ServerMessage::CursorHidden {
         client_id: client_id.to_owned(),
     });
@@ -1860,6 +1907,7 @@ mod tests {
             columns: 2,
             initial_snapshot: Some(Box::new(imported)),
             duration_ms: 0,
+            player_key: String::new(),
         };
         let wire_message = serde_json::to_string(&request).unwrap();
         let decoded_message: ClientMessage = serde_json::from_str(&wire_message).unwrap();
@@ -2045,6 +2093,7 @@ mod tests {
                 media_sha256: hash,
                 media_extension: "mp4".into(),
                 spectator: false,
+                player_key: String::new(),
             },
         )
         .await
@@ -2752,6 +2801,7 @@ mod tests {
             media_sha256: String::new(),
             media_extension: String::new(),
             spectator: false,
+            player_key: String::new(),
         };
         assert!(
             connect_room(&state, "early-guest", guest.clone())
@@ -3023,6 +3073,135 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 201"), "{response}");
         read_message(&mut host, "snapshot").await;
         (host, code, hash)
+    }
+
+    /// Like `read_message`, but keeps the text of everything read in `log`.
+    async fn read_logged<S>(
+        socket: &mut WebSocketStream<S>,
+        wanted: &str,
+        log: &mut Vec<String>,
+    ) -> serde_json::Value
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .expect("socket remains open")
+                .expect("websocket read succeeds");
+            if let Message::Text(text) = message {
+                log.push(text.to_string());
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["type"] == wanted {
+                    return value;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_players_name_stays_with_their_device_key_and_the_key_never_leaves_the_server() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-claims-{}", Uuid::new_v4()));
+        let (address, state) = queue_test_server(&data_dir).await;
+        let (mut host, code, hash) = queue_test_room(address, b"claims clip").await;
+        let ada_key = "0123456789abcdef0123456789abcdef";
+        let mut log = Vec::new();
+        let join = |name: &str, key: Option<&str>| {
+            let mut message = serde_json::json!({
+                "type":"join_room", "invite_code":code, "name":name,
+                "media_sha256":hash, "media_extension":""
+            });
+            if let Some(key) = key {
+                message["player_key"] = key.into();
+            }
+            Message::Text(message.to_string().into())
+        };
+        let connect = || async { connect_async(format!("ws://{address}/ws")).await.unwrap().0 };
+
+        let mut ada = connect().await;
+        ada.send(join("Ada", Some(ada_key))).await.unwrap();
+        read_logged(&mut ada, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+
+        // Someone else, whatever the case, and an old client without a key
+        // are refused her name.
+        for (name, key) in [
+            ("ada", Some("ffffffffffffffffffffffffffffffff")),
+            ("Ada", None),
+        ] {
+            let mut other = connect().await;
+            other.send(join(name, key)).await.unwrap();
+            let refused = read_logged(&mut other, "error", &mut log).await;
+            assert_eq!(refused["message"], pieceoff_core::NAME_TAKEN);
+        }
+        // An old client may still use a free name.
+        let mut bo = connect().await;
+        bo.send(join("Bo", None)).await.unwrap();
+        read_logged(&mut bo, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+
+        // Ada again from a new connection before the old one timed out: the
+        // new one is her, and the old one is told and closed.
+        let mut again = connect().await;
+        again.send(join("Ada", Some(ada_key))).await.unwrap();
+        let welcome = read_logged(&mut again, "welcome", &mut log).await;
+        assert_eq!(welcome["name"], "Ada");
+        let replaced = read_logged(&mut ada, "error", &mut log).await;
+        assert_eq!(replaced["message"], REPLACED_BY_NEW_CONNECTION);
+        loop {
+            match tokio::time::timeout(Duration::from_secs(3), ada.next())
+                .await
+                .unwrap()
+            {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+        // She never left, so nobody is told she did.
+        again
+            .send(Message::Text(
+                serde_json::json!({"type":"chat", "text":"back"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let start = log.len();
+        read_logged(&mut host, "chat", &mut log).await;
+        assert!(
+            log[start..].iter().all(|text| !text.contains("peer_left")),
+            "{:?}",
+            &log[start..]
+        );
+        let room = state.rooms.read().await.get(&code).unwrap().clone();
+        let (names, room_id) = {
+            let runtime = room.runtime.lock().await;
+            let mut names: Vec<String> = runtime.names.values().cloned().collect();
+            names.sort();
+            (names, runtime.snapshot.as_ref().unwrap().id.clone())
+        };
+        assert_eq!(names, vec!["Ada", "Bo", "Host"]);
+
+        // Neither the key nor its digest ever reaches a client.
+        let digest = player_key_hash(&room_id, ada_key).unwrap().unwrap();
+        assert!(!log.is_empty());
+        for text in &log {
+            assert!(
+                !text.contains(ada_key) && !text.contains(&digest) && !text.contains("name_claims"),
+                "{text}"
+            );
+        }
+        // The server keeps only the digest, beside the saved room.
+        persist_room(&state, &room).await;
+        let saved: String = fs::read_dir(&data_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .map(|entry| fs::read_to_string(entry.path()).unwrap())
+            .collect();
+        assert!(saved.contains(&digest) && !saved.contains(ada_key));
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     fn queue_add_message(hash: &str, title: &str) -> Message {
@@ -4212,6 +4391,7 @@ mod tests {
 mod hardening_tests {
     use super::*;
     use futures_util::SinkExt;
+    use pieceoff_core::MAX_ROOM_SPECTATORS;
     use tokio_tungstenite::{
         connect_async,
         tungstenite::{self, client::IntoClientRequest},
@@ -4330,6 +4510,7 @@ mod hardening_tests {
             columns: 2,
             initial_snapshot: None,
             duration_ms: 0,
+            player_key: String::new(),
         };
         let (_, first_code, _, _, _) = connect_room(&state, "host-1", create("First"))
             .await
@@ -4468,6 +4649,7 @@ mod hardening_tests {
                 columns: 2,
                 initial_snapshot: None,
                 duration_ms: 0,
+                player_key: String::new(),
             },
         )
         .await
@@ -4518,6 +4700,7 @@ mod hardening_tests {
                 columns: 2,
                 initial_snapshot: None,
                 duration_ms: 0,
+                player_key: String::new(),
             },
         )
         .await
@@ -4574,6 +4757,7 @@ mod hardening_tests {
                 media_sha256: "c".repeat(64),
                 media_extension: "png".into(),
                 spectator: false,
+                player_key: String::new(),
             },
         )
         .await
@@ -4602,6 +4786,7 @@ mod hardening_tests {
                 columns: 2,
                 initial_snapshot: None,
                 duration_ms: 0,
+                player_key: String::new(),
             },
         )
         .await
@@ -4615,6 +4800,7 @@ mod hardening_tests {
                 media_sha256: "d".repeat(64),
                 media_extension: "png".into(),
                 spectator: false,
+                player_key: String::new(),
             },
         )
         .await
@@ -4686,6 +4872,8 @@ mod hardening_tests {
 
         // The guest leaves; the holder waits for them, through a restart.
         remove_peer(&room, "guest", "Guest").await;
+        // Marking the owner away is broadcast (and so persisted) once.
+        assert!(tick_room(&room, now_ms()).await);
         assert!(!tick_room(&room, now_ms()).await);
         persist_all(&state).await;
         let restored = AppState::from_config(&config);
@@ -4722,6 +4910,72 @@ mod hardening_tests {
         dispatch(&reloaded, "host", ClientMessage::DragStart { piece_id: 3 })
             .await
             .unwrap();
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn name_claims_survive_a_restart() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (_, code, _, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                name: "Host".into(),
+                title: "Claimed".into(),
+                media_sha256: "e".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+                player_key: "host-key".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let join = |name: &str, key: &str| ClientMessage::JoinRoom {
+            invite_code: code.clone(),
+            name: name.into(),
+            media_sha256: "e".repeat(64),
+            media_extension: "png".into(),
+            spectator: false,
+            player_key: key.into(),
+        };
+        connect_room(&state, "ada", join("Ada", "ada-key"))
+            .await
+            .unwrap();
+        assert!(
+            connect_room(&state, "x", join("Ada", &"k".repeat(200)))
+                .await
+                .is_err(),
+            "an oversized key is refused"
+        );
+        persist_all(&state).await;
+
+        let restored = AppState::from_config(&config);
+        load_rooms(&restored).await;
+        for (name, key) in [("Ada", "other-key"), ("ADA", ""), ("Host", "ada-key")] {
+            let refused = connect_room(&restored, "x", join(name, key)).await;
+            assert_eq!(
+                refused.err().as_deref(),
+                Some(pieceoff_core::NAME_TAKEN),
+                "{name} {key}"
+            );
+        }
+        connect_room(&restored, "ada-2", join("Ada", "ada-key"))
+            .await
+            .unwrap();
+        connect_room(&restored, "host-2", join("Host", "host-key"))
+            .await
+            .unwrap();
+        let room = restored.rooms.read().await.get(&code).unwrap().clone();
+        // The welcome a client gets is built from the snapshot alone.
+        let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
+        let wire = serde_json::to_string(&ServerMessage::Snapshot { snapshot }).unwrap();
+        assert!(!wire.contains("name_claims") && !wire.contains("ada-key"));
         let _ = fs::remove_dir_all(&config.data_dir);
     }
 
@@ -4819,6 +5073,7 @@ mod hardening_tests {
             columns: 2,
             initial_snapshot: None,
             duration_ms: 0,
+            player_key: String::new(),
         }
     }
 
@@ -4829,6 +5084,7 @@ mod hardening_tests {
             media_sha256: hash.to_string().repeat(64),
             media_extension: "png".into(),
             spectator: true,
+            player_key: String::new(),
         }
     }
 
@@ -4919,6 +5175,7 @@ mod hardening_tests {
             name: "Eve".into(),
             media_sha256: "e".repeat(64),
             media_extension: "png".into(),
+            player_key: String::new(),
             spectator: false,
         };
         connect_room(&state, "eve", player).await.unwrap();
@@ -5049,6 +5306,7 @@ mod hardening_tests {
                 name: "Host".into(),
                 media_sha256: "1".repeat(64),
                 media_extension: "png".into(),
+                player_key: String::new(),
                 spectator: false,
             },
         )

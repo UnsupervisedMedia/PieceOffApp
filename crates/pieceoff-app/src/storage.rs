@@ -69,6 +69,24 @@ pub(crate) struct Settings {
     pub(crate) mouse: MouseSettings,
     /// A folder holding `ffmpeg` and `ffprobe`, chosen in the app.
     pub(crate) ffmpeg_dir: Option<String>,
+    /// Private random key (32 hex digits) sent when entering a room, so the
+    /// room keeps this device's player name for it. Made once on first run.
+    pub(crate) player_key: String,
+}
+
+/// Whether `key` looks like a key `new_player_key` made.
+pub(crate) fn valid_player_key(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// A fresh 128-bit player key from the OS random source, as hex. Empty if
+/// the OS has none, which rooms treat like an older client.
+pub(crate) fn new_player_key() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        return String::new();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn settings_path() -> PathBuf {

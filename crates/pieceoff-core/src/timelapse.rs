@@ -12,7 +12,7 @@
 //! a drop, a tray rearrangement, or a holder moved with its pieces. A
 //! restart clears it.
 
-use crate::{Piece, RoomRuntime, RoomSnapshot};
+use crate::{NAME_TAKEN, NameClaim, Piece, RoomRuntime, RoomSnapshot};
 use serde::{Deserialize, Serialize};
 
 /// Most piece positions one timelapse keeps, its starting layout included.
@@ -134,13 +134,15 @@ impl Timelapse {
     }
 }
 
-/// A room as the host saves it: the snapshot every client sees, plus the
-/// host-only timelapse. Older saves are a bare snapshot and load with an
-/// empty timelapse.
+/// A room as the host saves it: the snapshot every client sees, plus
+/// host-only state beside its fields. Older saves are a bare snapshot and
+/// load with none.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredRoom {
     #[serde(flatten)]
     pub snapshot: RoomSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_claims: Vec<NameClaim>,
     #[serde(default, skip_serializing_if = "Timelapse::is_empty")]
     pub timelapse: Timelapse,
 }
@@ -149,6 +151,33 @@ impl RoomRuntime {
     /// Whether `client_id` joined to watch.
     pub fn is_spectator(&self, client_id: &str) -> bool {
         self.spectators.contains_key(client_id)
+    }
+
+    /// Let `client_id` watch under `name` (already cleaned). Spectators claim
+    /// no name, but may not watch under one claimed by another player's key,
+    /// so chat cannot be signed with someone else's name.
+    pub fn admit_spectator(
+        &mut self,
+        client_id: &str,
+        name: &str,
+        key_hash: Option<&str>,
+    ) -> Result<(), String> {
+        let folded = name.to_lowercase();
+        let claimed_by_other = self
+            .name_claims
+            .iter()
+            .any(|claim| claim.name == folded && Some(claim.key_hash.as_str()) != key_hash);
+        if claimed_by_other {
+            return Err(NAME_TAKEN.into());
+        }
+        if self.spectators.len() >= MAX_ROOM_SPECTATORS {
+            return Err(format!(
+                "This room already has {MAX_ROOM_SPECTATORS} spectators"
+            ));
+        }
+        self.spectators
+            .insert(client_id.to_owned(), name.to_owned());
+        Ok(())
     }
 
     /// Record the room's timelapse from here on if it has not begun yet.
@@ -413,6 +442,7 @@ mod tests {
         drop_piece(&mut room, "host", 0, 900.0, 10.0, 1_000);
         let stored = StoredRoom {
             snapshot: room.snapshot.clone().unwrap(),
+            name_claims: Vec::new(),
             timelapse: room.timelapse.clone(),
         };
         let text = serde_json::to_string(&stored).unwrap();
@@ -429,6 +459,7 @@ mod tests {
         // An empty timelapse is not written at all.
         let empty = StoredRoom {
             snapshot: room.snapshot.clone().unwrap(),
+            name_claims: Vec::new(),
             timelapse: Timelapse::default(),
         };
         assert!(!serde_json::to_string(&empty).unwrap().contains("timelapse"));
@@ -445,6 +476,29 @@ mod tests {
         log.start.pop();
         log.sanitize(&snapshot);
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn spectators_cannot_watch_under_a_name_another_key_claimed_and_are_capped() {
+        let mut room = RoomRuntime::default();
+        room.admit_player("ada", "Ada", Some("k1"), 1).unwrap();
+        assert_eq!(
+            room.admit_spectator("w1", "ADA", Some("k2")).unwrap_err(),
+            NAME_TAKEN
+        );
+        assert_eq!(
+            room.admit_spectator("w1", "ada", None).unwrap_err(),
+            NAME_TAKEN
+        );
+        // Ada herself may watch from another window.
+        room.admit_spectator("w1", "Ada", Some("k1")).unwrap();
+        assert_eq!(room.names.len(), 1, "watching seats nobody");
+        for index in 1..MAX_ROOM_SPECTATORS {
+            room.admit_spectator(&format!("w{}", index + 1), "W", None)
+                .unwrap();
+        }
+        assert!(room.admit_spectator("late", "W", None).is_err());
+        assert!(room.name_claims.iter().all(|claim| claim.name != "w"));
     }
 
     #[test]
