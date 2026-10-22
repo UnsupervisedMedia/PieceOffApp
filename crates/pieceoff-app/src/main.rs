@@ -57,6 +57,7 @@ mod queue_ui;
 mod server_addr;
 mod sfx;
 mod storage;
+mod timelapse;
 mod transport;
 mod ui;
 
@@ -74,6 +75,7 @@ use playback::*;
 use probe::*;
 use sfx::*;
 use storage::*;
+use timelapse::*;
 use transport::*;
 use ui::*;
 
@@ -199,6 +201,17 @@ struct PieceOffApp {
     last_drift_sync: Instant,
     /// Other players currently in the room, by display name.
     peers: Vec<String>,
+    /// Others watching the room, by display name.
+    spectators: Vec<String>,
+    /// Join rooms to watch rather than play (the join screen's checkbox).
+    watch_only: bool,
+    /// The server admitted us as a spectator: we see the room but cannot
+    /// change it.
+    spectating: bool,
+    /// A timelapse was asked for and has not arrived yet.
+    timelapse_requested: bool,
+    /// The solve timelapse being replayed over the board, if any.
+    replay: Option<Replay>,
     /// Other players' pointers, and what we last sent of our own.
     cursors: LiveCursors,
     /// Room chat and board pings.
@@ -378,6 +391,11 @@ impl Default for PieceOffApp {
             last_playback_send: None,
             last_drift_sync: Instant::now(),
             peers: Vec::new(),
+            spectators: Vec::new(),
+            watch_only: false,
+            spectating: false,
+            timelapse_requested: false,
+            replay: None,
             cursors: LiveCursors::default(),
             chat: RoomChat::default(),
             holders: HolderTool::default(),
@@ -940,6 +958,7 @@ impl PieceOffApp {
             name: self.player_name.clone(),
             media_sha256: self.media_hash.clone(),
             media_extension: self.media_extension.clone(),
+            spectator: self.watch_only,
         };
         self.connect(message);
     }
@@ -1130,6 +1149,10 @@ impl PieceOffApp {
         self.network = None;
         self.snapshot = None;
         self.peers.clear();
+        self.spectators.clear();
+        self.spectating = false;
+        self.timelapse_requested = false;
+        self.replay = None;
         self.cursors.reset();
         self.chat.reset();
         self.media_ready = false;

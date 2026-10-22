@@ -163,6 +163,16 @@ impl PieceOffApp {
     }
 
     pub(crate) fn send(&mut self, packet: ClientMessage) {
+        // A spectator only chats and asks for the timelapse; the server
+        // would refuse anything else, so it is never sent.
+        if self.spectating
+            && !matches!(
+                packet,
+                ClientMessage::Chat { .. } | ClientMessage::RequestTimelapse
+            )
+        {
+            return;
+        }
         if let Some(network) = &self.network {
             if network.outgoing.send(packet).is_err() {
                 self.status = "Connection to the room server closed.".into();
@@ -210,6 +220,8 @@ impl PieceOffApp {
                     peers,
                     snapshot,
                     media_upload_token,
+                    spectator,
+                    spectators,
                     server_now_ms,
                 } => {
                     board::set_server_clock(server_now_ms);
@@ -231,6 +243,10 @@ impl PieceOffApp {
                     }
                     self.client_id = Some(client_id);
                     self.peers.clone_from(&peers);
+                    self.spectators = spectators;
+                    self.spectating = spectator;
+                    // Rejoining after a dropped connection keeps the role.
+                    self.watch_only = spectator;
                     self.cursors.reset();
                     // The server may have tidied the name we asked for.
                     self.player_name.clone_from(&name);
@@ -260,6 +276,11 @@ impl PieceOffApp {
                     self.connected = true;
                     self.status = if is_host {
                         "Room created. Uploading media before sharing the invite code…".into()
+                    } else if spectator {
+                        format!(
+                            "Watching room {}. Only players can move pieces.",
+                            self.invite_code
+                        )
                     } else if downloading_media {
                         "Joined room. Downloading its media…".into()
                     } else if peers.is_empty() {
@@ -339,21 +360,35 @@ impl PieceOffApp {
                     self.fetch_missing_items();
                     self.sync_decoder_playback(ctx);
                 }
-                ServerMessage::PeerJoined { name } => {
+                ServerMessage::PeerJoined { name, spectator } => {
                     if std::mem::take(&mut self.own_join_pending) && name == self.player_name {
                         continue;
                     }
-                    self.status = format!("{name} joined the puzzle.");
-                    self.chat.note(format!("{name} joined"));
-                    self.peers.push(name);
-                }
-                ServerMessage::PeerLeft { name } => {
-                    self.status = format!("{name} left. Their pieces are free to move.");
-                    self.chat.note(format!("{name} left"));
-                    if let Some(index) = self.peers.iter().position(|peer| *peer == name) {
-                        self.peers.remove(index);
+                    if spectator {
+                        self.status = format!("{name} is watching.");
+                        self.chat.note(format!("{name} is watching"));
+                        self.spectators.push(name);
+                    } else {
+                        self.status = format!("{name} joined the puzzle.");
+                        self.chat.note(format!("{name} joined"));
+                        self.peers.push(name);
                     }
                 }
+                ServerMessage::PeerLeft { name, spectator } => {
+                    let list = if spectator {
+                        self.status = format!("{name} stopped watching.");
+                        self.chat.note(format!("{name} stopped watching"));
+                        &mut self.spectators
+                    } else {
+                        self.status = format!("{name} left. Their pieces are free to move.");
+                        self.chat.note(format!("{name} left"));
+                        &mut self.peers
+                    };
+                    if let Some(index) = list.iter().position(|peer| *peer == name) {
+                        list.remove(index);
+                    }
+                }
+                ServerMessage::Timelapse { timelapse } => self.receive_timelapse(timelapse),
                 ServerMessage::PiecesChanged {
                     pieces,
                     revision,
@@ -482,6 +517,7 @@ impl PieceOffApp {
                         self.connected = false;
                         self.client_id = None;
                         self.peers.clear();
+                        self.spectators.clear();
                         self.cursors.reset();
                         self.clear_active_gesture();
                         self.media_uploading = false;

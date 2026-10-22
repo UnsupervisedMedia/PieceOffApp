@@ -1144,3 +1144,103 @@ fn a_guest_cannot_take_a_piece_from_the_hosts_holder_until_it_is_removed() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_spectator_sees_the_moves_cannot_make_one_and_does_not_keep_the_clock_running() {
+    let _serial = serial();
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg is not installed.");
+        return;
+    }
+    let root = scratch("spectate");
+    let video = small_video(&root);
+    let server = RunningServer::start(&config_in(&root)).unwrap();
+    let url = server.url();
+    let mut host = Player::new("Host", &url, &root);
+    let mut watcher = Player::new("Watcher", &url, &root);
+    let code = host_creates_a_video_room(&mut host, &video);
+    watcher.app.watch_only = true;
+    guest_joins_without_media(&mut watcher, &mut host, &code);
+    assert!(watcher.app.spectating);
+    pump(
+        &mut [&mut host, &mut watcher],
+        Duration::from_secs(10),
+        "the host to see the spectator",
+        |p| p[0].app.spectators == ["Watcher"] && p[0].app.peers.is_empty(),
+    );
+    assert_eq!(watcher.app.peers, ["Host"]);
+
+    // The host's move reaches the spectator.
+    let (x, y) = {
+        let piece = host.snapshot().piece(0).unwrap();
+        (piece.x + 40.0, piece.y + 30.0)
+    };
+    for message in [
+        ClientMessage::DragStartSelection { piece_ids: vec![0] },
+        ClientMessage::DragEndSelection {
+            anchor_piece_id: 0,
+            x,
+            y,
+        },
+    ] {
+        host.app.send(message);
+    }
+    pump(
+        &mut [&mut host, &mut watcher],
+        Duration::from_secs(10),
+        "the spectator to see the move",
+        |p| {
+            p[1].snapshot()
+                .piece(0)
+                .is_some_and(|piece| piece.x == x && piece.y == y)
+        },
+    );
+    assert!(watcher.snapshot().stats.running());
+
+    // A spectator's grab, forced past the client's own guard, is refused.
+    watcher
+        .app
+        .network
+        .as_ref()
+        .unwrap()
+        .outgoing
+        .send(ClientMessage::DragStartSelection { piece_ids: vec![1] })
+        .unwrap();
+    pump(
+        &mut [&mut host, &mut watcher],
+        Duration::from_secs(10),
+        "the spectator to be told no",
+        |p| p[1].app.status.contains("watching"),
+    );
+    run_for(&mut [&mut host, &mut watcher], Duration::from_millis(300));
+    assert!(host.snapshot().piece(1).unwrap().held_by.is_none());
+
+    // With only the spectator left, the clock stops, on the spectator's
+    // screen too.
+    host.app.leave_room();
+    pump(
+        &mut [&mut host, &mut watcher],
+        Duration::from_secs(10),
+        "the spectator to see the clock pause",
+        |p| p[1].app.peers.is_empty() && !p[1].snapshot().stats.running(),
+    );
+    let paused = watcher.snapshot().stats.elapsed_ms;
+    run_for(&mut [&mut watcher], Duration::from_millis(300));
+    assert_eq!(watcher.snapshot().stats.elapsed_ms, paused);
+    assert_ne!(
+        watcher.snapshot().host_id,
+        watcher.app.client_id.clone().unwrap(),
+        "a spectator never hosts"
+    );
+
+    // The spectator can still replay what happened.
+    watcher.app.request_timelapse();
+    pump(
+        &mut [&mut watcher],
+        Duration::from_secs(10),
+        "the timelapse to open",
+        |p| p[0].app.replay.is_some(),
+    );
+    assert_eq!(watcher.app.replay.as_ref().unwrap().steps(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
