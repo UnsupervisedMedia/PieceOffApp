@@ -95,9 +95,17 @@ impl AppState {
 }
 
 /// Room events buffered per subscriber. A client that falls further behind
-/// gets a fresh snapshot instead. Live cursors share this channel, so it has
-/// room for a few players' pointers on top of drags.
+/// gets a fresh snapshot instead.
 const EVENT_BUFFER: usize = 256;
+
+/// Live cursors travel on their own channel so a burst of pointer traffic
+/// can never push room events out of a slow client's buffer. A client that
+/// falls behind here just skips to newer positions.
+const CURSOR_BUFFER: usize = 64;
+
+/// Cursor updates allowed for a whole room, whatever the number of
+/// connections, so many sockets cannot multiply the per-player rate.
+const ROOM_CURSOR_UPDATES_PER_SECOND: f64 = 120.0;
 
 /// Live cursor updates allowed per player: the client sends about 15 a second.
 const CURSOR_UPDATES_PER_SECOND: f64 = 20.0;
@@ -106,6 +114,8 @@ const CURSOR_BURST: f64 = 20.0;
 struct RoomRecord {
     runtime: Mutex<RoomRuntime>,
     events: broadcast::Sender<ServerMessage>,
+    cursors: broadcast::Sender<ServerMessage>,
+    cursor_budget: std::sync::Mutex<TokenBucket>,
     persist_lock: Mutex<()>,
     media_upload_token: Mutex<Option<String>>,
     last_activity: Arc<Mutex<SystemTime>>,
@@ -117,6 +127,8 @@ impl RoomRecord {
         Self {
             runtime: Mutex::new(RoomRuntime::default()),
             events,
+            cursors: broadcast::channel(CURSOR_BUFFER).0,
+            cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(media_upload_token),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
@@ -128,6 +140,8 @@ impl RoomRecord {
         Self {
             runtime: Mutex::new(runtime),
             events,
+            cursors: broadcast::channel(CURSOR_BUFFER).0,
+            cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(None),
             last_activity: Arc::new(Mutex::new(last_activity)),
@@ -832,6 +846,14 @@ async fn websocket_handler(
 /// room state: nothing is stored or persisted, and an update that is off the
 /// table or over the player's rate is dropped without a reply (an error would
 /// cost a full snapshot). Returns false for any other message.
+fn room_cursor_budget() -> TokenBucket {
+    TokenBucket::new(
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        Instant::now(),
+    )
+}
+
 fn relay_cursor(
     room: &RoomRecord,
     client_id: &str,
@@ -859,8 +881,18 @@ fn relay_cursor(
         ),
         _ => return false,
     };
-    if valid && budget.try_take_at(now) {
-        let _ = room.events.send(packet);
+    if !valid {
+        return true;
+    }
+    // Every update spends the player's budget and the room's, so opening
+    // more sockets cannot multiply the rate.
+    let allowed = budget.try_take_at(now)
+        && room
+            .cursor_budget
+            .lock()
+            .is_ok_and(|mut room_budget| room_budget.try_take_at(now));
+    if allowed {
+        let _ = room.cursors.send(packet);
     }
     true
 }
@@ -914,6 +946,7 @@ async fn handle_socket(
     };
     persist_room(&state, &room).await;
     let mut events = room.events.subscribe();
+    let mut cursor_events = room.cursors.subscribe();
     let peers = {
         let runtime = room.runtime.lock().await;
         runtime
@@ -988,6 +1021,18 @@ async fn handle_socket(
                         if send(&mut socket, &ServerMessage::Snapshot { snapshot }).await.is_err() { break }
                     }
                 }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            cursor = cursor_events.recv() => match cursor {
+                Ok(packet) => {
+                    if packet.visible_to(&client_id)
+                        && send(&mut socket, &packet).await.is_err()
+                    {
+                        break
+                    }
+                },
+                // Missed pointer positions are stale anyway.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             incoming = socket.recv() => match incoming {
@@ -1455,7 +1500,7 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
         }
     }
     let _ = room.events.send(ServerMessage::PeerLeft { name });
-    let _ = room.events.send(ServerMessage::CursorHidden {
+    let _ = room.cursors.send(ServerMessage::CursorHidden {
         client_id: client_id.to_owned(),
     });
     if let Some(snapshot) = changed_snapshot {
@@ -1907,7 +1952,7 @@ mod tests {
         let table = snapshot.scene_bounds();
         let room = Arc::new(RoomRecord::new(None));
         room.runtime.lock().await.snapshot = Some(snapshot.clone());
-        let mut events = room.events.subscribe();
+        let mut events = room.cursors.subscribe();
         let start = Instant::now();
         let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, start);
         let mut relay = |message: ClientMessage, now: Instant| {
@@ -1987,6 +2032,55 @@ mod tests {
         };
         assert!(!hidden.visible_to("ada"));
         assert!(hidden.visible_to("bob"));
+    }
+
+    #[tokio::test]
+    async fn many_connections_share_one_room_cursor_budget() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "CUR124".into(),
+            "Cursors".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let table = snapshot.scene_bounds();
+        let room = RoomRecord::new(None);
+        let mut cursors = room.cursors.subscribe();
+        let mut room_events = room.events.subscribe();
+        let now = Instant::now();
+        // Twenty sockets, each with a fresh per-player budget, all at once.
+        let mut sent = 0;
+        for socket in 0..20 {
+            let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, now);
+            let id = format!("p{socket}");
+            for _ in 0..CURSOR_BURST as usize {
+                relay_cursor(
+                    &room,
+                    &id,
+                    "P",
+                    &table,
+                    &mut budget,
+                    &ClientMessage::Cursor { x: 1.0, y: 1.0 },
+                    now,
+                );
+            }
+        }
+        while let Ok(packet) = cursors.try_recv() {
+            assert!(matches!(packet, ServerMessage::Cursor { .. }));
+            sent += 1;
+        }
+        assert!(
+            sent <= ROOM_CURSOR_UPDATES_PER_SECOND as usize,
+            "{sent} cursors relayed"
+        );
+        // Cursor traffic never lands on the room event channel.
+        assert!(room_events.try_recv().is_err());
     }
 
     #[tokio::test]
