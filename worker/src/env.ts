@@ -16,6 +16,8 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   /** A socket that has not joined within this long is closed (default 15000). */
   PREJOIN_MS?: string;
+  /** Test hook: "1" makes the first room deletion fail once (needs the dev bypass on). */
+  FAIL_R2_DELETE_ONCE?: string;
   /** Room media, keyed room/<room id>/<sha256>. */
   MEDIA: R2Bucket;
   /** Longest a changed room waits before writing to storage (default 5000). */

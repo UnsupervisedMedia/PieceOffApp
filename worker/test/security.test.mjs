@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { originAllowed, verifyTurnstile } from "../src/security.ts";
+import { ipKey, originAllowed, trustedVerifyUrl, verifyTurnstile } from "../src/security.ts";
 
 describe("originAllowed", () => {
   const host = "rooms.pieceoff.example";
@@ -61,5 +61,28 @@ describe("verifyTurnstile", () => {
     assert.equal(await verifyTurnstile({ ...args, fetcher: down }), false);
     const truthy = ok({ success: "yes" });
     assert.equal(await verifyTurnstile({ ...args, fetcher: truthy }), false, "only literal true counts");
+  });
+});
+
+describe("ipKey", () => {
+  it("leaves IPv4 addresses alone", () => {
+    assert.equal(ipKey("203.0.113.9"), "203.0.113.9");
+    assert.equal(ipKey("local"), "local");
+  });
+  it("groups IPv6 addresses by their /64", () => {
+    assert.equal(ipKey("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "2001:db8:1:2::/64");
+    assert.equal(ipKey("2001:db8:1:2:1111:2222:3333:4444"), "2001:db8:1:2::/64");
+    assert.equal(ipKey("2001:DB8::1"), "2001:db8:0:0::/64");
+    assert.equal(ipKey("::1"), "0:0:0:0::/64");
+  });
+});
+
+describe("trustedVerifyUrl", () => {
+  it("only honours loopback overrides so production keeps Cloudflare's endpoint", () => {
+    assert.equal(trustedVerifyUrl("http://127.0.0.1:9/verify"), "http://127.0.0.1:9/verify");
+    assert.equal(trustedVerifyUrl("http://localhost:9/verify"), "http://localhost:9/verify");
+    assert.equal(trustedVerifyUrl("https://evil.example/verify"), undefined);
+    assert.equal(trustedVerifyUrl("not a url"), undefined);
+    assert.equal(trustedVerifyUrl(undefined), undefined);
   });
 });

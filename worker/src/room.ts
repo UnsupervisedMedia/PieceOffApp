@@ -8,12 +8,14 @@ import {
   type PartRecord,
   type Upload,
   checkPart,
+  isSha256,
   missingParts,
   planUpload,
   recordPart,
 } from "./media-state.ts";
 import { cleanupDeadline } from "./lifecycle.ts";
 import { alarmTarget, shouldSetAlarm } from "./schedule.ts";
+import { ipKey } from "./security.ts";
 
 initSync({ module: wasmModule });
 
@@ -37,6 +39,8 @@ const DEFAULT_ROOM_QUOTA_BYTES = 1024 * MIB;
 const MAX_R2_PARTS = 10_000;
 /** Resume secrets kept for players who have left (their identity on return). */
 const MAX_KEPT_SECRETS = 64;
+/** A part upload that never reported back is considered dead after this long. */
+const PART_IN_FLIGHT_MS = 5 * 60_000;
 /** Open sockets (joined or not) one address may hold on a room. */
 const MAX_SOCKETS_PER_IP = 8;
 const DEFAULT_PREJOIN_MS = 15_000;
@@ -99,6 +103,10 @@ function utf8Length(text: string): number {
 export class RoomDO extends DurableObject<Env> {
   private room = new Room();
   private initialized = false;
+  /** Set while the room is being deleted; the room still exists until the delete finishes. */
+  private destroying = false;
+  /** Parts being streamed right now (`uploadId:n` -> start time); one writer per part. */
+  private partsInFlight = new Map<string, number>();
   /** Joined players, plus the creator until they first connect. */
   private roster: Record<string, string> = {};
   /** sha256(resume token) -> public client id. */
@@ -108,6 +116,7 @@ export class RoomDO extends DurableObject<Env> {
   private uploadToken: string | null = null;
   private dirtySince: number | null = null;
   private lastSeen = new Map<string, number>();
+  private injectedDeleteFailure = false;
   /** When the room last became empty (or was created); null while anyone is in it. */
   private emptySince: number | null = null;
   private readonly flushMs: number;
@@ -300,7 +309,7 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   private async authorizeUpload(token: string): Promise<Failure | null> {
-    if (!this.initialized) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
+    if (!this.live()) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
     if (!(await this.isUploadToken(token))) return { ok: false, status: 403, error: "Not allowed" };
     this.ensureMediaTables();
     return null;
@@ -321,10 +330,18 @@ export class RoomDO extends DurableObject<Env> {
       .toArray();
     if (existing.length > 0) {
       const upload = this.toUpload(existing[0]!);
-      if (upload.size !== request.size || upload.partSize !== request.partSize) {
+      if (upload.r2UploadId === "") {
+        // The object was evicted before R2 answered; this row can never be used.
+        this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", upload.id);
+      } else if (upload.size !== request.size || upload.partSize !== request.partSize) {
         return { ok: false, status: 409, error: "An upload with different sizes is in progress" };
+      } else {
+        return { ok: true, complete: false, ...this.uploadInfo(upload) };
       }
-      return { ok: true, complete: false, ...this.uploadInfo(upload) };
+    }
+    if (!isSha256(sha256)) return { ok: false, status: 400, error: "Invalid media fingerprint" };
+    if (!this.waitingInQueue(sha256)) {
+      return { ok: false, status: 403, error: "That media is not waiting in this room's queue" };
     }
     const plan = planUpload({ ...request, sha256 }, this.mediaLimits(), this.mediaUsage());
     if (!plan.ok) return plan;
@@ -340,13 +357,18 @@ export class RoomDO extends DurableObject<Env> {
     );
     try {
       const multipart = await this.env.MEDIA.createMultipartUpload(this.mediaKey(sha256));
+      if (!this.live()) {
+        // The room was deleted while R2 was answering: do not leave the upload behind.
+        await multipart.abort().catch(() => undefined);
+        return { ok: false, status: 404, error: ROOM_NOT_FOUND };
+      }
       this.ctx.storage.sql.exec(
         "UPDATE uploads SET r2_upload_id = ? WHERE id = ?",
         multipart.uploadId,
         uploadId,
       );
     } catch (error) {
-      this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+      if (this.live()) this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
       console.error("createMultipartUpload failed", String(error));
       return { ok: false, status: 502, error: "Media storage is unavailable" };
     }
@@ -376,7 +398,30 @@ export class RoomDO extends DurableObject<Env> {
     }
     const checked = checkPart(upload, n, size);
     if (!checked.ok) return checked;
+    const slot = `${uploadId}:${n}`;
+    const started = this.partsInFlight.get(slot);
+    if (started !== undefined && Date.now() - started < PART_IN_FLIGHT_MS) {
+      return { ok: false, status: 409, error: "That part is already being uploaded" };
+    }
+    // The bytes about to be written replace whatever R2 holds for this part,
+    // so any earlier record of it (and its etag) is void until this send ends.
+    if (String(n) in upload.parts) {
+      const parts = { ...upload.parts };
+      delete parts[String(n)];
+      this.ctx.storage.sql.exec(
+        "UPDATE uploads SET parts = ? WHERE id = ?",
+        JSON.stringify(parts),
+        uploadId,
+      );
+    }
+    this.partsInFlight.set(slot, Date.now());
     return { ok: true, key: this.mediaKey(upload.sha256), r2UploadId: upload.r2UploadId };
+  }
+
+  /** A part send ended without being recorded (failed, rejected or abandoned). */
+  async releasePart(token: string, uploadId: string, n: number): Promise<void> {
+    if (!(await this.isUploadToken(token))) return;
+    this.partsInFlight.delete(`${uploadId}:${n}`);
   }
 
   async recordUploadedPart(
@@ -391,6 +436,7 @@ export class RoomDO extends DurableObject<Env> {
     if (upload === null) return { ok: false, status: 404, error: "No such upload" };
     const checked = checkPart(upload, n, part.size);
     if (!checked.ok) return checked;
+    this.partsInFlight.delete(`${uploadId}:${n}`);
     const next = recordPart(upload, n, part);
     this.ctx.storage.sql.exec(
       "UPDATE uploads SET parts = ? WHERE id = ?",
@@ -414,8 +460,18 @@ export class RoomDO extends DurableObject<Env> {
         .sort((a, b) => a.partNumber - b.partNumber);
       await this.env.MEDIA.resumeMultipartUpload(key, upload.r2UploadId).complete(parts);
     } catch (error) {
-      console.error("completing the multipart upload failed", String(error));
-      return { ok: false, status: 502, error: "Media storage rejected the upload" };
+      // A reply lost after R2 finished makes every retry fail with NoSuchUpload;
+      // the finished object being there at the right size means we are done.
+      const done = await this.env.MEDIA.head(key).catch(() => null);
+      if (done === null || done.size !== upload.size) {
+        console.error("completing the multipart upload failed", String(error));
+        return { ok: false, status: 502, error: "Media storage rejected the upload" };
+      }
+    }
+    if (!this.live()) {
+      // The room was deleted while R2 was finishing: remove what it just wrote.
+      await this.env.MEDIA.delete(key).catch(() => undefined);
+      return { ok: false, status: 404, error: ROOM_NOT_FOUND };
     }
     this.ctx.storage.sql.exec(
       "INSERT INTO media (sha256, size, key) VALUES (?, ?, ?) ON CONFLICT (sha256) DO NOTHING",
@@ -433,26 +489,54 @@ export class RoomDO extends DurableObject<Env> {
     return { ok: true };
   }
 
+  /** Cancel an unfinished upload: free its R2 parts and its reserved quota. */
+  async abortUpload(token: string, uploadId: string): Promise<MediaReply<object>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const upload = this.loadUpload(uploadId);
+    if (upload === null) return { ok: false, status: 404, error: "No such upload" };
+    if (upload.r2UploadId !== "") {
+      try {
+        await this.env.MEDIA.resumeMultipartUpload(this.mediaKey(upload.sha256), upload.r2UploadId).abort();
+      } catch (error) {
+        console.error("aborting a multipart upload failed", String(error));
+      }
+    }
+    this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+    for (const slot of [...this.partsInFlight.keys()]) {
+      if (slot.startsWith(`${uploadId}:`)) this.partsInFlight.delete(slot);
+    }
+    return { ok: true };
+  }
+
+  /** Whether `sha256` is a queue item whose media has not arrived yet. */
+  private waitingInQueue(sha256: string): boolean {
+    const snapshot = JSON.parse(this.wasm(() => this.room.snapshot_json())) as {
+      queue?: { sha256: string; available: boolean }[];
+    } | null;
+    return (snapshot?.queue ?? []).some((item) => item.sha256 === sha256 && !item.available);
+  }
+
   /** A joined or pending player may read this room's finished media. */
   async authorizeDownload(
     resumeToken: string,
     sha256: string,
-  ): Promise<MediaReply<{ key: string }>> {
-    if (!this.initialized) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
+  ): Promise<MediaReply<{ key: string; size: number }>> {
+    if (!this.live()) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
     if (resumeToken.length === 0 || this.secrets[await sha256Hex(resumeToken)] === undefined) {
       return { ok: false, status: 403, error: "Not allowed" };
     }
     this.ensureMediaTables();
     const rows = this.ctx.storage.sql
-      .exec("SELECT key FROM media WHERE sha256 = ?", sha256.toLowerCase())
+      .exec("SELECT key, size FROM media WHERE sha256 = ?", sha256.toLowerCase())
       .toArray();
     if (rows.length === 0) return { ok: false, status: 404, error: "No such media" };
-    return { ok: true, key: rows[0]!.key as string };
+    return { ok: true, key: rows[0]!.key as string, size: rows[0]!.size as number };
   }
 
   /** Whether this room exists. The Worker budgets lookups of rooms that do not. */
   async exists(): Promise<boolean> {
-    return this.initialized;
+    return this.live();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -461,13 +545,13 @@ export class RoomDO extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
-    if (!this.initialized) {
+    if (!this.live()) {
       server.accept();
       server.send(JSON.stringify({ type: "error", message: ROOM_NOT_FOUND }));
       server.close(1008, ROOM_NOT_FOUND);
       return new Response(null, { status: 101, webSocket: client });
     }
-    const ip = request.headers.get("cf-connecting-ip") ?? "local";
+    const ip = ipKey(request.headers.get("cf-connecting-ip") ?? "local");
     if (this.attachments().filter((a) => a.ip === ip).length >= MAX_SOCKETS_PER_IP) {
       return new Response("Too many connections", { status: 429 });
     }
@@ -487,7 +571,7 @@ export class RoomDO extends DurableObject<Env> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return this.sendError(ws, "Binary frames are not supported");
     if (utf8Length(message) > MAX_FRAME_BYTES) return this.sendError(ws, "Message too large");
-    if (!this.initialized) return this.sendError(ws, ROOM_NOT_FOUND);
+    if (!this.live()) return this.sendError(ws, ROOM_NOT_FOUND);
     const attachment = ws.deserializeAttachment() as Attachment | null;
     if (attachment === null) return this.sendError(ws, "Unknown connection");
     this.lastSeen.set(attachment.clientId, Date.now());
@@ -535,6 +619,11 @@ export class RoomDO extends DurableObject<Env> {
     await this.schedule();
   }
 
+  /** The room exists and is open for business (not unset, not mid-deletion). */
+  private live(): boolean {
+    return this.initialized && !this.destroying;
+  }
+
   private cleanupAt(): number | null {
     if (!this.initialized) return null;
     return cleanupDeadline({
@@ -558,7 +647,7 @@ export class RoomDO extends DurableObject<Env> {
    * thrown error makes the runtime retry the alarm.
    */
   private async destroy(): Promise<void> {
-    this.initialized = false; // new connections now see "room not found"
+    this.destroying = true; // new connections now see "room not found"
     for (const socket of this.ctx.getWebSockets()) {
       try {
         socket.close(1001, "room expired");
@@ -567,6 +656,14 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
     const roomId = this.readKv("room_id");
+    if (
+      this.env.FAIL_R2_DELETE_ONCE === "1" &&
+      this.env.DEV_ALLOW_UNVERIFIED_CREATE === "1" &&
+      !this.injectedDeleteFailure
+    ) {
+      this.injectedDeleteFailure = true;
+      throw new Error("injected R2 failure (test hook)");
+    }
     this.ensureMediaTables();
     for (const row of this.ctx.storage.sql.exec("SELECT * FROM uploads").toArray()) {
       const upload = this.toUpload(row);
@@ -588,6 +685,10 @@ export class RoomDO extends DurableObject<Env> {
     }
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    // Only now is the room gone. If anything above threw, `initialized` is
+    // still true, so the runtime's retry of the alarm runs this again.
+    this.initialized = false;
+    this.destroying = false;
     this.room = new Room();
     this.roster = {};
     this.secrets = {};
@@ -595,6 +696,7 @@ export class RoomDO extends DurableObject<Env> {
     this.uploadToken = null;
     this.dirtySince = null;
     this.emptySince = null;
+    this.partsInFlight.clear();
     this.lastSeen.clear();
   }
 
