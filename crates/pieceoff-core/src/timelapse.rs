@@ -167,7 +167,17 @@ impl RoomRuntime {
             .name_claims
             .iter()
             .any(|claim| claim.name == folded && Some(claim.key_hash.as_str()) != key_hash);
-        if claimed_by_other {
+        let own_claim = self
+            .name_claims
+            .iter()
+            .any(|claim| claim.name == folded && Some(claim.key_hash.as_str()) == key_hash);
+        // A keyless player holds no claim, so also refuse a name a player in
+        // the room is using unless this key owns it.
+        let in_use = self
+            .names
+            .values()
+            .any(|seated| seated.to_lowercase() == folded);
+        if claimed_by_other || (in_use && !own_claim) {
             return Err(NAME_TAKEN.into());
         }
         if self.spectators.len() >= MAX_ROOM_SPECTATORS {
@@ -198,6 +208,21 @@ impl RoomRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spectators_cannot_borrow_a_keyless_players_name() {
+        let mut room = RoomRuntime::default();
+        room.names.insert("p1".into(), "Ada".into());
+        assert_eq!(
+            room.admit_spectator("s1", "ada", Some("other")),
+            Err(NAME_TAKEN.into())
+        );
+        assert_eq!(
+            room.admit_spectator("s1", "Ada", None),
+            Err(NAME_TAKEN.into())
+        );
+        assert!(room.admit_spectator("s2", "Bo", None).is_ok());
+    }
+
     use super::*;
     use crate::{ClientMessage, ServerMessage};
     use std::collections::HashMap;
