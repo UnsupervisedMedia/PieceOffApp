@@ -330,4 +330,96 @@ mod tests {
             .apply("host", ClientMessage::DragStart { piece_id: 0 }, 0)
             .unwrap();
     }
+
+    fn playing_room(rate: f32, now: u64) -> RoomRuntime {
+        let mut snapshot = room().snapshot.unwrap();
+        snapshot.migrate();
+        snapshot.queue[0].duration_ms = 10_000;
+        snapshot.repeat = crate::RepeatMode::All;
+        snapshot.playback.playing = true;
+        snapshot.playback.position_ms = 0;
+        snapshot.playback.rate = rate;
+        snapshot.playback.changed_at_ms = now;
+        snapshot.playback.loop_end_ms = 0;
+        RoomRuntime::from_snapshot(snapshot)
+    }
+
+    #[test]
+    fn next_tick_deadline_is_when_the_item_will_end() {
+        assert_eq!(
+            playing_room(1.0, 1_000).next_tick_deadline(1_000),
+            Some(11_000)
+        );
+        assert_eq!(
+            playing_room(2.0, 1_000).next_tick_deadline(1_000),
+            Some(6_000)
+        );
+        assert_eq!(
+            playing_room(1.0, 1_000).next_tick_deadline(4_000),
+            Some(11_000)
+        );
+    }
+
+    #[test]
+    fn next_tick_deadline_is_now_when_already_due() {
+        assert_eq!(
+            playing_room(1.0, 0).next_tick_deadline(50_000),
+            Some(50_000)
+        );
+    }
+
+    #[test]
+    fn next_tick_deadline_uses_the_loop_end_when_set() {
+        let mut runtime = playing_room(1.0, 0);
+        runtime.snapshot.as_mut().unwrap().playback.loop_end_ms = 2_000;
+        assert_eq!(runtime.next_tick_deadline(0), Some(2_000));
+    }
+
+    #[test]
+    fn next_tick_deadline_is_none_when_nothing_will_advance() {
+        assert_eq!(RoomRuntime::default().next_tick_deadline(0), None);
+        let mut paused = playing_room(1.0, 0);
+        paused.snapshot.as_mut().unwrap().playback.playing = false;
+        assert_eq!(paused.next_tick_deadline(0), None);
+        let mut repeat_one = playing_room(1.0, 0);
+        repeat_one.snapshot.as_mut().unwrap().repeat = crate::RepeatMode::One;
+        assert_eq!(repeat_one.next_tick_deadline(0), None);
+        let mut no_duration = playing_room(1.0, 0);
+        no_duration.snapshot.as_mut().unwrap().queue[0].duration_ms = 0;
+        assert_eq!(no_duration.next_tick_deadline(0), None);
+    }
+
+    fn set_playback(loop_start_ms: u64, loop_end_ms: u64) -> ClientMessage {
+        ClientMessage::SetPlayback {
+            playing: true,
+            position_ms: 0,
+            rate: 1.0,
+            loop_start_ms,
+            loop_end_ms,
+        }
+    }
+
+    #[test]
+    fn set_playback_rejects_a_loop_start_at_or_past_the_item_end() {
+        let mut runtime = playing_room(1.0, 0);
+        for start in [10_000, 60_000] {
+            let err = runtime
+                .apply("host", set_playback(start, 0), 0)
+                .unwrap_err();
+            assert_eq!(err, "Loop start must be before the end of the video");
+        }
+        runtime.apply("host", set_playback(5_000, 0), 0).unwrap();
+        runtime
+            .apply("host", set_playback(5_000, 8_000), 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_stored_loop_start_past_the_end_cannot_make_the_tick_spin() {
+        let mut runtime = playing_room(1.0, 0);
+        runtime.snapshot.as_mut().unwrap().playback.loop_start_ms = 60_000;
+        assert!(runtime.tick_advance(20_000).is_some());
+        let deadline = runtime.next_tick_deadline(20_000).unwrap();
+        assert!(deadline > 20_000, "deadline {deadline} must move forward");
+    }
 }

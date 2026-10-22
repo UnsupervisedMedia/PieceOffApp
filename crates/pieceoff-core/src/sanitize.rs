@@ -1,5 +1,10 @@
 use crate::valid_media_extension;
 
+/// A 64-character hexadecimal SHA-256 digest.
+pub fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub fn clean_name(name: &str) -> String {
     let name: String = name.chars().filter(|c| !c.is_control()).take(24).collect();
     if name.trim().is_empty() {
