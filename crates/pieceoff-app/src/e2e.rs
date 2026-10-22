@@ -1244,3 +1244,74 @@ fn a_spectator_sees_the_moves_cannot_make_one_and_does_not_keep_the_clock_runnin
     assert_eq!(watcher.app.replay.as_ref().unwrap().steps(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn two_players_join_and_solve_a_hexagon_puzzle() {
+    let _serial = serial();
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg is not installed.");
+        return;
+    }
+    let root = scratch("hexagons");
+    let video = small_video(&root);
+    let server = RunningServer::start(&config_in(&root)).unwrap();
+    let url = server.url();
+    let mut host = Player::new("Host", &url, &root);
+    let mut guest = Player::new("Guest", &url, &root);
+    host.app.cut_style = CutStyle::Hexagon;
+    (host.app.rows, host.app.columns) = (3, 4);
+    let code = host_creates_a_video_room(&mut host, &video);
+    guest_joins_without_media(&mut guest, &mut host, &code);
+    assert_eq!(guest.snapshot().cut_style, CutStyle::Hexagon);
+    // Both clients derive the same contours.
+    for id in [0, 5, 11] {
+        let (a, b) = (host.snapshot(), guest.snapshot());
+        assert_eq!(
+            piece_outline(a, a.piece(id).unwrap()),
+            piece_outline(b, b.piece(id).unwrap())
+        );
+    }
+
+    // The host lays (0,1) on the table; the guest drops (1,0), its
+    // neighbour down and to the left, close to it, and they join.
+    let (cw, ch) = {
+        let snapshot = host.snapshot();
+        (snapshot.cell_width(), snapshot.cell_height())
+    };
+    let (x, y) = (host.snapshot().width as f32 * 0.5, -3.0 * ch);
+    for (player, id, x, y) in [
+        (&mut host, 1, x, y),
+        (&mut guest, 4, x - cw + 6.0, y + ch - 5.0),
+    ] {
+        player.app.send(ClientMessage::DragStartSelection {
+            piece_ids: vec![id],
+        });
+        player.app.send(ClientMessage::DragEndSelection {
+            anchor_piece_id: id,
+            x,
+            y,
+        });
+        pump(
+            &mut [&mut *player],
+            Duration::from_secs(10),
+            "the drop to land",
+            |p| {
+                let piece = p[0].snapshot().piece(id).unwrap();
+                piece.held_by.is_none() && (piece.y - y).abs() < ch
+            },
+        );
+    }
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "both players to see the hexagons join",
+        |p| {
+            p.iter().all(|player| {
+                let snapshot = player.snapshot();
+                snapshot.piece(1).unwrap().group_id == snapshot.piece(4).unwrap().group_id
+            })
+        },
+    );
+    solve_together(&mut host, &mut guest);
+    assert_eq!(guest.snapshot().progress_percent(), 100);
+}

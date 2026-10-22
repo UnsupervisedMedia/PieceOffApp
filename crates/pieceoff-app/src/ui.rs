@@ -11,7 +11,7 @@ const CARD: Color32 = Color32::from_rgb(32, 36, 44);
 const CANVAS: Color32 = Color32::from_rgb(35, 38, 44);
 const TOAST_SECONDS: f64 = 6.0;
 /// Piece-count presets offered when creating a puzzle.
-const PIECE_PRESETS: [(&str, u16); 4] =
+pub(crate) const PIECE_PRESETS: [(&str, u16); 4] =
     [("Easy", 12), ("Medium", 48), ("Hard", 108), ("Expert", 192)];
 
 /// One dark look for the whole app: roomier controls, rounded corners, and a
@@ -67,6 +67,39 @@ pub(crate) fn grid_for_piece_count(target: u16, aspect: f32) -> (u16, u16) {
         }
     }
     (rows, columns)
+}
+
+/// `grid_for_piece_count` with cells shaped for `style`, so hexagons and
+/// triangles come out regular rather than stretched.
+pub(crate) fn grid_for_style(target: u16, aspect: f32, style: CutStyle) -> (u16, u16) {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        4.0 / 3.0
+    };
+    grid_for_piece_count(target, aspect / style.cell_aspect())
+}
+
+fn cut_style_hint(style: CutStyle) -> &'static str {
+    match style {
+        CutStyle::Jigsaw => "Classic jigsaw pieces on a square grid",
+        CutStyle::Hexagon => "Hexagons with knobs; up to six neighbours each",
+        CutStyle::Triangle => "Triangles with small knobs; up to three neighbours each",
+    }
+}
+
+impl PieceOffApp {
+    /// Switch the cut style; a grid picked from a preset follows to the same
+    /// preset in the new style.
+    pub(crate) fn set_cut_style(&mut self, style: CutStyle, aspect: f32) {
+        let preset = PIECE_PRESETS.iter().find(|(_, count)| {
+            grid_for_style(*count, aspect, self.cut_style) == (self.rows, self.columns)
+        });
+        self.cut_style = style;
+        if let Some((_, count)) = preset {
+            (self.rows, self.columns) = grid_for_style(*count, aspect, style);
+        }
+    }
 }
 
 const MAX_LOGGED_MESSAGES: usize = 200;
@@ -194,18 +227,21 @@ impl PieceOffApp {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
-        // Show how the chosen grid will cut the picture.
+        // Show how the chosen grid and cut style will cut the picture.
         if self.pending_snapshot.is_none() {
-            let stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(70));
-            for row in 1..self.rows {
-                let y =
-                    image_rect.top() + image_rect.height() * f32::from(row) / f32::from(self.rows);
-                painter.hline(image_rect.x_range(), y, stroke);
-            }
-            for column in 1..self.columns {
-                let x = image_rect.left()
-                    + image_rect.width() * f32::from(column) / f32::from(self.columns);
-                painter.vline(x, image_rect.y_range(), stroke);
+            let stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(45));
+            for outline in pieceoff_core::cut_preview(
+                self.cut_style,
+                self.rows,
+                self.columns,
+                image_rect.width(),
+                image_rect.height(),
+            ) {
+                let points = outline
+                    .iter()
+                    .map(|point| image_rect.min + Vec2::new(point[0], point[1]))
+                    .collect();
+                painter.add(egui::Shape::closed_line(points, stroke));
             }
         }
     }
@@ -642,11 +678,23 @@ impl PieceOffApp {
             ui.label("Title");
             ui.add(egui::TextEdit::singleline(&mut self.title).desired_width(f32::INFINITY));
             if self.pending_snapshot.is_none() {
-                ui.label("Pieces");
                 let aspect = self.media_size.0 as f32 / self.media_size.1.max(1) as f32;
+                ui.label("Cut");
+                ui.horizontal(|ui| {
+                    for style in CutStyle::ALL {
+                        if ui
+                            .selectable_label(self.cut_style == style, style.label())
+                            .on_hover_text(cut_style_hint(style))
+                            .clicked()
+                        {
+                            self.set_cut_style(style, aspect);
+                        }
+                    }
+                });
+                ui.label("Pieces");
                 ui.horizontal(|ui| {
                     for (label, count) in PIECE_PRESETS {
-                        let grid = grid_for_piece_count(count, aspect);
+                        let grid = grid_for_style(count, aspect, self.cut_style);
                         let tip = format!("{} × {} = {} pieces", grid.0, grid.1, grid.0 * grid.1);
                         if ui
                             .selectable_label((self.rows, self.columns) == grid, label)

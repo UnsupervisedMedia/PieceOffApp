@@ -6,8 +6,8 @@ use eframe::egui::{
 use futures_util::{SinkExt, StreamExt};
 
 use pieceoff_core::{
-    ClientMessage, Piece, PlaybackState, REPLACED_BY_NEW_CONNECTION, RepeatMode, RoomSnapshot,
-    ServerMessage, TrayArrangement, piece_outline, piece_tray_layout, valid_media_dimensions,
+    ClientMessage, CutStyle, Piece, PlaybackState, REPLACED_BY_NEW_CONNECTION, RepeatMode,
+    RoomSnapshot, ServerMessage, TrayArrangement, piece_outline, valid_media_dimensions,
     valid_media_extension,
 };
 
@@ -183,6 +183,7 @@ struct PieceOffApp {
     status: String,
     rows: u16,
     columns: u16,
+    cut_style: CutStyle,
     dragging: Option<ActiveDrag>,
     selected_pieces: std::collections::HashSet<u32>,
     piece_filter: PieceFilter,
@@ -385,6 +386,7 @@ impl Default for PieceOffApp {
             status: "Choose an image or video, then create a room or join by code.".into(),
             rows: 3,
             columns: 4,
+            cut_style: CutStyle::Jigsaw,
             dragging: None,
             selected_pieces: std::collections::HashSet::new(),
             piece_filter: PieceFilter::All,
@@ -822,8 +824,17 @@ impl PieceOffApp {
         }
         self.reconnect_at = None;
         self.reconnect_attempt = 0;
+        let message = self.create_request();
+        self.media_ready = false;
+        self.media_uploading = true;
+        self.connect(message);
+    }
+
+    /// The request that creates a room from the media, grid and cut style
+    /// (or package) picked on the start screen.
+    pub(crate) fn create_request(&self) -> ClientMessage {
         let title = clean_room_title(&self.title);
-        let message = ClientMessage::CreateRoom {
+        ClientMessage::CreateRoom {
             name: self.player_name.clone(),
             title: title.clone(),
             media_sha256: self.media_hash.clone(),
@@ -846,10 +857,12 @@ impl PieceOffApp {
             }),
             duration_ms: self.media_duration_ms,
             player_key: self.settings.player_key.clone(),
-        };
-        self.media_ready = false;
-        self.media_uploading = true;
-        self.connect(message);
+            // A package keeps the cut it was made with.
+            cut_style: self
+                .pending_snapshot
+                .as_ref()
+                .map_or(self.cut_style, |snapshot| snapshot.cut_style),
+        }
     }
 
     fn open_package(&mut self, ctx: &egui::Context) {
@@ -901,6 +914,7 @@ impl PieceOffApp {
                     self.title.clone_from(&snapshot.title);
                     self.rows = snapshot.rows;
                     self.columns = snapshot.columns;
+                    self.cut_style = snapshot.cut_style;
                     self.pending_snapshot = Some(snapshot);
                     self.status =
                         "Package loaded. Create a room to share this puzzle and its progress."

@@ -14,6 +14,8 @@ pub use claims::{
     REPLACED_BY_NEW_CONNECTION,
 };
 mod holders;
+mod tiling;
+pub use tiling::CutStyle;
 mod stats;
 mod timelapse;
 pub use holders::{
@@ -26,7 +28,7 @@ pub use timelapse::{
     MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
 };
 
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -178,6 +180,10 @@ pub struct RoomSnapshot {
     /// with none.
     #[serde(default)]
     pub holders: Vec<PieceHolder>,
+    /// How the picture is cut (protocol v14). Older snapshots load as the
+    /// classic jigsaw grid with their contours unchanged.
+    #[serde(default)]
+    pub cut_style: CutStyle,
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -195,9 +201,25 @@ pub struct PieceTrayLayout {
     pub board_y: f32,
     pub content_width: f32,
     pub content_height: f32,
+    /// Distance between neighbouring slots, in cells across and down.
+    pub spacing_x: f32,
+    pub spacing_y: f32,
 }
 
+/// The tray of a classic jigsaw puzzle.
 pub fn piece_tray_layout(width: u32, height: u32, rows: u16, columns: u16) -> PieceTrayLayout {
+    styled_tray_layout(CutStyle::Jigsaw, width, height, rows, columns)
+}
+
+/// The tray of a puzzle cut in `style`, whose pieces may need roomier slots.
+pub fn styled_tray_layout(
+    style: CutStyle,
+    width: u32,
+    height: u32,
+    rows: u16,
+    columns: u16,
+) -> PieceTrayLayout {
+    let (spacing_x, spacing_y) = style.tray_spacing();
     let rows = rows.max(1) as f32;
     let columns = columns.max(1) as f32;
     let width = width as f32;
@@ -207,8 +229,8 @@ pub fn piece_tray_layout(width: u32, height: u32, rows: u16, columns: u16) -> Pi
     let total_pieces = (rows * columns) as usize;
     let tray_columns = ((columns as usize * 3) / 5).max(1);
     let tray_rows = total_pieces.div_ceil(tray_columns);
-    let tray_width = tray_columns as f32 * PIECE_TRAY_SPACING_CELLS * cell_width;
-    let tray_height = tray_rows as f32 * PIECE_TRAY_SPACING_CELLS * cell_height;
+    let tray_width = tray_columns as f32 * spacing_x * cell_width;
+    let tray_height = tray_rows as f32 * spacing_y * cell_height;
     let content_height = height.max(tray_height);
     let board_y = (content_height - height) * 0.5;
     let tray_y = (content_height - tray_height) * 0.5 + PIECE_TRAY_INSET_CELLS * cell_height;
@@ -224,6 +246,8 @@ pub fn piece_tray_layout(width: u32, height: u32, rows: u16, columns: u16) -> Pi
         board_y,
         content_width: tray_x + tray_width + tray_gutter,
         content_height,
+        spacing_x,
+        spacing_y,
     }
 }
 
@@ -269,8 +293,71 @@ impl SceneBounds {
 }
 
 impl RoomSnapshot {
+    /// The tray beside the board, spaced for this puzzle's cut style.
+    pub fn tray_layout(&self) -> PieceTrayLayout {
+        styled_tray_layout(
+            self.cut_style,
+            self.width,
+            self.height,
+            self.rows,
+            self.columns,
+        )
+    }
+
+    fn tiling(&self) -> tiling::Tiling {
+        tiling::Tiling {
+            style: self.cut_style,
+            rows: self.rows,
+            columns: self.columns,
+            width: self.width as f32,
+            height: self.height as f32,
+        }
+    }
+
+    /// Grid positions `(row, column)` of the pieces that share an edge with
+    /// `piece`: four in the classic grid, up to six for hexagons, up to
+    /// three for triangles.
+    pub fn neighbours(&self, piece: &Piece) -> Vec<(u16, u16)> {
+        self.tiling().neighbours(piece.row, piece.column)
+    }
+
+    /// How many sides of the picture `piece` has a straight edge on: 0 for
+    /// interior pieces, 1 for edge pieces, 2 for corners.
+    pub fn border_sides(&self, piece: &Piece) -> u8 {
+        self.tiling().border_sides(piece.row, piece.column)
+    }
+
+    /// The piece at a grid position.
+    pub fn piece_at(&self, row: u16, column: u16) -> Option<&Piece> {
+        let id = u32::from(row) * u32::from(self.columns) + u32::from(column);
+        self.pieces
+            .get(id as usize)
+            .filter(|piece| piece.id == id)
+            .or_else(|| self.piece(id))
+    }
+
+    /// Change the cut style of a freshly created room and lay its pieces
+    /// out in the matching tray.
+    pub fn with_cut_style(mut self, style: CutStyle) -> Self {
+        if style != self.cut_style {
+            self.cut_style = style;
+            self.pieces = scattered_pieces(
+                style,
+                &self.id,
+                &self.invite_code,
+                &self.media_sha256,
+                self.width,
+                self.height,
+                self.rows,
+                self.columns,
+                0,
+            );
+        }
+        self
+    }
+
     pub fn scene_bounds(&self) -> SceneBounds {
-        let tray = piece_tray_layout(self.width, self.height, self.rows, self.columns);
+        let tray = self.tray_layout();
         let margin_x = tray.content_width * SCENE_MARGIN_FACTOR;
         let margin_y = tray.content_height * SCENE_MARGIN_FACTOR;
         SceneBounds {
@@ -437,6 +524,7 @@ impl RoomSnapshot {
         }
 
         let pieces = scattered_pieces(
+            CutStyle::Jigsaw,
             &id,
             &invite_code,
             &media_sha256,
@@ -483,6 +571,7 @@ impl RoomSnapshot {
             video_lock: false,
             stats: SolveStats::default(),
             holders: Vec::new(),
+            cut_style: CutStyle::Jigsaw,
         })
     }
 
@@ -579,6 +668,7 @@ impl RoomSnapshot {
 /// No piece starts in its own slot, so a new puzzle is never partly solved.
 #[allow(clippy::too_many_arguments)]
 fn scattered_pieces(
+    style: CutStyle,
     id: &str,
     invite_code: &str,
     media_sha256: &str,
@@ -589,7 +679,7 @@ fn scattered_pieces(
     salt: u32,
 ) -> Vec<Piece> {
     let count = rows as usize * columns as usize;
-    let tray = piece_tray_layout(width, height, rows, columns);
+    let tray = styled_tray_layout(style, width, height, rows, columns);
     let mut shuffled: Vec<usize> = (0..count).collect();
     // The server creates this arrangement once and persists it, so separate
     // rooms vary while all clients and reconnecting players see the same board.
@@ -650,9 +740,8 @@ fn tray_slot_position(
     location: usize,
 ) -> (f32, f32) {
     (
-        tray.tray_x + (location % tray.columns) as f32 * PIECE_TRAY_SPACING_CELLS * cell_w,
-        tray.tray_y - tray.board_y
-            + (location / tray.columns) as f32 * PIECE_TRAY_SPACING_CELLS * cell_h,
+        tray.tray_x + (location % tray.columns) as f32 * tray.spacing_x * cell_w,
+        tray.tray_y - tray.board_y + (location / tray.columns) as f32 * tray.spacing_y * cell_h,
     )
 }
 
@@ -698,6 +787,11 @@ const KNOB_LEFT: [[f32; 2]; 11] = [
 /// can therefore render actual jigsaw silhouettes without adding shape data to
 /// the network protocol.
 pub fn piece_outline(snapshot: &RoomSnapshot, piece: &Piece) -> Vec<[f32; 2]> {
+    if snapshot.cut_style != CutStyle::Jigsaw {
+        return snapshot
+            .tiling()
+            .outline(snapshot.effective_shape_seed(), piece.row, piece.column);
+    }
     let cell_w = snapshot.cell_width();
     let cell_h = snapshot.cell_height();
     let depth = cell_w.min(cell_h);
@@ -738,6 +832,34 @@ pub fn piece_outline(snapshot: &RoomSnapshot, piece: &Piece) -> Vec<[f32; 2]> {
         points.push([depth * v, cell_h * u]);
     }
     points
+}
+
+/// Straight-edged outline of every piece in picture coordinates, in piece
+/// order: how `style` cuts a `rows × columns` grid, for a preview.
+pub fn cut_preview(
+    style: CutStyle,
+    rows: u16,
+    columns: u16,
+    width: f32,
+    height: f32,
+) -> Vec<Vec<[f32; 2]>> {
+    let tiling = tiling::Tiling {
+        style,
+        rows: rows.max(1),
+        columns: columns.max(1),
+        width,
+        height,
+    };
+    (0..tiling.rows)
+        .flat_map(|row| (0..tiling.columns).map(move |column| (row, column)))
+        .map(|(row, column)| {
+            tiling
+                .corners(row, column)
+                .into_iter()
+                .map(|vertex| vertex.point)
+                .collect()
+        })
+        .collect()
 }
 
 fn horizontal_edge_seed(boundary_row: u16, column: u16, puzzle_seed: u32) -> u32 {
@@ -831,6 +953,10 @@ pub enum ClientMessage {
         /// This device's private player key; see `NameClaim`.
         #[serde(default)]
         player_key: String,
+        /// How to cut the picture (protocol v14); older clients send none
+        /// and get the classic jigsaw grid.
+        #[serde(default)]
+        cut_style: CutStyle,
     },
     JoinRoom {
         invite_code: String,
@@ -1306,6 +1432,7 @@ impl RoomRuntime {
             return Err("Only the host can restart the puzzle".into());
         }
         snapshot.pieces = scattered_pieces(
+            snapshot.cut_style,
             &snapshot.id,
             &snapshot.invite_code,
             &snapshot.media_sha256,
@@ -1352,17 +1479,11 @@ impl RoomRuntime {
         if movable.is_empty() {
             return Err("There are no loose pieces to arrange".into());
         }
-        let (rows, columns) = (snapshot.rows, snapshot.columns);
         match arrangement {
             TrayArrangement::EdgesFirst => movable.sort_by_key(|id| {
                 let piece = snapshot.piece(*id).expect("id came from this snapshot");
-                let on_row_edge = piece.row == 0 || piece.row + 1 == rows;
-                let on_column_edge = piece.column == 0 || piece.column + 1 == columns;
-                let kind = match (on_row_edge, on_column_edge) {
-                    (true, true) => 0,
-                    (false, false) => 2,
-                    _ => 1,
-                };
+                // Corners (two border sides), then edges, then the rest.
+                let kind = 2u8.saturating_sub(snapshot.border_sides(piece));
                 (kind, piece.row, piece.column)
             }),
             TrayArrangement::Shuffle => {
@@ -1384,7 +1505,7 @@ impl RoomRuntime {
 
         let cell_w = snapshot.cell_width();
         let cell_h = snapshot.cell_height();
-        let tray = piece_tray_layout(snapshot.width, snapshot.height, rows, columns);
+        let tray = snapshot.tray_layout();
         let scene = snapshot.scene_bounds();
         let staying: Vec<(f32, f32)> = snapshot
             .pieces
@@ -1828,8 +1949,10 @@ impl RoomRuntime {
     }
 }
 
-/// Returns the smallest translation that joins an adjacent source-image piece
-/// to the moving cluster. Pieces stay axis-aligned in the first playable build.
+/// Returns the smallest translation that joins a neighbouring piece to the
+/// moving cluster. Pieces stay axis-aligned, so two neighbours fit when the
+/// offset between them equals the offset between their home cells, whatever
+/// the cut style.
 fn find_neighbor_merge(
     snapshot: &RoomSnapshot,
     moving_group: u32,
@@ -1843,28 +1966,17 @@ fn find_neighbor_merge(
         .iter()
         .filter(|piece| piece.group_id == moving_group)
     {
-        for fixed in snapshot
-            .pieces
-            .iter()
-            .filter(|piece| piece.group_id != moving_group)
-        {
-            if fixed.held_by.is_some() {
+        for (row, column) in snapshot.neighbours(moving) {
+            let Some(fixed) = snapshot.piece_at(row, column) else {
+                continue;
+            };
+            if fixed.group_id == moving_group || fixed.held_by.is_some() {
                 continue;
             }
-            let expected = if moving.row == fixed.row && moving.column + 1 == fixed.column {
-                Some((fixed.x - cell_w - moving.x, fixed.y - moving.y))
-            } else if moving.row == fixed.row && fixed.column + 1 == moving.column {
-                Some((fixed.x + cell_w - moving.x, fixed.y - moving.y))
-            } else if moving.column == fixed.column && moving.row + 1 == fixed.row {
-                Some((fixed.x - moving.x, fixed.y - cell_h - moving.y))
-            } else if moving.column == fixed.column && fixed.row + 1 == moving.row {
-                Some((fixed.x - moving.x, fixed.y + cell_h - moving.y))
-            } else {
-                None
-            };
-            let Some((dx, dy)) = expected else {
-                continue;
-            };
+            let home_dx = (f32::from(moving.column) - f32::from(fixed.column)) * cell_w;
+            let home_dy = (f32::from(moving.row) - f32::from(fixed.row)) * cell_h;
+            let dx = fixed.x + home_dx - moving.x;
+            let dy = fixed.y + home_dy - moving.y;
             let distance = dx.hypot(dy);
             if distance > tolerance {
                 continue;
@@ -3042,6 +3154,15 @@ mod chat_tests {
         let spaced = format!("{} tail", "x".repeat(MAX_CHAT_CHARS - 1));
         assert!(!clean_chat_text(&spaced).unwrap().ends_with(' '));
     }
+}
+
+#[cfg(test)]
+mod cut_style_tests {
+    use super::*;
+
+    fn room() -> RoomRuntime {
+        styled_room(CutStyle::Jigsaw)
+    }
 
     /// Pins today's jigsaw contours bit for bit, so rooms and packages made
     /// before cut styles existed keep exactly the same shapes.
@@ -3077,5 +3198,170 @@ mod chat_tests {
         assert_eq!(outline[40], [71.585434, 46.382824]);
         assert_eq!(outline[120], [102.03611, 66.50823]);
         assert_eq!(outline[290], [33.80201, 54.395454]);
+    }
+
+    fn styled_room(style: CutStyle) -> RoomRuntime {
+        let snapshot = RoomSnapshot::create(
+            "id".into(),
+            "invite".into(),
+            "test".into(),
+            "hash".into(),
+            "png".into(),
+            1200,
+            800,
+            4,
+            6,
+            "host".into(),
+        )
+        .unwrap()
+        .with_cut_style(style);
+        RoomRuntime {
+            snapshot: Some(snapshot),
+            names: HashMap::from([("host".into(), "Host".into())]),
+            host_id: Some("host".into()),
+            ..RoomRuntime::default()
+        }
+    }
+
+    /// Put piece `id` at `offset` from its home cell, loose.
+    fn put(room: &mut RoomRuntime, id: u32, offset: (f32, f32)) {
+        let snapshot = room.snapshot.as_mut().unwrap();
+        let (cw, ch) = (snapshot.cell_width(), snapshot.cell_height());
+        let piece = snapshot.piece_mut(id).unwrap();
+        piece.x = f32::from(piece.column) * cw + offset.0;
+        piece.y = f32::from(piece.row) * ch + offset.1;
+    }
+
+    #[test]
+    fn hexagons_join_diagonal_neighbours_and_snap_home() {
+        let mut room = styled_room(CutStyle::Hexagon);
+        // Row 0 is even: piece (0,1) meets (1,0) and (1,1) below it, not
+        // (1,2). Ids are row * 6 + column.
+        let (upper, lower_left, far) = (1, 6, 8);
+        put(&mut room, upper, (2000.0, 900.0));
+        put(&mut room, far, (2000.0, 900.0));
+        room.acquire("host", far).unwrap();
+        let far_piece = room.snapshot.as_ref().unwrap().piece(far).unwrap().clone();
+        let (alone, _) = room
+            .move_piece("host", far, far_piece.x + 3.0, far_piece.y, true)
+            .unwrap();
+        assert_eq!(alone.len(), 1, "(0,1) and (1,2) are not neighbours");
+
+        put(&mut room, lower_left, (2000.0, 900.0));
+        room.acquire("host", lower_left).unwrap();
+        let target = room
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .piece(lower_left)
+            .unwrap()
+            .clone();
+        let (joined, _) = room
+            .move_piece("host", lower_left, target.x + 12.0, target.y - 9.0, true)
+            .unwrap();
+        let ids: HashSet<u32> = joined.iter().map(|piece| piece.id).collect();
+        assert!(ids.contains(&upper) && ids.contains(&lower_left), "{ids:?}");
+        let snapshot = room.snapshot.as_ref().unwrap();
+        let (a, b) = (
+            snapshot.piece(upper).unwrap(),
+            snapshot.piece(lower_left).unwrap(),
+        );
+        assert_eq!(a.group_id, b.group_id);
+        assert!((b.x - a.x + snapshot.cell_width()).abs() < 0.01);
+        assert!((b.y - a.y - snapshot.cell_height()).abs() < 0.01);
+
+        // Dropping the pair near home places both.
+        room.acquire("host", upper).unwrap();
+        let cw = room.snapshot.as_ref().unwrap().cell_width();
+        let (placed, _) = room.move_piece("host", upper, cw + 5.0, 4.0, true).unwrap();
+        assert_eq!(placed.len(), 2);
+        assert!(placed.iter().all(|piece| piece.placed));
+    }
+
+    #[test]
+    fn styled_rooms_scatter_into_their_own_tray() {
+        for style in CutStyle::ALL {
+            let room = styled_room(style);
+            let snapshot = room.snapshot.as_ref().unwrap();
+            assert_eq!(snapshot.cut_style, style);
+            let tray = snapshot.tray_layout();
+            assert_eq!((tray.spacing_x, tray.spacing_y), style.tray_spacing());
+            for piece in &snapshot.pieces {
+                assert!(piece.x >= tray.tray_x - 0.01, "{style:?}");
+                assert!(piece.x < tray.tray_x + tray.tray_width);
+            }
+            let positions: HashSet<(u32, u32)> = snapshot
+                .pieces
+                .iter()
+                .map(|piece| (piece.x.to_bits(), piece.y.to_bits()))
+                .collect();
+            assert_eq!(positions.len(), snapshot.pieces.len());
+        }
+        // Jigsaw rooms are exactly what they were before cut styles.
+        let classic = room().snapshot.unwrap();
+        assert_eq!(classic.clone().with_cut_style(CutStyle::Jigsaw), classic);
+    }
+
+    #[test]
+    fn arrange_puts_triangle_edge_pieces_first() {
+        let mut room = styled_room(CutStyle::Triangle);
+        let (pieces, _) = room.rearrange_tray(TrayArrangement::EdgesFirst, 0).unwrap();
+        let snapshot = room.snapshot.as_ref().unwrap();
+        let tray = snapshot.tray_layout();
+        let slot = |piece: &Piece| {
+            let column = ((piece.x - tray.tray_x) / (tray.spacing_x * snapshot.cell_width()))
+                .round() as usize;
+            let row = ((piece.y - (tray.tray_y - tray.board_y))
+                / (tray.spacing_y * snapshot.cell_height()))
+            .round() as usize;
+            row * tray.columns + column
+        };
+        let mut by_slot: Vec<&Piece> = pieces.iter().collect();
+        by_slot.sort_by_key(|piece| slot(piece));
+        let kinds: Vec<u8> = by_slot
+            .iter()
+            .map(|piece| snapshot.border_sides(piece))
+            .collect();
+        assert!(kinds.windows(2).all(|pair| pair[0] >= pair[1]), "{kinds:?}");
+        assert_eq!(kinds.iter().filter(|kind| **kind == 2).count(), 4);
+        // Top-row triangles that only touch the border with a tip are
+        // interior pieces.
+        assert!(
+            (0..6).any(|column| snapshot.border_sides(snapshot.piece_at(0, column).unwrap()) == 0)
+        );
+    }
+
+    #[test]
+    fn cut_style_is_optional_on_the_wire() {
+        let snapshot = room().snapshot.unwrap();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["cut_style"], "jigsaw");
+        value.as_object_mut().unwrap().remove("cut_style");
+        let old: RoomSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(old.cut_style, CutStyle::Jigsaw);
+
+        let hex = styled_room(CutStyle::Hexagon).snapshot.unwrap();
+        let text = serde_json::to_string(&hex).unwrap();
+        assert!(text.contains("\"cut_style\":\"hexagon\""));
+        let back: RoomSnapshot = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.cut_style, CutStyle::Hexagon);
+        assert_eq!(
+            piece_outline(&back, &back.pieces[7]),
+            piece_outline(&hex, &hex.pieces[7])
+        );
+
+        let create = r#"{"type":"create_room","name":"a","title":"t","media_sha256":"x",
+            "media_extension":"png","width":10,"height":10,"rows":2,"columns":2}"#;
+        match serde_json::from_str::<ClientMessage>(create).unwrap() {
+            ClientMessage::CreateRoom { cut_style, .. } => assert_eq!(cut_style, CutStyle::Jigsaw),
+            other => panic!("unexpected {other:?}"),
+        }
+        let triangles = create.replace("\"columns\":2", "\"columns\":2,\"cut_style\":\"triangle\"");
+        match serde_json::from_str::<ClientMessage>(&triangles).unwrap() {
+            ClientMessage::CreateRoom { cut_style, .. } => {
+                assert_eq!(cut_style, CutStyle::Triangle)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

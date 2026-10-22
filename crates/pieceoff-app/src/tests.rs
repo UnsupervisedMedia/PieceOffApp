@@ -36,21 +36,41 @@ fn tray_filters_separate_edge_and_interior_pieces() {
         ..edge.clone()
     };
 
-    assert!(PieceFilter::All.includes(&edge, 4, 4));
-    assert!(PieceFilter::Edges.includes(&edge, 4, 4));
-    assert!(!PieceFilter::Interior.includes(&edge, 4, 4));
-    assert!(!PieceFilter::Edges.includes(&interior, 4, 4));
-    assert!(PieceFilter::Interior.includes(&interior, 4, 4));
+    let board = RoomSnapshot::create(
+        "room".into(),
+        "FILTER".into(),
+        "Filter".into(),
+        "a".repeat(64),
+        "png".into(),
+        800,
+        600,
+        4,
+        4,
+        "host".into(),
+    )
+    .unwrap();
+    assert!(PieceFilter::All.includes(&edge, &board));
+    assert!(PieceFilter::Edges.includes(&edge, &board));
+    assert!(!PieceFilter::Interior.includes(&edge, &board));
+    assert!(!PieceFilter::Edges.includes(&interior, &board));
+    assert!(PieceFilter::Interior.includes(&interior, &board));
     assert!(piece_visible_for_filter(
         PieceFilter::Edges,
         &Piece {
             x: 100.0,
             ..interior.clone()
         },
-        800,
-        4,
-        4,
+        &board,
     ));
+    // Triangles: a top-row piece touching the border only with its tip is
+    // an interior piece; its neighbours with a flat top are edge pieces.
+    let triangles = board.with_cut_style(CutStyle::Triangle);
+    let top: Vec<bool> = (0..4)
+        .map(|column| {
+            PieceFilter::Edges.includes(triangles.piece_at(0, column).unwrap(), &triangles)
+        })
+        .collect();
+    assert_eq!(top, [true, true, false, true], "{top:?}");
 }
 
 #[test]
@@ -1546,6 +1566,10 @@ struct DragRig {
 
 impl DragRig {
     fn new(rows: u16, columns: u16) -> Self {
+        Self::styled(rows, columns, CutStyle::Jigsaw)
+    }
+
+    fn styled(rows: u16, columns: u16, style: CutStyle) -> Self {
         use pieceoff_core::{RoomRuntime, piece_outline};
         let ctx = egui::Context::default();
         let snapshot = RoomSnapshot::create(
@@ -1560,7 +1584,8 @@ impl DragRig {
             columns,
             "host".into(),
         )
-        .unwrap();
+        .unwrap()
+        .with_cut_style(style);
         let mut room = RoomRuntime::default();
         room.snapshot = Some(snapshot.clone());
         room.host_id = Some("host".into());
@@ -2917,25 +2942,165 @@ fn smaller_pieces_are_drawn_from_thinner_outlines_that_keep_their_area_and_corne
 #[test]
 fn a_400_piece_table_stays_within_a_vertex_budget() {
     // Full detail for every piece is about 770k vertices; thinned outlines
-    // and unstroked specks must keep the whole table far below that.
-    let mut rig = DragRig::new(20, 20);
-    rig.app.view_command = Some(ViewCommand::Fit);
-    rig.frame(Vec::new());
-    let output = rig.frame(Vec::new());
-    let vertices: usize = rig
-        .ctx
-        .tessellate(output.shapes, output.pixels_per_point)
-        .iter()
-        .map(|clipped| match &clipped.primitive {
-            egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
-            _ => 0,
-        })
-        .sum();
-    assert!(
-        vertices > 20_000,
-        "the table should draw something: {vertices}"
+    // and unstroked specks must keep the whole table far below that, for
+    // every cut style.
+    for style in CutStyle::ALL {
+        let mut rig = DragRig::styled(20, 20, style);
+        rig.app.view_command = Some(ViewCommand::Fit);
+        rig.frame(Vec::new());
+        let output = rig.frame(Vec::new());
+        let vertices: usize = rig
+            .ctx
+            .tessellate(output.shapes, output.pixels_per_point)
+            .iter()
+            .map(|clipped| match &clipped.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                _ => 0,
+            })
+            .sum();
+        println!("{style:?}: {vertices} vertices");
+        assert!(
+            vertices > 20_000,
+            "{style:?}: the table should draw something: {vertices}"
+        );
+        assert!(
+            vertices < 260_000,
+            "{style:?}: too many vertices: {vertices}"
+        );
+    }
+}
+
+#[test]
+fn creating_a_room_sends_the_chosen_cut_style_and_a_capped_grid() {
+    let mut app = PieceOffApp {
+        media_size: (1920, 1080),
+        media_hash: "a".repeat(64),
+        media_extension: "png".into(),
+        ..PieceOffApp::default()
+    };
+    let aspect = 1920.0 / 1080.0;
+    for style in CutStyle::ALL {
+        // Every preset stays within the piece cap and near the style's
+        // ideal cell shape.
+        for (_, count) in crate::ui::PIECE_PRESETS {
+            for media_aspect in [aspect, 1.0, 0.5625, 2.4] {
+                let (rows, columns) = crate::ui::grid_for_style(count, media_aspect, style);
+                assert!(u32::from(rows) * u32::from(columns) <= 400);
+                assert!((2..=30).contains(&rows) && (2..=30).contains(&columns));
+            }
+        }
+        (app.rows, app.columns) = crate::ui::grid_for_style(48, aspect, CutStyle::Jigsaw);
+        app.cut_style = CutStyle::Jigsaw;
+        app.set_cut_style(style, aspect);
+        // A preset grid follows the style.
+        assert_eq!(
+            (app.rows, app.columns),
+            crate::ui::grid_for_style(48, aspect, style)
+        );
+        let ClientMessage::CreateRoom {
+            cut_style,
+            rows,
+            columns,
+            width,
+            height,
+            ..
+        } = app.create_request()
+        else {
+            panic!("not a create request");
+        };
+        assert_eq!(cut_style, style);
+        let room = RoomSnapshot::create(
+            "room".into(),
+            "STYLE1".into(),
+            "Styled".into(),
+            "a".repeat(64),
+            "png".into(),
+            width,
+            height,
+            rows,
+            columns,
+            "host".into(),
+        )
+        .unwrap()
+        .with_cut_style(cut_style);
+        let cell = room.cell_width() / room.cell_height();
+        assert!(
+            (cell / style.cell_aspect() - 1.0).abs() < 0.25,
+            "{style:?}: cells {cell}"
+        );
+
+        // The room draws every piece as a textured mesh.
+        let mut rig = DragRig::styled(rows, columns, style);
+        rig.app.view_command = Some(ViewCommand::Fit);
+        rig.frame(Vec::new());
+        let output = rig.frame(Vec::new());
+        let meshes = output
+            .shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Mesh(mesh)
+                    if mesh.texture_id != egui::TextureId::default())
+            })
+            .count();
+        assert!(
+            meshes >= usize::from(rows) * usize::from(columns),
+            "{style:?}: {meshes} meshes"
+        );
+    }
+    // A package keeps its own cut whatever the picker says.
+    app.pending_snapshot = Some(
+        RoomSnapshot::create(
+            "room".into(),
+            "PKG001".into(),
+            "Package".into(),
+            "a".repeat(64),
+            "png".into(),
+            1920,
+            1080,
+            4,
+            6,
+            "host".into(),
+        )
+        .unwrap()
+        .with_cut_style(CutStyle::Hexagon),
     );
-    assert!(vertices < 260_000, "too many vertices: {vertices}");
+    app.cut_style = CutStyle::Triangle;
+    let ClientMessage::CreateRoom { cut_style, .. } = app.create_request() else {
+        panic!("not a create request");
+    };
+    assert_eq!(cut_style, CutStyle::Hexagon);
+}
+
+#[test]
+fn the_timelapse_joins_hexagon_neighbours_by_position() {
+    let mut view = RoomSnapshot::create(
+        "room".into(),
+        "HEXLAP".into(),
+        "Hex".into(),
+        "a".repeat(64),
+        "png".into(),
+        1200,
+        800,
+        4,
+        6,
+        "host".into(),
+    )
+    .unwrap()
+    .with_cut_style(CutStyle::Hexagon);
+    let (cw, ch) = (view.cell_width(), view.cell_height());
+    // (0,1) and (1,0) are hexagon neighbours; (0,1) and (1,2) are not.
+    let at = |view: &mut RoomSnapshot, id: u32, x: f32, y: f32| {
+        let piece = view.piece_mut(id).unwrap();
+        piece.x = x;
+        piece.y = y;
+    };
+    at(&mut view, 1, 3000.0, 1000.0);
+    at(&mut view, 6, 3000.0 - cw, 1000.0 + ch);
+    at(&mut view, 8, 3000.0 + cw, 1000.0 + ch);
+    crate::timelapse::settle_view(&mut view);
+    let group = |id: u32| view.piece(id).unwrap().group_id;
+    assert_eq!(group(1), group(6));
+    assert_ne!(group(1), group(8));
 }
 
 /// Frame-cost report for a 400-piece board. Run in release mode:
@@ -2943,8 +3108,15 @@ fn a_400_piece_table_stays_within_a_vertex_budget() {
 #[test]
 #[ignore = "timing report, not a pass/fail check"]
 fn large_board_frame_cost() {
+    for style in CutStyle::ALL {
+        println!("{style:?}");
+        board_frame_cost(style);
+    }
+}
+
+fn board_frame_cost(style: CutStyle) {
     let started = Instant::now();
-    let mut rig = DragRig::new(20, 20);
+    let mut rig = DragRig::styled(20, 20, style);
     println!("rig + first frame: {:?}", started.elapsed());
     for (label, command) in [
         ("whole table", ViewCommand::Fit),
