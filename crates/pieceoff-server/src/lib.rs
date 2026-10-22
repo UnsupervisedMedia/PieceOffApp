@@ -21,6 +21,15 @@ use pieceoff_core::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+/// Lowercase hex encoding; sha2 0.11 digests no longer implement `LowerHex`.
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    bytes.as_ref().iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -698,7 +707,7 @@ async fn upload_media(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     drop(file);
-    let received_hash = format!("{:x}", hasher.finalize());
+    let received_hash = hex(hasher.finalize());
     if received_hash != sha256 {
         let _ = tokio_fs::remove_file(&temporary).await;
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
@@ -1569,7 +1578,7 @@ mod tests {
             "room-id".into(),
             "LARGE1".into(),
             "Oversized room".into(),
-            format!("{:x}", Sha256::digest(b"large media")),
+            hex(Sha256::digest(b"large media")),
             "png".into(),
             32,
             24,
@@ -1638,7 +1647,7 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-media-recovery-{}", Uuid::new_v4()));
         let media = b"media persisted before the room-ready flag";
-        let hash = format!("{:x}", Sha256::digest(media));
+        let hash = hex(Sha256::digest(media));
         let mut snapshot = RoomSnapshot::create(
             "room-id".into(),
             "REC123".into(),
@@ -1674,7 +1683,7 @@ mod tests {
     async fn rejoining_host_gets_a_new_upload_token_after_restart() {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-incomplete-upload-{}", Uuid::new_v4()));
-        let hash = format!("{:x}", Sha256::digest(b"upload interrupted before restart"));
+        let hash = hex(Sha256::digest(b"upload interrupted before restart"));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "REJOIN1".into(),
@@ -1723,7 +1732,7 @@ mod tests {
             "room-id".into(),
             "HANDOFF".into(),
             "Pending upload".into(),
-            format!("{:x}", Sha256::digest(b"pending upload media")),
+            hex(Sha256::digest(b"pending upload media")),
             "mp4".into(),
             32,
             24,
@@ -1782,7 +1791,7 @@ mod tests {
             ("NEW123", "recent clip"),
         ] {
             let media = label.as_bytes();
-            let hash = format!("{:x}", Sha256::digest(media));
+            let hash = hex(Sha256::digest(media));
             let mut snapshot = RoomSnapshot::create(
                 Uuid::new_v4().to_string(),
                 code.into(),
@@ -1932,7 +1941,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-media-test-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let content = b"portable room media bytes";
-        let hash = format!("{:x}", Sha256::digest(content));
+        let hash = hex(Sha256::digest(content));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "ABC123".into(),
@@ -2056,7 +2065,7 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-media-reject-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
-        let expected = format!("{:x}", Sha256::digest(b"expected"));
+        let expected = hex(Sha256::digest(b"expected"));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "ABC123".into(),
@@ -2110,8 +2119,8 @@ mod tests {
         state.media_quota_bytes = 10;
         let first_content = b"12345678";
         let second_content = b"abcd";
-        let first_hash = format!("{:x}", Sha256::digest(first_content));
-        let second_hash = format!("{:x}", Sha256::digest(second_content));
+        let first_hash = hex(Sha256::digest(first_content));
+        let second_hash = hex(Sha256::digest(second_content));
         for (code, token, hash) in [
             ("FIRST1", "first-token", first_hash.clone()),
             ("SECOND", "second-token", second_hash.clone()),
@@ -2283,7 +2292,7 @@ mod tests {
         address: std::net::SocketAddr,
         media: &[u8],
     ) -> (TestSocket, String, String) {
-        let hash = format!("{:x}", Sha256::digest(media));
+        let hash = hex(Sha256::digest(media));
         let (mut host, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
         host.send(Message::Text(
             serde_json::json!({
@@ -2325,7 +2334,7 @@ mod tests {
         let (address, _state) = queue_test_server(&data_dir).await;
         let (mut host, code, hash_a) = queue_test_room(address, b"clip A").await;
         let media_b = b"clip B bytes";
-        let hash_b = format!("{:x}", Sha256::digest(media_b));
+        let hash_b = hex(Sha256::digest(media_b));
         host.send(queue_add_message(&hash_b, "B")).await.unwrap();
         let token = read_message(&mut host, "media_upload_token").await;
         assert_eq!(token["sha256"], hash_b);
@@ -2412,7 +2421,7 @@ mod tests {
             .await
             .unwrap();
         read_message(&mut guest, "welcome").await;
-        let hash_b = format!("{:x}", Sha256::digest(b"never uploaded"));
+        let hash_b = hex(Sha256::digest(b"never uploaded"));
         host.send(queue_add_message(&hash_b, "B")).await.unwrap();
         read_message(&mut host, "media_upload_token").await;
         host.close(None).await.unwrap();
@@ -2463,8 +2472,8 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-keepq-{}", Uuid::new_v4()));
         let mut state = AppState::new(data_dir.clone());
         state.room_ttl = Duration::from_secs(60);
-        let hash_a = format!("{:x}", Sha256::digest(b"keep A"));
-        let hash_b = format!("{:x}", Sha256::digest(b"keep B"));
+        let hash_a = hex(Sha256::digest(b"keep A"));
+        let hash_b = hex(Sha256::digest(b"keep B"));
         let mut snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "KEEPQ1".into(),
@@ -2496,7 +2505,7 @@ mod tests {
         fs::write(media_path(&data_dir, &hash_a, "png"), b"keep A").unwrap();
         fs::write(media_path(&data_dir, &hash_b, "png"), b"keep B").unwrap();
         // An expired room makes the cleanup pass collect unreferenced files.
-        let gone_hash = format!("{:x}", Sha256::digest(b"gone"));
+        let gone_hash = hex(Sha256::digest(b"gone"));
         let gone = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "GONEQ1".into(),
@@ -2536,8 +2545,8 @@ mod tests {
         let state = AppState::new(data_dir.clone());
         let slow_content = b"a slow, large upload";
         let quick_content = b"a quick one";
-        let slow_hash = format!("{:x}", Sha256::digest(slow_content));
-        let quick_hash = format!("{:x}", Sha256::digest(quick_content));
+        let slow_hash = hex(Sha256::digest(slow_content));
+        let quick_hash = hex(Sha256::digest(quick_content));
         for (code, token, hash) in [
             ("SLOW01", "slow-token", slow_hash.clone()),
             ("QUICK1", "quick-token", quick_hash.clone()),
@@ -2617,7 +2626,7 @@ mod tests {
         let mut state = AppState::new(data_dir.clone());
         state.max_media_bytes = 8;
         let content = vec![7u8; 100];
-        let hash = format!("{:x}", Sha256::digest(&content));
+        let hash = hex(Sha256::digest(&content));
         let snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "CAP001".into(),
@@ -2659,7 +2668,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-range-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let content = b"0123456789abcdefghij";
-        let hash = format!("{:x}", Sha256::digest(content));
+        let hash = hex(Sha256::digest(content));
         let mut snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "RANGE1".into(),
@@ -2788,8 +2797,8 @@ mod tests {
     #[tokio::test]
     async fn host_queues_swaps_and_locks_over_the_wire() {
         let media_a = b"queue test clip A";
-        let hash_a = format!("{:x}", Sha256::digest(media_a));
-        let hash_b = format!("{:x}", Sha256::digest(b"queue test clip B"));
+        let hash_a = hex(Sha256::digest(media_a));
+        let hash_b = hex(Sha256::digest(b"queue test clip B"));
         let data_dir = std::env::temp_dir().join(format!("pieceoff-queue-test-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2927,7 +2936,7 @@ mod tests {
         );
         let media = fs::read(&video_path).unwrap();
         fs::remove_file(video_path).unwrap();
-        let media_hash = format!("{:x}", Sha256::digest(&media));
+        let media_hash = hex(Sha256::digest(&media));
 
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-playback-test-{}", Uuid::new_v4()));
@@ -3210,7 +3219,7 @@ mod tests {
         host.send(Message::Text(
             serde_json::json!({
                 "type":"create_room", "name":"Host", "title":"Room test",
-                "media_sha256":format!("{:x}", Sha256::digest(b"looping test clip")),
+                "media_sha256":hex(Sha256::digest(b"looping test clip")),
                 "media_extension":"png",
                 "width":800, "height":600, "rows":3, "columns":4
             })
