@@ -25,10 +25,11 @@ function freePort() {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function startServer(port, persistDir) {
+async function startServer(port, persistDir, vars = {}) {
+  const varArgs = Object.entries({ FLUSH_MS: 500, ...vars }).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
   const child = spawn(
     "npx",
-    ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", "0", "--persist-to", persistDir],
+    ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", "0", "--persist-to", persistDir, ...varArgs],
     {
       cwd: WORKER_DIR,
       detached: true,
@@ -58,9 +59,8 @@ async function startServer(port, persistDir) {
 }
 
 /** A WebSocket with an inbox, so tests can wait for specific frames. */
-async function connect(port, code, clientId) {
-  const query = `code=${code}` + (clientId ? `&client=${clientId}` : "");
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`);
+async function connect(port, code, query = "") {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${code}${query}`);
   const inbox = [];
   const waiters = [];
   let closed = false;
@@ -75,6 +75,7 @@ async function connect(port, code, clientId) {
     }
   };
   ws.addEventListener("message", (event) => {
+    if (event.data === "pong") return;
     inbox.push(JSON.parse(event.data));
     pump();
   });
@@ -131,12 +132,13 @@ async function createRoom(port) {
   return response.json();
 }
 
-const joinMessage = (code, name) => ({
+const joinMessage = (code, name, resumeToken) => ({
   type: "join_room",
   invite_code: code,
   name,
   media_sha256: SHA,
   media_extension: "mp4",
+  ...(resumeToken ? { resume_token: resumeToken } : {}),
 });
 
 describe("room worker", () => {
@@ -155,12 +157,13 @@ describe("room worker", () => {
   });
 
   it("plays a two-client session: join, lease, drop, disconnect, bad frames, restart", async () => {
-    const { code, client_id: hostId } = await createRoom(port);
-    assert.match(code, /^[A-Z2-9]{8}$/);
+    const { code, client_id: hostId, resume_token: hostToken } = await createRoom(port);
+    assert.match(code, /^[A-HJ-NP-Z2-9]{8}$/);
+    assert.ok(hostToken, "creator receives a resume token");
 
-    // Host joins with the id it was given.
-    const a = await connect(port, code, hostId);
-    a.send(joinMessage(code, "Host"));
+    // Host joins by presenting the secret token; its public id is unchanged.
+    const a = await connect(port, code);
+    a.send(joinMessage(code, "Host", hostToken));
     const welcomeA = await a.next(ofType("welcome"), "host welcome");
     assert.equal(welcomeA.client_id, hostId);
     assert.deepEqual(welcomeA.peers, []);
@@ -172,6 +175,8 @@ describe("room worker", () => {
     b.send(joinMessage(code, "Bee"));
     const welcomeB = await b.next(ofType("welcome"), "guest welcome");
     assert.deepEqual(welcomeB.peers, ["Host"]);
+    assert.notEqual(welcomeB.client_id, hostId);
+    assert.ok(welcomeB.resume_token, "a new player receives a resume token");
     assert.equal(welcomeB.media_upload_token, null, "only the host gets an upload token");
     const joined = await a.next(ofType("peer_joined"), "peer_joined");
     assert.equal(joined.name, "Bee");
@@ -249,5 +254,91 @@ describe("room worker", () => {
       body: JSON.stringify({ type: "next_item" }),
     });
     assert.equal(response.status, 400);
+  });
+
+  it("does not let anyone take the host role with the public id", async () => {
+    const { code, client_id: hostId, resume_token: hostToken } = await createRoom(port);
+    const guest = await connect(port, code);
+    guest.send(joinMessage(code, "Guest"));
+    const welcome = await guest.next(ofType("welcome"), "guest welcome");
+    assert.equal(welcome.snapshot.host_id, hostId, "the host id is public");
+
+    // Presenting the public id (as a query or a bogus token) grants nothing.
+    const thief = await connect(port, code, `&client=${hostId}`);
+    thief.send(joinMessage(code, "Thief", "not-the-token"));
+    const stolen = await thief.next(ofType("welcome"), "thief welcome");
+    assert.notEqual(stolen.client_id, hostId);
+    assert.equal(stolen.media_upload_token, null);
+    thief.send({ type: "set_repeat", mode: "all" });
+    await thief.next(ofType("error"), "thief cannot change host-only settings");
+
+    // The creator, holding the secret, still gets the host identity.
+    const creator = await connect(port, code);
+    creator.send(joinMessage(code, "Host", hostToken));
+    const real = await creator.next(ofType("welcome"), "creator welcome");
+    assert.equal(real.client_id, hostId);
+    assert.ok(real.media_upload_token, "host receives the upload token");
+
+    // The same token cannot be used twice at once.
+    const twin = await connect(port, code);
+    twin.send(joinMessage(code, "Twin", hostToken));
+    const refused = await twin.next(ofType("error"), "duplicate resume");
+    assert.match(refused.message, /already connected/i);
+    assert.equal(await twin.waitClosed(), true);
+    for (const socket of [guest, thief, creator]) socket.close();
+  });
+
+  it("clears ghost players and their leases after a restart", async () => {
+    const { code, resume_token: hostToken } = await createRoom(port);
+    const a = await connect(port, code);
+    a.send(joinMessage(code, "Host", hostToken));
+    await a.next(ofType("welcome"), "host welcome");
+    const b = await connect(port, code);
+    b.send(joinMessage(code, "Bee"));
+    await b.next(ofType("welcome"), "guest welcome");
+    b.send({ type: "drag_start", piece_id: 3 });
+    await b.next(ofType("pieces_changed"), "lease on piece 3");
+
+    // Let the write-behind flush, then kill the server without closing sockets.
+    await delay(1500);
+    await server.stop();
+    port = await freePort();
+    server = await startServer(port, persistDir);
+
+    const c = await connect(port, code);
+    c.send(joinMessage(code, "Cee"));
+    const welcome = await c.next(ofType("welcome"), "welcome after restart");
+    assert.deepEqual(welcome.peers, [], "ghost players are gone");
+    assert.equal(welcome.snapshot.pieces.find((p) => p.id === 3).held_by, null);
+    assert.equal(welcome.snapshot.host_id, welcome.client_id, "the newcomer is promoted");
+    c.send({ type: "drag_start", piece_id: 3 });
+    await c.next(ofType("pieces_changed"), "piece 3 is free to take");
+    c.close();
+  });
+
+  it("drops a player whose socket goes silent", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pieceoff-worker-idle-"));
+    const idlePort = await freePort();
+    const idle = await startServer(idlePort, dir, { IDLE_SOCKET_MS: 1500 });
+    try {
+      const { code, resume_token: hostToken } = await createRoom(idlePort);
+      const a = await connect(idlePort, code);
+      a.send(joinMessage(code, "Host", hostToken));
+      await a.next(ofType("welcome"), "host welcome");
+      const b = await connect(idlePort, code);
+      b.send(joinMessage(code, "Bee"));
+      await b.next(ofType("welcome"), "guest welcome");
+      // The host keeps its socket alive with pings; the guest says nothing.
+      const keepAlive = setInterval(() => a.send("ping"), 300);
+      try {
+        const left = await a.next(ofType("peer_left"), "peer_left for the silent guest", 20000);
+        assert.equal(left.name, "Bee");
+      } finally {
+        clearInterval(keepAlive);
+      }
+      a.close();
+    } finally {
+      await idle.stop();
+    }
   });
 });

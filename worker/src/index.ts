@@ -5,7 +5,7 @@ export { RoomDO };
 
 /** Same alphabet as the axum server's invite codes (no I, O, 0, 1). */
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const CODE_RE = /^[A-Z2-9]{8}$/;
+const CODE_RE = /^[A-HJ-NP-Z2-9]{8}$/;
 const MAX_BODY = 1_048_576;
 const CODE_ATTEMPTS = 5;
 
@@ -31,8 +31,12 @@ async function verifyCreateAllowed(_request: Request, _env: Env): Promise<boolea
 
 async function createRoom(request: Request, env: Env): Promise<Response> {
   if (!(await verifyCreateAllowed(request, env))) return json({ error: "Not allowed" }, 403);
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > MAX_BODY) return json({ error: "Message too large" }, 413);
   const text = await request.text();
-  if (text.length > MAX_BODY) return json({ error: "Message too large" }, 413);
+  if (new TextEncoder().encode(text).length > MAX_BODY) {
+    return json({ error: "Message too large" }, 413);
+  }
   let message: { type?: unknown };
   try {
     message = JSON.parse(text);
@@ -42,14 +46,15 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   if (message.type !== "create_room") {
     return json({ error: "First message must create or join a room" }, 400);
   }
-  // The creator's id is a bearer secret: only this response reveals it.
+  // The id is public (every player sees the host's id); the resume token that
+  // proves it is the creator's is a secret, returned only here.
   const clientId = crypto.randomUUID();
   const roomId = crypto.randomUUID();
   for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt++) {
     const code = newCode();
     const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
     const result = await stub.init(clientId, message, roomId, code);
-    if (result.ok) return json({ code, client_id: clientId });
+    if (result.ok) return json({ code, client_id: clientId, resume_token: result.resumeToken });
     if (result.error !== "exists") return json({ error: result.error }, 400);
   }
   return json({ error: "Could not pick a free room code. Please try again." }, 503);

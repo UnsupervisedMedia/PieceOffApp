@@ -1364,6 +1364,16 @@ impl RoomRuntime {
         if loop_end_ms > 0 && loop_start_ms >= loop_end_ms {
             return Err("Loop end must be after loop start".into());
         }
+        // A loop that starts at or after the end of the video would restart
+        // already finished, and a host would tick the room forever.
+        let end = if loop_end_ms > 0 {
+            loop_end_ms
+        } else {
+            snapshot.current_item().map_or(0, |item| item.duration_ms)
+        };
+        if end > 0 && loop_start_ms >= end {
+            return Err("Loop start must be before the end of the video".into());
+        }
         snapshot.playback = PlaybackState {
             playing,
             position_ms,
@@ -1630,7 +1640,13 @@ impl RoomRuntime {
             let next = if last { 0 } else { snapshot.current + 1 };
             if next == finished {
                 // One video, repeat All: just play it again from its loop in.
-                snapshot.playback.position_ms = snapshot.playback.loop_start_ms;
+                // A stored loop-in at or past the end restarts from the top
+                // instead, so the room cannot finish again immediately.
+                snapshot.playback.position_ms = if snapshot.playback.loop_start_ms < end {
+                    snapshot.playback.loop_start_ms
+                } else {
+                    0
+                };
                 snapshot.playback.changed_at_ms = now_ms;
             } else {
                 Self::switch_item(snapshot, next, now_ms);

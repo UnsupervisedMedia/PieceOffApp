@@ -156,9 +156,17 @@ Local development: `scripts/worker-test.sh` builds the wasm module
 (`worker/build.sh`), type-checks `worker/`, and runs a two-client test against
 `wrangler dev --local` (join, piece leases, release on disconnect, bad frames,
 unknown codes, restart persistence). Nothing is deployed by it. Rooms are
-created with `POST /api/rooms` (a `create_room` body; returns `code` and the
-creator's `client_id`), then clients open `/ws?code=<CODE>[&client=<id>]` and
-send `join_room` first. Not yet in the worker: R2 media transfer, Turnstile and
+created with `POST /api/rooms` (a `create_room` body; returns `code`, the
+creator's public `client_id`, and a secret `resume_token`), then clients open
+`/ws?code=<CODE>` and send `join_room` first. A player's `client_id` is public
+(everyone sees the host's id), so it proves nothing; to come back as the same
+player, including the creator claiming the host role, put the `resume_token`
+in the `join_room` frame (`resume_token` field). Every `welcome` carries the
+joiner's own token; the server stores only its hash. Clients send the text
+`ping` about every 20 seconds and get `pong`; a socket silent for 90 seconds
+(`IDLE_SOCKET_MS`) is dropped and its pieces released. Snapshots flush within
+`FLUSH_MS` (default 5000) of a change. After a deploy or reset, players who
+are no longer connected are released on wake. Not yet in the worker: R2 media transfer, Turnstile and
 per-IP limits, quota and idle cleanup. Production publishing of anything under
 `pieceoff.app` goes through the connected GitHub to Cloudflare Workers Builds
 path, not a direct `wrangler deploy`.
