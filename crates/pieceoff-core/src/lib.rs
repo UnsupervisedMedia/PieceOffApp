@@ -204,6 +204,10 @@ pub struct PieceTrayLayout {
     /// Distance between neighbouring slots, in cells across and down.
     pub spacing_x: f32,
     pub spacing_y: f32,
+    /// Where the first slot puts a piece's home corner, in board pixels.
+    /// Hexagons and triangles reach half a cell left of it, so their
+    /// slots start further in than the tray's edge.
+    pub slot_x: f32,
 }
 
 /// The tray of a classic jigsaw puzzle.
@@ -220,6 +224,7 @@ pub fn styled_tray_layout(
     columns: u16,
 ) -> PieceTrayLayout {
     let (spacing_x, spacing_y) = style.tray_spacing();
+    let slot_inset = style.tray_slot_inset();
     let rows = rows.max(1) as f32;
     let columns = columns.max(1) as f32;
     let width = width as f32;
@@ -248,6 +253,7 @@ pub fn styled_tray_layout(
         content_height,
         spacing_x,
         spacing_y,
+        slot_x: tray_x + slot_inset * cell_width,
     }
 }
 
@@ -740,7 +746,7 @@ fn tray_slot_position(
     location: usize,
 ) -> (f32, f32) {
     (
-        tray.tray_x + (location % tray.columns) as f32 * tray.spacing_x * cell_w,
+        tray.slot_x + (location % tray.columns) as f32 * tray.spacing_x * cell_w,
         tray.tray_y - tray.board_y + (location / tray.columns) as f32 * tray.spacing_y * cell_h,
     )
 }
@@ -3309,7 +3315,7 @@ mod cut_style_tests {
         let snapshot = room.snapshot.as_ref().unwrap();
         let tray = snapshot.tray_layout();
         let slot = |piece: &Piece| {
-            let column = ((piece.x - tray.tray_x) / (tray.spacing_x * snapshot.cell_width()))
+            let column = ((piece.x - tray.slot_x) / (tray.spacing_x * snapshot.cell_width()))
                 .round() as usize;
             let row = ((piece.y - (tray.tray_y - tray.board_y))
                 / (tray.spacing_y * snapshot.cell_height()))

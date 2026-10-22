@@ -68,6 +68,15 @@ impl CutStyle {
         }
     }
 
+    /// How far in from the tray's left edge the first slot starts, in
+    /// cells, so pieces reaching left of their cell stay inside the tray.
+    pub(crate) fn tray_slot_inset(self) -> f32 {
+        match self {
+            CutStyle::Jigsaw => 0.0,
+            CutStyle::Hexagon | CutStyle::Triangle => 0.5,
+        }
+    }
+
     /// Knob depth relative to the edge length.
     fn tab_depth(self) -> f32 {
         match self {
