@@ -8,6 +8,8 @@ const base = {
   flushMs: 5_000,
   deadline: -1,
   joinedSockets: 0,
+  openSockets: 0,
+  cleanupAt: null,
   sweepMs: 20_000,
   minGapMs: 100,
   maxAheadMs: 7 * 24 * 3_600_000,
@@ -27,23 +29,38 @@ describe("alarmTarget", () => {
   });
 
   it("uses the playback deadline when it is earlier than the liveness sweep", () => {
-    const target = alarmTarget({ ...base, joinedSockets: 2, deadline: 1_005_000 });
+    const target = alarmTarget({ ...base, joinedSockets: 2, openSockets: 2, deadline: 1_005_000 });
     assert.equal(target, 1_005_000);
   });
 
   it("sweeps for dead sockets while players are connected", () => {
-    assert.equal(alarmTarget({ ...base, joinedSockets: 1 }), 1_020_000);
+    assert.equal(alarmTarget({ ...base, joinedSockets: 1, openSockets: 1 }), 1_020_000);
+  });
+
+  it("also sweeps when only unjoined sockets are open, but ignores playback", () => {
+    const target = alarmTarget({ ...base, openSockets: 1, deadline: 1_005_000 });
+    assert.equal(target, 1_020_000);
   });
 
   it("never schedules closer than the minimum gap", () => {
-    const target = alarmTarget({ ...base, joinedSockets: 1, deadline: base.now });
+    const target = alarmTarget({ ...base, joinedSockets: 1, openSockets: 1, deadline: base.now });
     assert.equal(target, base.now + 100);
+  });
+
+  it("wakes for the cleanup deadline even when nobody is connected", () => {
+    assert.equal(alarmTarget({ ...base, cleanupAt: 1_300_000 }), 1_300_000);
+  });
+
+  it("picks the earlier of cleanup and a pending flush", () => {
+    const target = alarmTarget({ ...base, dirtySince: 998_000, cleanupAt: 1_300_000 });
+    assert.equal(target, 1_003_000);
   });
 
   it("clamps a far-future deadline to the maximum lead", () => {
     const target = alarmTarget({
       ...base,
       joinedSockets: 1,
+      openSockets: 1,
       sweepMs: Number.MAX_SAFE_INTEGER,
       deadline: 9e15,
     });
