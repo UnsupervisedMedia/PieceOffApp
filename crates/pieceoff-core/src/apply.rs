@@ -56,6 +56,10 @@ impl RoomRuntime {
             .snapshot
             .as_ref()
             .map(|snapshot| snapshot.stats.clone());
+        let holders_before = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.holders.clone());
         let settled_before = self
             .snapshot
             .as_ref()
@@ -176,6 +180,32 @@ impl RoomRuntime {
                 let snapshot = self.set_video_lock(client_id, locked)?;
                 (ServerMessage::Snapshot { snapshot }, true)
             }
+            ClientMessage::CreateHolder {
+                x,
+                y,
+                width,
+                height,
+                label,
+            } => {
+                let revision = self.create_holder(client_id, x, y, width, height, &label)?;
+                (pieces_changed(Vec::new(), revision), true)
+            }
+            ClientMessage::UpdateHolder {
+                holder_id,
+                x,
+                y,
+                width,
+                height,
+                label,
+            } => {
+                let (pieces, revision) =
+                    self.update_holder(client_id, holder_id, x, y, width, height, &label)?;
+                (pieces_changed(pieces, revision), true)
+            }
+            ClientMessage::DeleteHolder { holder_id } => {
+                let revision = self.delete_holder(client_id, holder_id)?;
+                (pieces_changed(Vec::new(), revision), true)
+            }
             ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
                 return Err("Already joined a room".into());
             }
@@ -189,10 +219,16 @@ impl RoomRuntime {
         };
         // Piece changes carry the stats whenever they moved, so clients never
         // need a per-second clock message.
-        if let ServerMessage::PiecesChanged { stats, .. } = &mut event {
+        // Holders ride along the same way, so a restart that clears them or
+        // a holder change reaches everyone in the one event.
+        if let ServerMessage::PiecesChanged { stats, holders, .. } = &mut event {
             let now = self.snapshot.as_ref().map(|snapshot| &snapshot.stats);
             if now != stats_before.as_ref() {
                 *stats = now.cloned();
+            }
+            let now = self.snapshot.as_ref().map(|snapshot| &snapshot.holders);
+            if now != holders_before.as_ref() {
+                *holders = now.cloned();
             }
         }
         Ok(ApplyOutcome { event, persist })
@@ -204,6 +240,7 @@ fn pieces_changed(pieces: Vec<crate::Piece>, revision: u64) -> ServerMessage {
         pieces,
         revision,
         stats: None,
+        holders: None,
     }
 }
 

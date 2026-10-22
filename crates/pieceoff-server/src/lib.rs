@@ -449,8 +449,9 @@ async fn health_check(bind: SocketAddr) -> bool {
         .unwrap_or(false)
 }
 
-/// Advance every room's queue when its current item has played out. The
-/// server owns this so all clients change item together.
+/// Advance every room's queue when its current item has played out, and
+/// release piece holders after their owner's grace period. The server owns
+/// this so all clients change item together.
 fn spawn_queue_ticker(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -458,24 +459,30 @@ fn spawn_queue_ticker(state: AppState) {
             interval.tick().await;
             let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
             for room in rooms {
-                let advanced = {
-                    let mut runtime = room.runtime.lock().await;
-                    match runtime.tick_advance(now_ms()) {
-                        Some(snapshot) => {
-                            // Sent under the lock so it stays in revision
-                            // order with every other event (see `dispatch`).
-                            let _ = room.events.send(ServerMessage::Snapshot { snapshot });
-                            true
-                        }
-                        None => false,
-                    }
-                };
-                if advanced {
+                if tick_room(&room, now_ms()).await {
                     persist_room(&state, &room).await;
                 }
             }
         }
     });
+}
+
+/// One timer step for a room: advance its queue and release holders whose
+/// owner has been gone too long. Returns whether anything was broadcast.
+async fn tick_room(room: &RoomRecord, now: u64) -> bool {
+    let mut runtime = room.runtime.lock().await;
+    let mut changed = false;
+    // Events are sent under the lock so they stay in revision order with
+    // every other event (see `dispatch`).
+    if let Some(snapshot) = runtime.tick_advance(now) {
+        let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+        changed = true;
+    }
+    if let Some(event) = runtime.tick_holders(now) {
+        let _ = room.events.send(event);
+        changed = true;
+    }
+    changed
 }
 
 fn application(state: AppState) -> Router {
@@ -4435,6 +4442,146 @@ mod hardening_tests {
         let resumed = stats(&*reloaded.runtime.lock().await);
         assert!(resumed.running());
         assert_eq!(resumed.elapsed_ms, paused.elapsed_ms);
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn holders_reserve_pieces_survive_a_restart_and_are_released_after_the_grace() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                name: "Host".into(),
+                title: "Sorted".into(),
+                media_sha256: "d".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+        connect_room(
+            &state,
+            "guest",
+            ClientMessage::JoinRoom {
+                invite_code: code.clone(),
+                name: "Guest".into(),
+                media_sha256: "d".repeat(64),
+                media_extension: "png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut events = room.events.subscribe();
+        // Cells are 32×24; a 3×3-cell holder below and left of the board,
+        // clear of the tray on its right.
+        let (x, y) = (-100.0, 100.0);
+        assert!(
+            dispatch(
+                &room,
+                "guest",
+                ClientMessage::CreateHolder {
+                    x: 0.0,
+                    y: 10.0,
+                    width: 96.0,
+                    height: 72.0,
+                    label: "On the board".into(),
+                },
+            )
+            .await
+            .is_err(),
+            "holders stay off the board"
+        );
+        assert!(
+            dispatch(
+                &room,
+                "guest",
+                ClientMessage::CreateHolder {
+                    x,
+                    y,
+                    width: 96.0,
+                    height: 72.0,
+                    label: "Sky\u{0}".into(),
+                },
+            )
+            .await
+            .unwrap()
+        );
+        match events.recv().await.unwrap() {
+            ServerMessage::PiecesChanged {
+                holders: Some(holders),
+                ..
+            } => {
+                assert_eq!(holders.len(), 1);
+                assert_eq!(holders[0].owner, "Guest");
+                assert_eq!(holders[0].label, "Sky");
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        dispatch(&room, "guest", ClientMessage::DragStart { piece_id: 3 })
+            .await
+            .unwrap();
+        dispatch(
+            &room,
+            "guest",
+            ClientMessage::DragEnd {
+                piece_id: 3,
+                x: -80.0,
+                y: 120.0,
+            },
+        )
+        .await
+        .unwrap();
+        let refused = dispatch(&room, "host", ClientMessage::DragStart { piece_id: 3 })
+            .await
+            .unwrap_err();
+        assert_eq!(refused, "That piece is in Guest's holder");
+
+        // The guest leaves; the holder waits for them, through a restart.
+        remove_peer(&room, "guest", "Guest").await;
+        assert!(!tick_room(&room, now_ms()).await);
+        persist_all(&state).await;
+        let restored = AppState::from_config(&config);
+        load_rooms(&restored).await;
+        let reloaded = restored.rooms.read().await.get(&code).unwrap().clone();
+        let holders = reloaded
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .holders
+            .clone();
+        assert_eq!(holders.len(), 1);
+        let away_since = holders[0].owner_away_since_ms.expect("owner marked away");
+        assert!(
+            dispatch(&reloaded, "host", ClientMessage::DragStart { piece_id: 3 })
+                .await
+                .is_err()
+        );
+
+        // Once the grace is up it is released and everyone is told.
+        let mut events = reloaded.events.subscribe();
+        assert!(!tick_room(&reloaded, away_since + pieceoff_core::HOLDER_GRACE_MS - 1).await);
+        assert!(tick_room(&reloaded, away_since + pieceoff_core::HOLDER_GRACE_MS).await);
+        match events.recv().await.unwrap() {
+            ServerMessage::PiecesChanged {
+                holders: Some(holders),
+                ..
+            } => assert!(holders.is_empty()),
+            other => panic!("unexpected event {other:?}"),
+        }
+        dispatch(&reloaded, "host", ClientMessage::DragStart { piece_id: 3 })
+            .await
+            .unwrap();
         let _ = fs::remove_dir_all(&config.data_dir);
     }
 
