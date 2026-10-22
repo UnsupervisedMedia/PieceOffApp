@@ -1095,6 +1095,11 @@ pub enum ClientMessage {
     /// Ask for the current solve's timelapse; the host answers this
     /// connection alone with `ServerMessage::Timelapse` (protocol v13).
     RequestTimelapse,
+    /// The host frees an absent player's name: its claim and holders go, so
+    /// anyone may play under it again.
+    ReleaseName {
+        name: String,
+    },
 }
 
 /// One line of room chat as the server relays it. Kept in the room's memory

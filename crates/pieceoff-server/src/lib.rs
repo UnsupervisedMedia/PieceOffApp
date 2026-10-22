@@ -481,8 +481,9 @@ fn spawn_queue_ticker(state: AppState) {
     });
 }
 
-/// One timer step for a room: advance its queue and release holders whose
-/// owner has been gone too long. Returns whether anything was broadcast.
+/// One timer step for a room: advance its queue and release name claims and
+/// holders whose player has been gone too long. Returns whether anything
+/// changed, so the room should be saved.
 async fn tick_room(room: &RoomRecord, now: u64) -> bool {
     let mut runtime = room.runtime.lock().await;
     let mut changed = false;
@@ -492,6 +493,8 @@ async fn tick_room(room: &RoomRecord, now: u64) -> bool {
         let _ = room.events.send(ServerMessage::Snapshot { snapshot });
         changed = true;
     }
+    // Claims first: a lapsing claim expires its holders for `tick_holders`.
+    changed |= runtime.tick_claims(now);
     if let Some(event) = runtime.tick_holders(now) {
         let _ = room.events.send(event);
         changed = true;
@@ -3270,6 +3273,67 @@ mod tests {
         let _ = fs::remove_dir_all(data_dir);
     }
 
+    #[tokio::test]
+    async fn the_host_releases_an_absent_players_name_over_the_wire() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-release-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut host, code, hash) = queue_test_room(address, b"release clip").await;
+        let mut log = Vec::new();
+        let join = |name: &str, key: &str| {
+            Message::Text(
+                serde_json::json!({
+                    "type":"join_room", "invite_code":code, "name":name,
+                    "media_sha256":hash, "media_extension":"", "player_key":key
+                })
+                .to_string()
+                .into(),
+            )
+        };
+        let release = Message::Text(
+            serde_json::json!({"type":"release_name", "name":"ada"})
+                .to_string()
+                .into(),
+        );
+        let connect = || async { connect_async(format!("ws://{address}/ws")).await.unwrap().0 };
+        let mut ada = connect().await;
+        ada.send(join("Ada", "ada-device")).await.unwrap();
+        read_logged(&mut ada, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+        let mut bo = connect().await;
+        bo.send(join("Bo", "bo-device")).await.unwrap();
+        read_logged(&mut bo, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+
+        // Not while she is here.
+        host.send(release.clone()).await.unwrap();
+        let refused = read_logged(&mut host, "error", &mut log).await;
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("is in the room")
+        );
+        ada.close(None).await.unwrap();
+        read_logged(&mut host, "peer_left", &mut log).await;
+        // Not by a guest.
+        bo.send(release.clone()).await.unwrap();
+        let refused = read_logged(&mut bo, "error", &mut log).await;
+        assert_eq!(refused["message"], "Only the host can release a name");
+        // Her new computer is refused until the host releases the name.
+        let mut laptop = connect().await;
+        laptop.send(join("Ada", "new-laptop")).await.unwrap();
+        let refused = read_logged(&mut laptop, "error", &mut log).await;
+        assert_eq!(refused["message"], pieceoff_core::NAME_TAKEN);
+        host.send(release).await.unwrap();
+        read_logged(&mut host, "pieces_changed", &mut log).await;
+        read_logged(&mut bo, "pieces_changed", &mut log).await;
+        let mut laptop = connect().await;
+        laptop.send(join("Ada", "new-laptop")).await.unwrap();
+        let welcome = read_logged(&mut laptop, "welcome", &mut log).await;
+        assert_eq!(welcome["name"], "Ada");
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     fn queue_add_message(hash: &str, title: &str) -> Message {
         Message::Text(
             serde_json::json!({
@@ -5047,6 +5111,75 @@ mod hardening_tests {
         let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
         let wire = serde_json::to_string(&ServerMessage::Snapshot { snapshot }).unwrap();
         assert!(!wire.contains("name_claims") && !wire.contains("ada-key"));
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn an_absent_players_claim_lapses_after_the_grace_across_a_restart() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (_, code, _, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                name: "Host".into(),
+                title: "Lapsing".into(),
+                media_sha256: "e".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+                player_key: "host-key".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let join = |name: &str, key: &str| ClientMessage::JoinRoom {
+            invite_code: code.clone(),
+            name: name.into(),
+            media_sha256: "e".repeat(64),
+            media_extension: "png".into(),
+            player_key: key.into(),
+            spectator: false,
+        };
+        let (room, ..) = connect_room(&state, "ada", join("Ada", "ada-key"))
+            .await
+            .unwrap();
+        remove_peer(&room, "ada", "Ada").await;
+        // Her going away is stamped and saved, once.
+        assert!(tick_room(&room, now_ms()).await);
+        assert!(!tick_room(&room, now_ms()).await);
+        persist_all(&state).await;
+
+        let restored = AppState::from_config(&config);
+        load_rooms(&restored).await;
+        let reloaded = restored.rooms.read().await.get(&code).unwrap().clone();
+        let away_since = {
+            let runtime = reloaded.runtime.lock().await;
+            let ada = runtime
+                .name_claims
+                .iter()
+                .find(|c| c.name == "ada")
+                .unwrap();
+            ada.away_since_ms.expect("the absence survives the restart")
+        };
+        // The host was here at shutdown, so only their absence is new.
+        tick_room(&reloaded, away_since).await;
+        assert!(!tick_room(&reloaded, away_since + pieceoff_core::HOLDER_GRACE_MS - 1).await);
+        assert_eq!(
+            connect_room(&restored, "x", join("Ada", "other-key"))
+                .await
+                .err()
+                .as_deref(),
+            Some(pieceoff_core::NAME_TAKEN)
+        );
+        assert!(tick_room(&reloaded, away_since + pieceoff_core::HOLDER_GRACE_MS).await);
+        connect_room(&restored, "x", join("Ada", "other-key"))
+            .await
+            .unwrap();
         let _ = fs::remove_dir_all(&config.data_dir);
     }
 

@@ -93,8 +93,12 @@ HTTPS for media transfer automatically.
     The owner leaves: the holder says "(away)" and still holds its pieces;
     rejoining under the same name reclaims it. A client with other settings
     (another `PIECEOFF_CLIENT_DIR`) joining under the owner's name is refused
-    "That name is taken in this room". The host's **Clear** removes anyone's,
-    and Play again clears all of them.
+    "That name is taken in this room…". While the owner is away the host
+    sees **Release name** beside them under **Holders** (and can type any
+    absent name in the players menu); releasing removes their holders and
+    lets the other client join under the name. Without it, the name frees up
+    10 minutes after the owner left. The host's **Clear** removes anyone's
+    holder, and Play again clears all of them.
 19. Join from a third client with **Watch only** ticked. Players see
     "· 1 watching" and no cursor from it; the spectator sees moves, cursors
     and pings, can chat, cannot drag pieces (a hint says so; dragging pans),
@@ -113,7 +117,10 @@ HTTPS for media transfer automatically.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the
-second instance. GUI, audio/video codec, and cross-platform checks must be run
+second instance. Give each instance its own `PIECEOFF_CLIENT_DIR`: windows
+sharing one settings directory share one player key, so the second window to
+join under a name disconnects the first ("This name was opened in another
+window or on another device using the same settings"). GUI, audio/video codec, and cross-platform checks must be run
 on the target OS; automated builds do not verify those runtime integrations.
 
 The automated server integration test
