@@ -6,6 +6,6 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT/worker"
 ./build.sh
-if [ ! -d node_modules ]; then npm ci --no-audit --no-fund; fi
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then npm ci --no-audit --no-fund; fi
 npx tsc --noEmit
-exec node --test test/two-clients.test.mjs
+exec node --test test/schedule.test.mjs test/two-clients.test.mjs

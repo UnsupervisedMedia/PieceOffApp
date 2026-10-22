@@ -388,4 +388,38 @@ mod tests {
         no_duration.snapshot.as_mut().unwrap().queue[0].duration_ms = 0;
         assert_eq!(no_duration.next_tick_deadline(0), None);
     }
+
+    fn set_playback(loop_start_ms: u64, loop_end_ms: u64) -> ClientMessage {
+        ClientMessage::SetPlayback {
+            playing: true,
+            position_ms: 0,
+            rate: 1.0,
+            loop_start_ms,
+            loop_end_ms,
+        }
+    }
+
+    #[test]
+    fn set_playback_rejects_a_loop_start_at_or_past_the_item_end() {
+        let mut runtime = playing_room(1.0, 0);
+        for start in [10_000, 60_000] {
+            let err = runtime
+                .apply("host", set_playback(start, 0), 0)
+                .unwrap_err();
+            assert_eq!(err, "Loop start must be before the end of the video");
+        }
+        runtime.apply("host", set_playback(5_000, 0), 0).unwrap();
+        runtime
+            .apply("host", set_playback(5_000, 8_000), 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_stored_loop_start_past_the_end_cannot_make_the_tick_spin() {
+        let mut runtime = playing_room(1.0, 0);
+        runtime.snapshot.as_mut().unwrap().playback.loop_start_ms = 60_000;
+        assert!(runtime.tick_advance(20_000).is_some());
+        let deadline = runtime.next_tick_deadline(20_000).unwrap();
+        assert!(deadline > 20_000, "deadline {deadline} must move forward");
+    }
 }

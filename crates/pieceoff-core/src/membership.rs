@@ -121,7 +121,7 @@ impl RoomRuntime {
                     .into(),
             );
         }
-        if self.names.len() >= MAX_PLAYERS {
+        if !self.names.contains_key(client_id) && self.names.len() >= MAX_PLAYERS {
             return Err("This room already has 8 players".into());
         }
         let name = clean_name(name);
@@ -418,5 +418,16 @@ mod tests {
     fn welcome_on_an_empty_runtime_is_an_error() {
         let err = RoomRuntime::default().welcome("a", "A", None).unwrap_err();
         assert_eq!(err, "Room is not ready");
+    }
+
+    #[test]
+    fn a_player_can_rejoin_with_their_own_id_when_the_room_is_full() {
+        let mut runtime = room();
+        for index in 1..8 {
+            runtime.join(&format!("p{index}"), "P", &sha()).unwrap();
+        }
+        runtime.join("p3", "Renamed", &sha()).unwrap();
+        assert_eq!(runtime.names.len(), 8);
+        assert_eq!(runtime.names.get("p3").map(String::as_str), Some("Renamed"));
     }
 }

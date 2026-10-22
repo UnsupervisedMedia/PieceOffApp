@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "allowJs": false,
     "resolveJsonModule": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts", "wasm/*.d.ts"]
 }
