@@ -4546,6 +4546,8 @@ mod hardening_tests {
 
         // The guest leaves; the holder waits for them, through a restart.
         remove_peer(&room, "guest", "Guest").await;
+        // Marking the owner away is broadcast (and so persisted) once.
+        assert!(tick_room(&room, now_ms()).await);
         assert!(!tick_room(&room, now_ms()).await);
         persist_all(&state).await;
         let restored = AppState::from_config(&config);
