@@ -333,8 +333,8 @@ impl PieceOffApp {
                 .map(|piece| piece.id)
                 .collect();
             self.snap_flashes.clear();
-            self.timer_started = (!snapshot.completed()).then(Instant::now);
-            self.timer_solved = None;
+            // A run already finished when we arrived is not ours to record.
+            self.solve_recorded = snapshot.stats.finished;
         }
         for piece in &snapshot.pieces {
             if !piece.placed {
@@ -345,21 +345,32 @@ impl PieceOffApp {
         }
         self.snap_flashes
             .retain(|(_, started)| now - started < SNAP_FLASH_SECONDS);
-        if snapshot.completed() {
-            if self.timer_solved.is_none() {
-                self.timer_solved = self.timer_started.map(|started| started.elapsed());
-            }
-        } else if self.timer_solved.is_some() || self.timer_started.is_none() {
-            // A restart (or a reopened finished room) begins a fresh run.
-            self.timer_started = Some(Instant::now());
-            self.timer_solved = None;
+        if !snapshot.stats.finished {
+            // A restart begins a fresh run.
+            self.solve_recorded = false;
+        } else if !self.solve_recorded {
+            self.solve_recorded = true;
+            self.record_library_solve(snapshot.stats.elapsed_ms);
         }
     }
 
-    /// Time spent on the current run in this session, frozen once solved.
-    pub(crate) fn solve_time(&self) -> Option<Duration> {
-        self.timer_solved
-            .or_else(|| self.timer_started.map(|started| started.elapsed()))
+    /// A library puzzle finished while we watched: keep its best time.
+    fn record_library_solve(&mut self, solve_ms: u64) {
+        let Some(id) = self.library_entry_id.clone() else {
+            return;
+        };
+        if let Err(error) = self.library.record_solve(&id, solve_ms) {
+            self.status = format!("Could not record the solve time: {error}");
+        }
+    }
+
+    /// The room's solve time as of now, from the shared clock; `None` before
+    /// anyone has picked up a piece.
+    pub(crate) fn solve_time(snapshot: &RoomSnapshot) -> Option<Duration> {
+        let stats = &snapshot.stats;
+        stats
+            .started
+            .then(|| Duration::from_millis(stats.elapsed_at(wall_clock_ms())))
     }
 
     fn render_room(
@@ -939,10 +950,19 @@ impl PieceOffApp {
             placed
         };
         let completed = snapshot.completed();
-        let solve_time = self.solve_time();
-        paint_progress(&painter, canvas, joined, total, solve_time);
-        if !completed && solve_time.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        let solve_time = Self::solve_time(snapshot);
+        let shown_time = if self.settings.hide_solve_timer {
+            None
+        } else {
+            solve_time
+        };
+        paint_progress(&painter, canvas, joined, total, shown_time);
+        if shown_time.is_some() && snapshot.stats.running() {
+            // Tick on the next whole second; no clock messages are needed.
+            let into_second = shown_time.unwrap_or_default().subsec_millis();
+            ui.ctx().request_repaint_after(Duration::from_millis(
+                u64::from(1_000 - into_second).max(50),
+            ));
         }
         if self.still_assist_texture.is_some() {
             paint_pill(
@@ -959,9 +979,13 @@ impl PieceOffApp {
         if completed && self.win_dismissed_room.as_deref() != Some(snapshot.id.as_str()) {
             let time = ui.input(|input| input.time) as f32;
             paint_confetti(&painter, canvas, time);
-            let card = Rect::from_center_size(
-                canvas.center_top() + Vec2::new(0.0, 90.0),
-                Vec2::new(380.0, 130.0),
+            let lines = completion_lines(snapshot, solve_time);
+            let card = Rect::from_min_size(
+                canvas.center_top() + Vec2::new(-190.0, 25.0),
+                Vec2::new(
+                    380.0,
+                    130.0 + COMPLETION_ROW_HEIGHT * lines.players.len() as f32,
+                ),
             );
             painter.rect_filled(card, 14.0, Color32::from_black_alpha(215));
             painter.rect_stroke(
@@ -977,19 +1001,33 @@ impl PieceOffApp {
                 egui::FontId::proportional(34.0),
                 Color32::from_rgb(120, 230, 150),
             );
-            let summary = match self.timer_solved {
-                Some(elapsed) => {
-                    format!("All {total} pieces joined in {}", format_elapsed(elapsed))
-                }
-                None => format!("All {total} pieces joined"),
-            };
             painter.text(
                 card.center_top() + Vec2::new(0.0, 68.0),
                 egui::Align2::CENTER_CENTER,
-                summary,
+                &lines.summary,
                 egui::FontId::proportional(15.0),
                 Color32::LIGHT_GRAY,
             );
+            for (index, (name, pieces, color)) in lines.players.iter().enumerate() {
+                let y = card.top() + 96.0 + COMPLETION_ROW_HEIGHT * index as f32;
+                let left = card.left() + 70.0;
+                let right = card.right() - 70.0;
+                painter.circle_filled(Pos2::new(left, y), 4.5, *color);
+                painter.text(
+                    Pos2::new(left + 12.0, y),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    egui::FontId::proportional(14.0),
+                    *color,
+                );
+                painter.text(
+                    Pos2::new(right, y),
+                    egui::Align2::RIGHT_CENTER,
+                    pieces,
+                    egui::FontId::proportional(14.0),
+                    Color32::LIGHT_GRAY,
+                );
+            }
             let is_host = self.client_id.as_deref() == Some(snapshot.host_id.as_str());
             let row_y = card.center_bottom().y - 24.0;
             let (watch_x, again_x) = if is_host {
@@ -1012,6 +1050,67 @@ impl PieceOffApp {
         }
         action
     }
+}
+
+/// Height of one player row on the completion card.
+const COMPLETION_ROW_HEIGHT: f32 = 22.0;
+
+/// Most players listed by name on the completion card.
+const COMPLETION_MAX_ROWS: usize = 8;
+
+/// What the completion card says: the total, then who placed what.
+pub(crate) struct CompletionLines {
+    pub(crate) summary: String,
+    /// Name, piece count text and colour, most pieces first.
+    pub(crate) players: Vec<(String, String, Color32)>,
+}
+
+pub(crate) fn completion_lines(
+    snapshot: &RoomSnapshot,
+    solve_time: Option<Duration>,
+) -> CompletionLines {
+    let total = snapshot.pieces.len();
+    let summary = match solve_time {
+        Some(elapsed) => format!("All {total} pieces joined in {}", format_elapsed(elapsed)),
+        None => format!("All {total} pieces joined"),
+    };
+    let ranking = snapshot.stats.ranking();
+    let count = |pieces: u32| {
+        if pieces == 1 {
+            "1 piece".to_owned()
+        } else {
+            format!("{pieces} pieces")
+        }
+    };
+    let mut players: Vec<_> = ranking
+        .iter()
+        .take(COMPLETION_MAX_ROWS)
+        .map(|player| {
+            (
+                player.name.clone(),
+                count(player.pieces),
+                player_color(&player.name),
+            )
+        })
+        .collect();
+    if ranking.len() > COMPLETION_MAX_ROWS {
+        let rest = &ranking[COMPLETION_MAX_ROWS..];
+        players.push((
+            format!("{} more", rest.len()),
+            count(rest.iter().map(|player| player.pieces).sum()),
+            Color32::GRAY,
+        ));
+    }
+    CompletionLines { summary, players }
+}
+
+/// The local wall clock in milliseconds since the Unix epoch, the scale the
+/// server stamps the solve clock with.
+pub(crate) fn wall_clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// A flat, untextured copy of a piece mesh used as its drop shadow.

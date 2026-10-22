@@ -203,8 +203,9 @@ struct PieceOffApp {
     /// Pieces already seen in place, so newly placed ones can flash.
     placed_seen: std::collections::HashSet<u32>,
     snap_flashes: Vec<(u32, f64)>,
-    timer_started: Option<Instant>,
-    timer_solved: Option<Duration>,
+    /// The current run's finish has been seen (and, for a library puzzle,
+    /// recorded), so it is not counted twice.
+    solve_recorded: bool,
     /// The status text last shown as a toast, and when it appeared.
     toast: (String, f64),
     toast_dismissed: bool,
@@ -373,8 +374,7 @@ impl Default for PieceOffApp {
             help_open: false,
             placed_seen: std::collections::HashSet::new(),
             snap_flashes: Vec::new(),
-            timer_started: None,
-            timer_solved: None,
+            solve_recorded: false,
             toast: (String::new(), f64::NEG_INFINITY),
             toast_dismissed: false,
             messages: std::collections::VecDeque::new(),

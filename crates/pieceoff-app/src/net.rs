@@ -352,13 +352,20 @@ impl PieceOffApp {
                         self.peers.remove(index);
                     }
                 }
-                ServerMessage::PiecesChanged { pieces, revision } => {
+                ServerMessage::PiecesChanged {
+                    pieces,
+                    revision,
+                    stats,
+                } => {
                     let is_host = self.is_host();
                     let mut restarted = false;
                     if let Some(snapshot) = &mut self.snapshot {
                         if revision >= snapshot.revision {
                             let had_progress = snapshot.progress_percent() > 0;
                             snapshot.revision = revision;
+                            if let Some(stats) = stats {
+                                snapshot.stats = stats;
+                            }
                             let everything = pieces.len() == snapshot.pieces.len();
                             for piece in pieces {
                                 if let Some(existing) = snapshot.piece_mut(piece.id) {

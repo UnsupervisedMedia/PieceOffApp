@@ -254,6 +254,28 @@ fn solve_together(host: &mut Player, guest: &mut Player) {
         "both players to see the finished puzzle",
         |p| p[0].snapshot().completed() && p[1].snapshot().completed(),
     );
+    // Both see the same stopped clock and the pieces credited to whoever
+    // dropped them.
+    let total = host.snapshot().pieces.len() as u32;
+    for player in [&*host, &*guest] {
+        let stats = &player.snapshot().stats;
+        assert!(
+            stats.finished && !stats.running(),
+            "{}: {stats:?}",
+            player.name
+        );
+        assert_eq!(stats.players.iter().map(|p| p.pieces).sum::<u32>(), total);
+        for name in [&host.name, &guest.name] {
+            assert!(
+                stats
+                    .players
+                    .iter()
+                    .any(|p| &p.name == name && p.pieces > 0),
+                "{name} is credited: {stats:?}"
+            );
+        }
+    }
+    assert_eq!(host.snapshot().stats, guest.snapshot().stats);
 }
 
 #[test]
@@ -367,6 +389,11 @@ fn two_players_solve_a_looping_video_leave_rejoin_and_survive_a_server_restart()
     for player in [&host, &guest] {
         let snapshot = player.snapshot();
         assert!(snapshot.completed(), "{} lost progress", player.name);
+        assert!(
+            snapshot.stats.finished,
+            "{} lost the solve stats",
+            player.name
+        );
         assert_eq!(
             (
                 snapshot.playback.loop_start_ms,

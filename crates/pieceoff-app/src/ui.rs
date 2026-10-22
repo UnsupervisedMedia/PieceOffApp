@@ -469,6 +469,15 @@ impl PieceOffApp {
                 self.settings.hide_peer_cursors = !cursors;
                 self.persist_settings();
             }
+            let mut timer = !self.settings.hide_solve_timer;
+            if ui
+                .checkbox(&mut timer, "Show solve timer")
+                .on_hover_text("Show the room's shared solve clock beside the progress")
+                .changed()
+            {
+                self.settings.hide_solve_timer = !timer;
+                self.persist_settings();
+            }
             if !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, "Reference image");
             }

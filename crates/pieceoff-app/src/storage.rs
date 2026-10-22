@@ -50,6 +50,8 @@ pub(crate) struct Settings {
     pub(crate) lock_view: bool,
     /// Hide the other players' live cursors. Off by default, so they show.
     pub(crate) hide_peer_cursors: bool,
+    /// Hide the solve clock in the progress readout. Off by default.
+    pub(crate) hide_solve_timer: bool,
     /// Last name and server used to enter a room.
     pub(crate) player_name: Option<String>,
     pub(crate) server_url: Option<String>,
