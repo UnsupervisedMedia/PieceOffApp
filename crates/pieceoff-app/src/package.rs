@@ -152,6 +152,24 @@ pub(crate) fn upload_room_media(
             format_bytes(MAX_ROOM_MEDIA_BYTES)
         ));
     }
+    // Ask first whether the server already holds this asset: it answers
+    // without reading a body, so streaming one regardless ends in a broken
+    // pipe. Older servers treat the empty probe as a failed upload; carry on.
+    let probe = http_media_url(ws_url, &format!("/media/{sha256}?token={token}&probe=1"))?;
+    let held = media_upload_client(TransferTimeouts::DEFAULT)
+        .ok()
+        .and_then(|client| {
+            client
+                .put(probe)
+                .header(reqwest::header::CONTENT_LENGTH, 0)
+                .body(Vec::new())
+                .send()
+                .ok()
+        })
+        .is_some_and(|response| response.status() == reqwest::StatusCode::CREATED);
+    if held {
+        return Ok(());
+    }
     let url = http_media_url(ws_url, &format!("/media/{sha256}?token={token}"))?;
     UPLOAD_PROGRESS.begin(0, length);
     let result = media_upload_client(TransferTimeouts::DEFAULT).and_then(|client| {
