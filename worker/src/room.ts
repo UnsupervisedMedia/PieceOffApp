@@ -2,6 +2,16 @@ import { DurableObject } from "cloudflare:workers";
 import { Room, initSync } from "../wasm/pieceoff_room_wasm.js";
 import wasmModule from "../wasm/pieceoff_room_wasm_bg.wasm";
 import type { Env } from "./env";
+import {
+  type Failure,
+  type Limits,
+  type PartRecord,
+  type Upload,
+  checkPart,
+  missingParts,
+  planUpload,
+  recordPart,
+} from "./media-state.ts";
 import { alarmTarget, shouldSetAlarm } from "./schedule.ts";
 
 initSync({ module: wasmModule });
@@ -19,6 +29,21 @@ const MAX_ALARM_AHEAD_MS = 7 * 24 * 3_600_000;
 /** Tick catch-up after a quiet spell is bounded so a bad snapshot cannot loop. */
 const MAX_CATCH_UP_TICKS = 100;
 const ROOM_NOT_FOUND = "Room code not found";
+const MIB = 1024 * 1024;
+const DEFAULT_ROOM_QUOTA_BYTES = 1024 * MIB;
+const MAX_R2_PARTS = 10_000;
+/** Resume secrets kept for players who have left (their identity on return). */
+const MAX_KEPT_SECRETS = 64;
+
+/** What a media call returns over RPC: data on success, a status on failure. */
+export type MediaReply<T> = ({ ok: true } & T) | (Failure & { missing?: number[] });
+
+export interface UploadInfo {
+  uploadId: string;
+  partCount: number;
+  partSize: number;
+  missing: number[];
+}
 
 interface Attachment {
   /** The player's public id. Replaced when the player presents a resume token. */
@@ -164,10 +189,237 @@ export class RoomDO extends DurableObject<Env> {
     this.secrets = { [await sha256Hex(resumeToken)]: clientId };
     this.uploadToken = crypto.randomUUID();
     this.writeKv("pending", clientId);
+    this.writeKv("room_id", roomId);
     this.writeKv("upload_token", this.uploadToken);
     this.writeSecrets();
     this.flush();
     return { ok: true, resumeToken };
+  }
+
+  // ---- Media (resumable multipart uploads into R2) -------------------------
+  // The Worker streams part bytes; this object owns who may upload, quota,
+  // part bookkeeping and the room's media list. The upload token and R2
+  // upload ids never leave the Worker/Durable Object pair.
+
+  private mediaLimits(): Limits {
+    const num = (value: string | undefined, fallback: number): number =>
+      Number(value) > 0 ? Number(value) : fallback;
+    const quotaBytes = num(this.env.ROOM_MEDIA_QUOTA_BYTES, DEFAULT_ROOM_QUOTA_BYTES);
+    return {
+      quotaBytes,
+      maxFileBytes: num(this.env.MAX_MEDIA_BYTES, quotaBytes),
+      minPartBytes: num(this.env.MEDIA_MIN_PART_BYTES, 5 * MIB),
+      maxPartBytes: num(this.env.MEDIA_MAX_PART_BYTES, 64 * MIB),
+      maxParts: MAX_R2_PARTS,
+    };
+  }
+
+  private ensureMediaTables(): void {
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS uploads (
+         id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, size INTEGER NOT NULL,
+         part_size INTEGER NOT NULL, part_count INTEGER NOT NULL,
+         r2_upload_id TEXT NOT NULL, parts TEXT NOT NULL)`,
+    );
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS media (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, key TEXT NOT NULL)",
+    );
+  }
+
+  private mediaKey(sha256: string): string {
+    return `room/${this.readKv("room_id") ?? "legacy"}/${sha256}`;
+  }
+
+  /** Constant-time check of a presented bearer secret against the upload token. */
+  private async isUploadToken(presented: string): Promise<boolean> {
+    if (this.uploadToken === null || presented.length === 0) return false;
+    const [a, b] = await Promise.all([sha256Hex(presented), sha256Hex(this.uploadToken)]);
+    return crypto.subtle.timingSafeEqual(new TextEncoder().encode(a), new TextEncoder().encode(b));
+  }
+
+  private loadUpload(id: string): (Upload & { r2UploadId: string }) | null {
+    const rows = this.ctx.storage.sql.exec("SELECT * FROM uploads WHERE id = ?", id).toArray();
+    return rows.length === 0 ? null : this.toUpload(rows[0]!);
+  }
+
+  private toUpload(row: Record<string, SqlStorageValue>): Upload & { r2UploadId: string } {
+    return {
+      id: row.id as string,
+      sha256: row.sha256 as string,
+      size: row.size as number,
+      partSize: row.part_size as number,
+      partCount: row.part_count as number,
+      r2UploadId: row.r2_upload_id as string,
+      parts: JSON.parse(row.parts as string) as Record<string, PartRecord>,
+    };
+  }
+
+  private uploadInfo(upload: Upload): UploadInfo {
+    return {
+      uploadId: upload.id,
+      partCount: upload.partCount,
+      partSize: upload.partSize,
+      missing: missingParts(upload),
+    };
+  }
+
+  private mediaUsage(): { completedBytes: number; reservedBytes: number } {
+    const sum = (table: string): number =>
+      Number(
+        this.ctx.storage.sql.exec(`SELECT COALESCE(SUM(size), 0) AS n FROM ${table}`).one().n,
+      );
+    return { completedBytes: sum("media"), reservedBytes: sum("uploads") };
+  }
+
+  private async authorizeUpload(token: string): Promise<Failure | null> {
+    if (!this.initialized) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
+    if (!(await this.isUploadToken(token))) return { ok: false, status: 403, error: "Not allowed" };
+    this.ensureMediaTables();
+    return null;
+  }
+
+  async startUpload(
+    token: string,
+    request: { sha256: string; size: number; partSize: number },
+  ): Promise<MediaReply<{ complete: boolean } & Partial<UploadInfo>>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const sha256 = String(request.sha256).toLowerCase();
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM media WHERE sha256 = ?", sha256).toArray().length) {
+      return { ok: true, complete: true };
+    }
+    const existing = this.ctx.storage.sql
+      .exec("SELECT * FROM uploads WHERE sha256 = ?", sha256)
+      .toArray();
+    if (existing.length > 0) {
+      const upload = this.toUpload(existing[0]!);
+      if (upload.size !== request.size || upload.partSize !== request.partSize) {
+        return { ok: false, status: 409, error: "An upload with different sizes is in progress" };
+      }
+      return { ok: true, complete: false, ...this.uploadInfo(upload) };
+    }
+    const plan = planUpload({ ...request, sha256 }, this.mediaLimits(), this.mediaUsage());
+    if (!plan.ok) return plan;
+    // Reserve before awaiting R2 so concurrent starts see this upload's bytes.
+    const uploadId = crypto.randomUUID();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO uploads (id, sha256, size, part_size, part_count, r2_upload_id, parts) VALUES (?, ?, ?, ?, ?, '', '{}')",
+      uploadId,
+      sha256,
+      request.size,
+      request.partSize,
+      plan.partCount,
+    );
+    try {
+      const multipart = await this.env.MEDIA.createMultipartUpload(this.mediaKey(sha256));
+      this.ctx.storage.sql.exec(
+        "UPDATE uploads SET r2_upload_id = ? WHERE id = ?",
+        multipart.uploadId,
+        uploadId,
+      );
+    } catch (error) {
+      this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+      console.error("createMultipartUpload failed", String(error));
+      return { ok: false, status: 502, error: "Media storage is unavailable" };
+    }
+    return { ok: true, complete: false, ...this.uploadInfo(this.loadUpload(uploadId)!) };
+  }
+
+  async uploadStatus(token: string, uploadId: string): Promise<MediaReply<UploadInfo>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const upload = this.loadUpload(uploadId);
+    if (upload === null) return { ok: false, status: 404, error: "No such upload" };
+    return { ok: true, ...this.uploadInfo(upload) };
+  }
+
+  /** Check a part before its bytes are streamed; returns where to send them. */
+  async preparePart(
+    token: string,
+    uploadId: string,
+    n: number,
+    size: number,
+  ): Promise<MediaReply<{ key: string; r2UploadId: string }>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const upload = this.loadUpload(uploadId);
+    if (upload === null || upload.r2UploadId === "") {
+      return { ok: false, status: 404, error: "No such upload" };
+    }
+    const checked = checkPart(upload, n, size);
+    if (!checked.ok) return checked;
+    return { ok: true, key: this.mediaKey(upload.sha256), r2UploadId: upload.r2UploadId };
+  }
+
+  async recordUploadedPart(
+    token: string,
+    uploadId: string,
+    n: number,
+    part: PartRecord,
+  ): Promise<MediaReply<{ missing: number[] }>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const upload = this.loadUpload(uploadId);
+    if (upload === null) return { ok: false, status: 404, error: "No such upload" };
+    const checked = checkPart(upload, n, part.size);
+    if (!checked.ok) return checked;
+    const next = recordPart(upload, n, part);
+    this.ctx.storage.sql.exec(
+      "UPDATE uploads SET parts = ? WHERE id = ?",
+      JSON.stringify(next.parts),
+      uploadId,
+    );
+    return { ok: true, missing: missingParts(next) };
+  }
+
+  async completeUpload(token: string, uploadId: string): Promise<MediaReply<object>> {
+    const denied = await this.authorizeUpload(token);
+    if (denied) return denied;
+    const upload = this.loadUpload(uploadId);
+    if (upload === null) return { ok: false, status: 404, error: "No such upload" };
+    const missing = missingParts(upload);
+    if (missing.length > 0) return { ok: false, status: 409, error: "Parts are missing", missing };
+    const key = this.mediaKey(upload.sha256);
+    try {
+      const parts = Object.entries(upload.parts)
+        .map(([n, part]) => ({ partNumber: Number(n), etag: part.etag }))
+        .sort((a, b) => a.partNumber - b.partNumber);
+      await this.env.MEDIA.resumeMultipartUpload(key, upload.r2UploadId).complete(parts);
+    } catch (error) {
+      console.error("completing the multipart upload failed", String(error));
+      return { ok: false, status: 502, error: "Media storage rejected the upload" };
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO media (sha256, size, key) VALUES (?, ?, ?) ON CONFLICT (sha256) DO NOTHING",
+      upload.sha256,
+      upload.size,
+      key,
+    );
+    this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+    const event = this.wasm(() => this.room.mark_item_available(upload.sha256));
+    if (!event.startsWith('{"err"')) {
+      this.broadcast(event);
+      this.markDirty();
+      await this.schedule();
+    }
+    return { ok: true };
+  }
+
+  /** A joined or pending player may read this room's finished media. */
+  async authorizeDownload(
+    resumeToken: string,
+    sha256: string,
+  ): Promise<MediaReply<{ key: string }>> {
+    if (!this.initialized) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
+    if (resumeToken.length === 0 || this.secrets[await sha256Hex(resumeToken)] === undefined) {
+      return { ok: false, status: 403, error: "Not allowed" };
+    }
+    this.ensureMediaTables();
+    const rows = this.ctx.storage.sql
+      .exec("SELECT key FROM media WHERE sha256 = ?", sha256.toLowerCase())
+      .toArray();
+    if (rows.length === 0) return { ok: false, status: 404, error: "No such media" };
+    return { ok: true, key: rows[0]!.key as string };
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -290,6 +542,7 @@ export class RoomDO extends DurableObject<Env> {
     if (resumeToken === null) {
       resumeToken = crypto.randomUUID();
       this.secrets[await sha256Hex(resumeToken)] = clientId;
+      this.pruneSecrets();
       minted = true;
     }
 
@@ -373,9 +626,8 @@ export class RoomDO extends DurableObject<Env> {
       upload_assignment: { client_id: string; sha256: string } | null;
     }>;
     delete this.roster[clientId];
-    for (const [hash, id] of Object.entries(this.secrets)) {
-      if (id === clientId) delete this.secrets[hash];
-    }
+    // The player's resume secret is kept so a refresh or a reconnect after a
+    // deploy gets the same identity back; pruneSecrets bounds how many stay.
     if ("err" in left) return;
     if (wasListed) {
       this.broadcast(JSON.stringify({ type: "peer_left", name: left.ok.name }), except);
@@ -395,6 +647,23 @@ export class RoomDO extends DurableObject<Env> {
         }),
         except,
       );
+    }
+  }
+
+  /**
+   * Resume secrets of players who are gone are kept for reconnects, but only
+   * the newest few; anyone present (or the unclaimed creator) always keeps theirs.
+   */
+  private pruneSecrets(): void {
+    const keep = new Set([...Object.keys(this.roster), ...(this.pending ? [this.pending] : [])]);
+    const entries = Object.entries(this.secrets);
+    let surplus = entries.length - MAX_KEPT_SECRETS;
+    for (const [hash, id] of entries) {
+      if (surplus <= 0) break;
+      if (!keep.has(id)) {
+        delete this.secrets[hash];
+        surplus--;
+      }
     }
   }
 
