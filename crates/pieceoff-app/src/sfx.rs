@@ -315,6 +315,18 @@ struct Mixer {
     gain_bits: Arc<AtomicU32>,
 }
 
+/// Pass anything up to one effect's peak (0.5) untouched and bend louder
+/// sums from overlapping voices smoothly towards 1.0 instead of clipping.
+fn soft_limit(value: f32) -> f32 {
+    const KNEE: f32 = 0.5;
+    let size = value.abs();
+    if size <= KNEE {
+        value
+    } else {
+        value.signum() * (KNEE + (1.0 - KNEE) * ((size - KNEE) / (1.0 - KNEE)).tanh())
+    }
+}
+
 /// Sum the playing voices into the device buffer, the same signal on every
 /// channel. Never blocks the audio thread: a contended mixer plays silence.
 fn mix<T>(data: &mut [T], channels: usize, mixer: &Mixer)
@@ -333,7 +345,7 @@ where
                 }
             }
         }
-        let value = (value * gain).clamp(-1.0, 1.0);
+        let value = soft_limit(value * gain);
         for sample in frame {
             *sample = T::from_sample(value);
         }
@@ -413,6 +425,16 @@ fn run_effects_player(effects: mpsc::Receiver<Effect>, gain_bits: Arc<AtomicU32>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_voices_bend_instead_of_clipping() {
+        assert_eq!(soft_limit(0.3), 0.3);
+        assert_eq!(soft_limit(-0.5), -0.5);
+        let loud = soft_limit(4.0);
+        assert!(loud > 0.95 && loud < 1.0, "{loud}");
+        assert!(soft_limit(0.8) < soft_limit(1.2));
+        assert_eq!(soft_limit(-4.0), -loud);
+    }
+
     use super::*;
 
     #[test]
