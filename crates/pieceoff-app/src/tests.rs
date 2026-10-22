@@ -1183,10 +1183,23 @@ fn room_media_http_transfer_uploads_and_downloads_verified_bytes() {
     let server_content = content.clone();
     let server_hash = hash.clone();
     let server = thread::spawn(move || {
+        // The client first asks whether the server already holds the media.
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
         let (request, length) = read_test_request(&mut reader);
         assert!(request.starts_with("PUT /media/"));
+        assert!(request.contains("probe=1"));
+        assert_eq!(length, 0);
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .unwrap();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let (request, length) = read_test_request(&mut reader);
+        assert!(request.starts_with("PUT /media/"));
+        assert!(!request.contains("probe=1"));
         assert!(request.contains(&server_hash));
         assert!(request.contains("token=upload-token"));
         let mut body = vec![0; length];

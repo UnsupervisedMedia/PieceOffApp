@@ -402,6 +402,12 @@ fn application(state: AppState) -> Router {
 struct MediaQuery {
     code: Option<String>,
     token: Option<String>,
+    /// An upload with `probe=1` only asks whether the server already holds
+    /// the asset: 201 if so (and the item is marked available), 204 if the
+    /// client should send it. Clients probe first so they never stream a
+    /// body the server will not read.
+    #[serde(default)]
+    probe: Option<u8>,
 }
 
 const ROOM_NOT_FOUND: &str = "Room code not found";
@@ -593,6 +599,9 @@ async fn upload_media(
     {
         mark_item_available(&state, &room, &sha256).await;
         return StatusCode::CREATED.into_response();
+    }
+    if query.probe.is_some() {
+        return StatusCode::NO_CONTENT.into_response();
     }
     // Promise this upload its space up front, so that several large uploads
     // at once cannot together pass the quota, and none of them has to wait
@@ -1920,6 +1929,25 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "a probe for missing media asks for the upload"
+        );
+        assert!(!media_path(&data_dir, &hash, "png").exists());
+
+        let response = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(content.to_vec()),
         )
@@ -1929,6 +1957,22 @@ mod tests {
             fs::read(media_path(&data_dir, &hash, "png")).unwrap(),
             content
         );
+        let probe = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            probe.status(),
+            StatusCode::CREATED,
+            "held media needs no upload"
+        );
         assert!(connect_room(&state, "guest", guest).await.is_ok());
 
         let response = download_media(
@@ -1937,6 +1981,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("ABC123".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -1953,6 +1998,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("WRONG1".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -1990,6 +2036,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("wrong-token".into()),
+                probe: None,
             }),
             Body::from(b"expected".to_vec()),
         )
@@ -2002,6 +2049,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(b"different content".to_vec()),
         )
@@ -2048,6 +2096,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("first-token".into()),
+                probe: None,
             }),
             Body::from(first_content.to_vec()),
         );
@@ -2057,6 +2106,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("second-token".into()),
+                probe: None,
             }),
             Body::from(second_content.to_vec()),
         );
@@ -2451,6 +2501,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("slow-token".into()),
+                probe: None,
             }),
             slow_body,
         ));
@@ -2464,6 +2515,7 @@ mod tests {
                 Query(MediaQuery {
                     code: None,
                     token: Some("quick-token".into()),
+                    probe: None,
                 }),
                 Body::from(quick_content.to_vec()),
             ),
@@ -2510,6 +2562,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("cap-token".into()),
+                probe: None,
             }),
             Body::from(content),
         )
@@ -2564,6 +2617,7 @@ mod tests {
                     Query(MediaQuery {
                         code: Some("RANGE1".into()),
                         token: None,
+                        probe: None,
                     }),
                     headers,
                 )
