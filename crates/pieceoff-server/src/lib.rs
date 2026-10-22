@@ -1210,6 +1210,8 @@ async fn connect_room(
                 runtime.host_id = Some(client_id.to_owned());
                 runtime.names.insert(client_id.to_owned(), name.clone());
                 runtime.snapshot = Some(snapshot);
+                // An imported puzzle's clock carries on with its host here.
+                runtime.sync_clock_to_players(now_ms());
             }
             {
                 let mut rooms = state.rooms.write().await;
@@ -1256,6 +1258,7 @@ async fn connect_room(
                 runtime
                     .names
                     .insert(client_id.to_owned(), clean_name(&name));
+                runtime.sync_clock_to_players(now_ms());
                 let host_present = runtime
                     .snapshot
                     .as_ref()
@@ -1326,7 +1329,14 @@ async fn dispatch(
 async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
     let _guard = room.persist_lock.lock().await;
     room.touch().await;
-    let Some(snapshot) = room.runtime.lock().await.snapshot.clone() else {
+    let Some(snapshot) = room
+        .runtime
+        .lock()
+        .await
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.for_storage(now_ms()))
+    else {
         return;
     };
     let dir = (*state.data_dir).clone();
@@ -1543,6 +1553,8 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
         .names
         .remove(client_id)
         .unwrap_or_else(|| fallback_name.to_owned());
+    // The last player out pauses the solve clock.
+    runtime.sync_clock_to_players(now_ms());
     let next_host = runtime.names.keys().next().cloned();
     let mut changed_snapshot = None;
     let mut upload_assignment = None;
@@ -1982,7 +1994,9 @@ mod tests {
         .unwrap();
         assert!(persist, "the new arrangement must be saved");
         match events.recv().await.unwrap() {
-            ServerMessage::PiecesChanged { pieces, revision } => {
+            ServerMessage::PiecesChanged {
+                pieces, revision, ..
+            } => {
                 assert_eq!(pieces.len(), 12);
                 assert!(revision > 0);
             }
@@ -4167,6 +4181,89 @@ mod hardening_tests {
         assert_eq!(snapshot.title, "Saved at exit");
         assert_eq!(snapshot.pieces[0].x, moved_x);
         drop(rooms);
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn the_solve_clock_pauses_in_an_empty_room_and_survives_a_restart() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                name: "Host".into(),
+                title: "Timed".into(),
+                media_sha256: "c".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let stats = |runtime: &RoomRuntime| runtime.snapshot.as_ref().unwrap().stats.clone();
+        assert!(!stats(&*room.runtime.lock().await).started);
+
+        dispatch(&room, "host", ClientMessage::DragStart { piece_id: 0 })
+            .await
+            .unwrap();
+        dispatch(
+            &room,
+            "host",
+            ClientMessage::DragEnd {
+                piece_id: 0,
+                x: 0.0,
+                y: 0.0,
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let mut runtime = room.runtime.lock().await;
+            let stats = &mut runtime.snapshot.as_mut().unwrap().stats;
+            assert!(stats.running());
+            // Pretend the host has been solving for five seconds.
+            stats.running_since_ms = Some(now_ms() - 5_000);
+        }
+
+        // The last player leaving pauses the clock with the time banked.
+        remove_peer(&room, "host", "Host").await;
+        let paused = stats(&*room.runtime.lock().await);
+        assert!(!paused.running());
+        assert!((5_000..6_000).contains(&paused.elapsed_ms), "{paused:?}");
+        assert_eq!(paused.players.len(), 1);
+        assert_eq!(paused.players[0].name, "Host");
+        assert_eq!(paused.players[0].pieces, 1);
+
+        // A server restart keeps the stats, still paused.
+        persist_all(&state).await;
+        let restored = AppState::from_config(&config);
+        load_rooms(&restored).await;
+        let reloaded = restored.rooms.read().await.get(&code).unwrap().clone();
+        let loaded = stats(&*reloaded.runtime.lock().await);
+        assert_eq!(loaded, paused);
+
+        // The next player in starts it again from where it stopped.
+        connect_room(
+            &restored,
+            "guest",
+            ClientMessage::JoinRoom {
+                invite_code: code.clone(),
+                name: "Guest".into(),
+                media_sha256: "c".repeat(64),
+                media_extension: "png".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let resumed = stats(&*reloaded.runtime.lock().await);
+        assert!(resumed.running());
+        assert_eq!(resumed.elapsed_ms, paused.elapsed_ms);
         let _ = fs::remove_dir_all(&config.data_dir);
     }
 

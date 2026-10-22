@@ -52,22 +52,33 @@ impl RoomRuntime {
         message: ClientMessage,
         now_ms: u64,
     ) -> Result<ApplyOutcome, String> {
-        let (event, persist) = match message {
+        let stats_before = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.stats.clone());
+        let settled_before = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.settled_pieces());
+        let (mut event, persist) = match message {
             ClientMessage::DragStart { piece_id } => {
                 let (pieces, revision) = self.acquire(client_id, piece_id)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, false)
+                self.note_pickup(now_ms);
+                (pieces_changed(pieces, revision), false)
             }
             ClientMessage::DragStartSelection { piece_ids } => {
                 let (pieces, revision) = self.acquire_selection(client_id, &piece_ids)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, false)
+                self.note_pickup(now_ms);
+                (pieces_changed(pieces, revision), false)
             }
             ClientMessage::MovePiece { piece_id, x, y } => {
                 let (pieces, revision) = self.move_piece(client_id, piece_id, x, y, false)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, false)
+                (pieces_changed(pieces, revision), false)
             }
             ClientMessage::DragEnd { piece_id, x, y } => {
                 let (pieces, revision) = self.move_piece(client_id, piece_id, x, y, true)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, true)
+                self.note_drop(client_id, settled_before, now_ms);
+                (pieces_changed(pieces, revision), true)
             }
             ClientMessage::MoveSelection {
                 anchor_piece_id,
@@ -76,7 +87,7 @@ impl RoomRuntime {
             } => {
                 let (pieces, revision) =
                     self.move_selection(client_id, anchor_piece_id, x, y, false)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, false)
+                (pieces_changed(pieces, revision), false)
             }
             ClientMessage::DragEndSelection {
                 anchor_piece_id,
@@ -85,7 +96,8 @@ impl RoomRuntime {
             } => {
                 let (pieces, revision) =
                     self.move_selection(client_id, anchor_piece_id, x, y, true)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, true)
+                self.note_drop(client_id, settled_before, now_ms);
+                (pieces_changed(pieces, revision), true)
             }
             ClientMessage::SetPlayback {
                 playing,
@@ -107,11 +119,11 @@ impl RoomRuntime {
             }
             ClientMessage::RestartPuzzle => {
                 let (pieces, revision) = self.restart(client_id, now_ms as u32)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, true)
+                (pieces_changed(pieces, revision), true)
             }
             ClientMessage::RearrangeTray { arrangement } => {
                 let (pieces, revision) = self.rearrange_tray(arrangement, now_ms as u32)?;
-                (ServerMessage::PiecesChanged { pieces, revision }, true)
+                (pieces_changed(pieces, revision), true)
             }
             ClientMessage::QueueAdd {
                 sha256,
@@ -175,7 +187,23 @@ impl RoomRuntime {
                 return Err("Cursors, chat and pings are relayed, not applied".into());
             }
         };
+        // Piece changes carry the stats whenever they moved, so clients never
+        // need a per-second clock message.
+        if let ServerMessage::PiecesChanged { stats, .. } = &mut event {
+            let now = self.snapshot.as_ref().map(|snapshot| &snapshot.stats);
+            if now != stats_before.as_ref() {
+                *stats = now.cloned();
+            }
+        }
         Ok(ApplyOutcome { event, persist })
+    }
+}
+
+fn pieces_changed(pieces: Vec<crate::Piece>, revision: u64) -> ServerMessage {
+    ServerMessage::PiecesChanged {
+        pieces,
+        revision,
+        stats: None,
     }
 }
 

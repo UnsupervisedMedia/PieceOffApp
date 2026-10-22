@@ -8,8 +8,10 @@ mod apply;
 pub use apply::ApplyOutcome;
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title};
+mod stats;
+pub use stats::{MAX_SOLVE_PLAYERS, PlayerSolveStats, SolveStats};
 
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -153,6 +155,10 @@ pub struct RoomSnapshot {
     pub repeat: RepeatMode,
     #[serde(default)]
     pub video_lock: bool,
+    /// The solve clock and per-player credits (protocol v11). Older
+    /// snapshots load with a clock at zero that starts on the next pickup.
+    #[serde(default)]
+    pub stats: SolveStats,
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -326,15 +332,7 @@ impl RoomSnapshot {
         if self.completed() {
             return 100;
         }
-        let mut group_sizes: HashMap<u32, usize> = HashMap::new();
-        for piece in &self.pieces {
-            *group_sizes.entry(piece.group_id).or_default() += 1;
-        }
-        let settled = self
-            .pieces
-            .iter()
-            .filter(|piece| piece.placed || group_sizes[&piece.group_id] > 1)
-            .count();
+        let settled = self.settled_pieces();
         // Never report 100 until `completed()` says so.
         ((settled * 100) / self.pieces.len()).min(99) as u8
     }
@@ -385,6 +383,9 @@ impl RoomSnapshot {
             self.shape_seed = self.effective_shape_seed();
         }
         self.current = self.current.min(self.queue.len().saturating_sub(1));
+        // A loaded room has nobody in it yet; its host resumes the clock when
+        // a player is present.
+        self.stats.running_since_ms = None;
         self.protocol_version = PROTOCOL_VERSION;
         self.sync_current_mirror();
     }
@@ -461,6 +462,7 @@ impl RoomSnapshot {
             current: 0,
             repeat: RepeatMode::One,
             video_lock: false,
+            stats: SolveStats::default(),
         })
     }
 
@@ -532,6 +534,7 @@ impl RoomSnapshot {
         if self.playback.loop_end_ms < self.playback.loop_start_ms {
             return Err("Puzzle snapshot has an invalid playback loop".into());
         }
+        self.stats.sanitize();
         self.id = id;
         self.invite_code = invite_code;
         self.host_id = host_id;
@@ -938,6 +941,10 @@ pub enum ServerMessage {
     PiecesChanged {
         pieces: Vec<Piece>,
         revision: u64,
+        /// The room's solve stats, sent only when this change altered them:
+        /// the clock started or finished, someone scored, or a restart.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stats: Option<SolveStats>,
     },
     PlaybackChanged {
         playback: PlaybackState,
@@ -1194,6 +1201,7 @@ impl RoomRuntime {
             snapshot.columns,
             salt | 1,
         );
+        snapshot.stats = SolveStats::default();
         snapshot.revision += 1;
         self.drag_groups.clear();
         Ok((snapshot.pieces.clone(), snapshot.revision))
