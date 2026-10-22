@@ -82,6 +82,17 @@ HTTPS for media transfer automatically.
     other one), and finishing should chime once. Arrange the tray, restart,
     and rejoin: all silent. More → **Effects** changes their volume without
     touching the clip's volume, and works in a still-image room.
+18. Press **H** over open table on one client: a tinted holder in that
+    player's colour appears on both, labelled with its owner. Drop a few
+    pieces in it. On the other client those pieces show a lock and
+    "In <name>'s holder" on hover and cannot be picked up or marquee
+    selected; Arrange leaves them alone. The owner drags the tab to move the
+    holder (its pieces follow) and the corner to resize it; a spot on the
+    board, the tray, or another holder shows red and is refused. Rename and
+    remove it under **Holders**; removing leaves the pieces where they are.
+    The owner leaves: the holder says "(away)" and still holds its pieces;
+    rejoining under the same name reclaims it. The host's **Clear** removes
+    anyone's, and Play again clears all of them.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the

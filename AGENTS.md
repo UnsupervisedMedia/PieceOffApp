@@ -22,10 +22,11 @@ parser.
   native build requirements, and packaging needs.
 
 The current prototype uses an eframe/egui desktop client, an axum WebSocket
-room server (protocol v11), FFmpeg for video and audio decoding, cpal for audio
+room server (protocol v12), FFmpeg for video and audio decoding, cpal for audio
 output, native animated WebP decoding, deterministic jigsaw contours, linked
-piece groups, resumable invite-gated media transfer, `.pieceoff` packages, a
-local puzzle library, rebindable controls, and durable room snapshots. Release
+piece groups, per-player piece holders, resumable invite-gated media transfer,
+`.pieceoff` packages, a local puzzle library, rebindable controls, and durable
+room snapshots. Release
 bundles exclude FFmpeg by default; see `docs/FFMPEG.md` before changing that.
 
 ## Build and verification
