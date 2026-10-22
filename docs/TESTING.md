@@ -69,6 +69,14 @@ HTTPS for media transfer automatically.
     the table and press P: both clients should see a ring with the name for
     about 3 s. Join a third client: it should get the earlier chat. Leave and
     rejoin: your cursor, chat, and ping colour should not change.
+16. Before anyone picks up a piece the progress readout shows no time. Pick one
+    up: both clients' clocks start and agree to the second. Have everyone
+    leave for a minute and come back: the clock resumes where it stopped.
+    Finish the puzzle: both clocks stop at the same time and the card lists
+    each player's pieces, most first, in their colours. **Play again** clears
+    it. Untick More → **Show solve timer** to hide the readout clock. Finish
+    a puzzle resumed from the library and its card on the shelf shows the
+    best time.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the
