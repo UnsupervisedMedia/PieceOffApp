@@ -16,8 +16,8 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, ServerMessage, clean_media_extension,
-    clean_name, clean_title, valid_media_dimensions,
+    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, ServerMessage,
+    clean_media_extension, clean_name, clean_title, valid_media_dimensions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -408,9 +408,39 @@ fn application(state: AppState) -> Router {
 }
 
 #[derive(Deserialize)]
+struct SocketQuery {
+    /// The protocol version the client speaks. Clients older than this check
+    /// send none and are let through as before.
+    protocol: Option<u16>,
+}
+
+/// Why a client speaking `client` cannot use this server, if it cannot.
+fn protocol_mismatch(client: Option<u16>) -> Option<String> {
+    let client = client?;
+    if client == PROTOCOL_VERSION {
+        return None;
+    }
+    let newer = if client < PROTOCOL_VERSION {
+        "server"
+    } else {
+        "app"
+    };
+    Some(format!(
+        "This PieceOff {newer} is newer (app protocol v{client}, server protocol \
+         v{PROTOCOL_VERSION}). Update so the app and the room server match."
+    ))
+}
+
+#[derive(Deserialize)]
 struct MediaQuery {
     code: Option<String>,
     token: Option<String>,
+    /// An upload with `probe=1` only asks whether the server already holds
+    /// the asset: 201 if so (and the item is marked available), 204 if the
+    /// client should send it. Clients probe first so they never stream a
+    /// body the server will not read.
+    #[serde(default)]
+    probe: Option<u8>,
 }
 
 const ROOM_NOT_FOUND: &str = "Room code not found";
@@ -603,6 +633,9 @@ async fn upload_media(
         mark_item_available(&state, &room, &sha256).await;
         return StatusCode::CREATED.into_response();
     }
+    if query.probe.is_some() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     // Promise this upload its space up front, so that several large uploads
     // at once cannot together pass the quota, and none of them has to wait
     // for the others to finish.
@@ -791,6 +824,7 @@ fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaI
 async fn websocket_handler(
     State(state): State<AppState>,
     upgrade: WebSocketUpgrade,
+    Query(query): Query<SocketQuery>,
     request: axum::extract::Request,
 ) -> Response {
     // Present when served with connect info (the real server); absent in
@@ -825,7 +859,16 @@ async fn websocket_handler(
     upgrade
         .max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| handle_socket(socket, state, address, slot))
+        .on_upgrade(move |mut socket| async move {
+            // Refuse a mismatched app up front, with a message every version
+            // can show, instead of messages it cannot parse.
+            if let Some(message) = protocol_mismatch(query.protocol) {
+                let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+            handle_socket(socket, state, address, slot).await
+        })
 }
 
 async fn handle_socket(
@@ -1437,6 +1480,16 @@ async fn send(socket: &mut WebSocket, packet: &ServerMessage) -> Result<(), axum
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mismatched_app_protocols_are_refused_with_a_reason() {
+        assert_eq!(protocol_mismatch(None), None);
+        assert_eq!(protocol_mismatch(Some(PROTOCOL_VERSION)), None);
+        let older_app = protocol_mismatch(Some(PROTOCOL_VERSION - 1)).unwrap();
+        assert!(older_app.contains("server is newer"), "{older_app}");
+        let newer_app = protocol_mismatch(Some(PROTOCOL_VERSION + 1)).unwrap();
+        assert!(newer_app.contains("app is newer"), "{newer_app}");
+    }
+
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1929,6 +1982,25 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "a probe for missing media asks for the upload"
+        );
+        assert!(!media_path(&data_dir, &hash, "png").exists());
+
+        let response = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(content.to_vec()),
         )
@@ -1938,6 +2010,22 @@ mod tests {
             fs::read(media_path(&data_dir, &hash, "png")).unwrap(),
             content
         );
+        let probe = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            probe.status(),
+            StatusCode::CREATED,
+            "held media needs no upload"
+        );
         assert!(connect_room(&state, "guest", guest).await.is_ok());
 
         let response = download_media(
@@ -1946,6 +2034,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("ABC123".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -1962,6 +2051,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("WRONG1".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -1999,6 +2089,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("wrong-token".into()),
+                probe: None,
             }),
             Body::from(b"expected".to_vec()),
         )
@@ -2011,6 +2102,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(b"different content".to_vec()),
         )
@@ -2057,6 +2149,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("first-token".into()),
+                probe: None,
             }),
             Body::from(first_content.to_vec()),
         );
@@ -2066,6 +2159,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("second-token".into()),
+                probe: None,
             }),
             Body::from(second_content.to_vec()),
         );
@@ -2145,6 +2239,40 @@ mod tests {
     type TestSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
     /// Start a server on a free port; returns its address and state.
+    #[tokio::test]
+    async fn an_app_on_another_protocol_is_told_to_update() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-proto-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut old_app, _) = connect_async(format!(
+            "ws://{address}/ws?protocol={}",
+            PROTOCOL_VERSION - 1
+        ))
+        .await
+        .unwrap();
+        let error = read_message(&mut old_app, "error").await;
+        assert!(
+            error["message"].as_str().unwrap().contains("Update"),
+            "{error}"
+        );
+        // The matching version gets through to the room handshake.
+        let (mut app, _) = connect_async(format!("ws://{address}/ws?protocol={PROTOCOL_VERSION}"))
+            .await
+            .unwrap();
+        app.send(Message::Text(
+            serde_json::json!({
+                "type":"join_room", "invite_code":"NOPE00", "name":"A",
+                "media_sha256":"", "media_extension":""
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = read_message(&mut app, "error").await;
+        assert_eq!(reply["message"], ROOM_NOT_FOUND);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     async fn queue_test_server(data_dir: &std::path::Path) -> (std::net::SocketAddr, AppState) {
         let state = AppState::new(data_dir.to_path_buf());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2460,6 +2588,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("slow-token".into()),
+                probe: None,
             }),
             slow_body,
         ));
@@ -2473,6 +2602,7 @@ mod tests {
                 Query(MediaQuery {
                     code: None,
                     token: Some("quick-token".into()),
+                    probe: None,
                 }),
                 Body::from(quick_content.to_vec()),
             ),
@@ -2519,6 +2649,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("cap-token".into()),
+                probe: None,
             }),
             Body::from(content),
         )
@@ -2573,6 +2704,7 @@ mod tests {
                     Query(MediaQuery {
                         code: Some("RANGE1".into()),
                         token: None,
+                        probe: None,
                     }),
                     headers,
                 )
