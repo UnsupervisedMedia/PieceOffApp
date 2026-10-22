@@ -2,6 +2,20 @@ import type { RoomDO } from "./room";
 
 export interface Env {
   ROOMS: DurableObjectNamespace<RoomDO>;
+  /** Rooms one address may create per minute. */
+  CREATE_LIMITER: RateLimit;
+  /** Lookups of room codes that do not exist, per address per minute. */
+  LOOKUP_LIMITER: RateLimit;
+  /** Turnstile secret key (`wrangler secret put TURNSTILE_SECRET`). */
+  TURNSTILE_SECRET?: string;
+  /** Override for tests; defaults to Cloudflare's siteverify endpoint. */
+  TURNSTILE_VERIFY_URL?: string;
+  /** "1" lets room creation skip Turnstile. Local development only. */
+  DEV_ALLOW_UNVERIFIED_CREATE?: string;
+  /** Extra browser origins (comma separated) allowed besides the site's own. */
+  ALLOWED_ORIGINS?: string;
+  /** A socket that has not joined within this long is closed (default 15000). */
+  PREJOIN_MS?: string;
   /** Room media, keyed room/<room id>/<sha256>. */
   MEDIA: R2Bucket;
   /** Longest a changed room waits before writing to storage (default 5000). */

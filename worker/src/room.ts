@@ -37,6 +37,9 @@ const DEFAULT_ROOM_QUOTA_BYTES = 1024 * MIB;
 const MAX_R2_PARTS = 10_000;
 /** Resume secrets kept for players who have left (their identity on return). */
 const MAX_KEPT_SECRETS = 64;
+/** Open sockets (joined or not) one address may hold on a room. */
+const MAX_SOCKETS_PER_IP = 8;
+const DEFAULT_PREJOIN_MS = 15_000;
 
 /** What a media call returns over RPC: data on success, a status on failure. */
 export type MediaReply<T> = ({ ok: true } & T) | (Failure & { missing?: number[] });
@@ -53,7 +56,10 @@ interface Attachment {
   clientId: string;
   name: string;
   joined: boolean;
+  /** When this socket connected, then when it joined; liveness counts from here. */
   joinedAt: number;
+  /** Connecting address, for the per-address socket cap. */
+  ip: string;
 }
 
 type Reply<T> = { ok: T } | { err: string };
@@ -106,6 +112,7 @@ export class RoomDO extends DurableObject<Env> {
   private emptySince: number | null = null;
   private readonly flushMs: number;
   private readonly idleSocketMs: number;
+  private readonly prejoinMs: number;
   private readonly idleCleanupMs: number;
   private readonly unclaimedMs: number;
 
@@ -114,6 +121,7 @@ export class RoomDO extends DurableObject<Env> {
     this.flushMs = Number(env.FLUSH_MS) > 0 ? Number(env.FLUSH_MS) : DEFAULT_FLUSH_MS;
     this.idleSocketMs =
       Number(env.IDLE_SOCKET_MS) > 0 ? Number(env.IDLE_SOCKET_MS) : DEFAULT_IDLE_SOCKET_MS;
+    this.prejoinMs = Number(env.PREJOIN_MS) > 0 ? Number(env.PREJOIN_MS) : DEFAULT_PREJOIN_MS;
     this.idleCleanupMs =
       Number(env.IDLE_CLEANUP_MS) > 0 ? Number(env.IDLE_CLEANUP_MS) : DEFAULT_IDLE_CLEANUP_MS;
     this.unclaimedMs =
@@ -442,6 +450,11 @@ export class RoomDO extends DurableObject<Env> {
     return { ok: true, key: rows[0]!.key as string };
   }
 
+  /** Whether this room exists. The Worker budgets lookups of rooms that do not. */
+  async exists(): Promise<boolean> {
+    return this.initialized;
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket", { status: 426 });
@@ -454,6 +467,10 @@ export class RoomDO extends DurableObject<Env> {
       server.close(1008, ROOM_NOT_FOUND);
       return new Response(null, { status: 101, webSocket: client });
     }
+    const ip = request.headers.get("cf-connecting-ip") ?? "local";
+    if (this.attachments().filter((a) => a.ip === ip).length >= MAX_SOCKETS_PER_IP) {
+      return new Response("Too many connections", { status: 429 });
+    }
     this.ctx.acceptWebSocket(server);
     // The real id is assigned on join; until then this one is never trusted.
     server.serializeAttachment({
@@ -461,7 +478,9 @@ export class RoomDO extends DurableObject<Env> {
       name: "",
       joined: false,
       joinedAt: Date.now(),
+      ip,
     } satisfies Attachment);
+    await this.schedule(); // arms the sweep that closes sockets that never join
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -583,7 +602,18 @@ export class RoomDO extends DurableObject<Env> {
   private async sweepSilentSockets(now: number): Promise<void> {
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as Attachment | null;
-      if (attachment === null || !attachment.joined) continue;
+      if (attachment === null) continue;
+      if (!attachment.joined) {
+        // A socket that connects and never joins is holding a slot for nothing.
+        if (now - attachment.joinedAt > this.prejoinMs) {
+          try {
+            socket.close(1008, "join timeout");
+          } catch {
+            // already closed
+          }
+        }
+        continue;
+      }
       const auto = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0;
       const last = Math.max(this.lastSeen.get(attachment.clientId) ?? 0, auto, attachment.joinedAt);
       if (now - last > this.idleSocketMs) {
@@ -849,8 +879,12 @@ export class RoomDO extends DurableObject<Env> {
       flushMs: this.flushMs,
       deadline: this.wasm(() => this.room.next_tick_deadline(now)),
       joinedSockets: this.joinedCount(),
+      openSockets: this.attachments().length,
       cleanupAt: this.cleanupAt(),
-      sweepMs: Math.min(MAX_SWEEP_MS, Math.max(250, Math.floor(this.idleSocketMs / 3))),
+      sweepMs: Math.min(
+        MAX_SWEEP_MS,
+        Math.max(250, Math.floor(Math.min(this.idleSocketMs, this.prejoinMs) / 3)),
+      ),
       minGapMs: MIN_ALARM_GAP_MS,
       maxAheadMs: MAX_ALARM_AHEAD_MS,
     });
