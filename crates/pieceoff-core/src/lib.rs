@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 mod apply;
+mod membership;
 pub use apply::ApplyOutcome;
+pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;
-pub use sanitize::{clean_media_extension, clean_name, clean_title};
+pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
 
 pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -1394,6 +1396,16 @@ impl RoomRuntime {
         if loop_end_ms > 0 && loop_start_ms >= loop_end_ms {
             return Err("Loop end must be after loop start".into());
         }
+        // A loop that starts at or after the end of the video would restart
+        // already finished, and a host would tick the room forever.
+        let end = if loop_end_ms > 0 {
+            loop_end_ms
+        } else {
+            snapshot.current_item().map_or(0, |item| item.duration_ms)
+        };
+        if end > 0 && loop_start_ms >= end {
+            return Err("Loop start must be before the end of the video".into());
+        }
         snapshot.playback = PlaybackState {
             playing,
             position_ms,
@@ -1600,6 +1612,38 @@ impl RoomRuntime {
         Ok(snapshot.clone())
     }
 
+    /// When `tick_advance` will next have something to do, in the same clock
+    /// as `now_ms`: `now_ms` if the item is already past its end, `None` if
+    /// nothing will advance by itself (paused, repeat-one, no known length).
+    /// Hosts arm a single timer for this instead of polling.
+    pub fn next_tick_deadline(&self, now_ms: u64) -> Option<u64> {
+        let snapshot = self.snapshot.as_ref()?;
+        if !snapshot.playback.playing
+            || snapshot.repeat == RepeatMode::One
+            || snapshot.queue.is_empty()
+        {
+            return None;
+        }
+        let end = if snapshot.playback.loop_end_ms > 0 {
+            snapshot.playback.loop_end_ms
+        } else {
+            snapshot.current_item()?.duration_ms
+        };
+        if end == 0 {
+            return None;
+        }
+        let position = snapshot.playback.position_at(now_ms);
+        if position >= end {
+            return Some(now_ms);
+        }
+        let rate = f64::from(snapshot.playback.rate);
+        if !rate.is_finite() || rate <= 0.0 {
+            return None;
+        }
+        let remaining = ((end - position) as f64 / rate).ceil();
+        Some(now_ms.saturating_add(remaining as u64))
+    }
+
     /// Advance the queue when the current item has played to its end.
     /// Called on a timer; returns the new snapshot when something changed.
     pub fn tick_advance(&mut self, now_ms: u64) -> Option<RoomSnapshot> {
@@ -1628,7 +1672,13 @@ impl RoomRuntime {
             let next = if last { 0 } else { snapshot.current + 1 };
             if next == finished {
                 // One video, repeat All: just play it again from its loop in.
-                snapshot.playback.position_ms = snapshot.playback.loop_start_ms;
+                // A stored loop-in at or past the end restarts from the top
+                // instead, so the room cannot finish again immediately.
+                snapshot.playback.position_ms = if snapshot.playback.loop_start_ms < end {
+                    snapshot.playback.loop_start_ms
+                } else {
+                    0
+                };
                 snapshot.playback.changed_at_ms = now_ms;
             } else {
                 Self::switch_item(snapshot, next, now_ms);

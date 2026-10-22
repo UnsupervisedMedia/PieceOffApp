@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
     ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, SceneBounds,
-    ServerMessage, clean_media_extension, clean_name, clean_title, valid_media_dimensions,
+    ServerMessage, clean_media_extension, valid_media_dimensions, valid_sha256,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -780,22 +780,14 @@ async fn media_storage_used_bytes(directory: &Path) -> std::io::Result<u64> {
 async fn mark_item_available(state: &AppState, room: &Arc<RoomRecord>, sha256: &str) {
     let changed = {
         let mut runtime = room.runtime.lock().await;
-        if let Some(snapshot) = runtime.snapshot.as_mut() {
-            for item in &mut snapshot.queue {
-                if item.sha256 == sha256 {
-                    item.available = true;
-                }
+        match runtime.mark_item_available(sha256) {
+            Some(snapshot) => {
+                // Sent under the lock, in revision order with every other event
+                // (see `dispatch`).
+                let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+                true
             }
-            snapshot.sync_current_mirror();
-            snapshot.revision = snapshot.revision.saturating_add(1);
-            // Sent under the lock, in revision order with every other event
-            // (see `dispatch`).
-            let _ = room.events.send(ServerMessage::Snapshot {
-                snapshot: snapshot.clone(),
-            });
-            true
-        } else {
-            false
+            None => false,
         }
     };
     if changed {
@@ -830,14 +822,6 @@ fn new_invite_code() -> String {
         .take(INVITE_CODE_LENGTH)
         .map(|byte| INVITE_ALPHABET[(byte % 32) as usize] as char)
         .collect()
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn has_unavailable_item(snapshot: &RoomSnapshot) -> bool {
-    snapshot.queue.iter().any(|item| !item.available)
 }
 
 fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaItem> {
@@ -999,44 +983,27 @@ async fn handle_socket(
     persist_room(&state, &room).await;
     let mut events = room.events.subscribe();
     let mut cursor_events = room.cursors.subscribe();
-    let peers = {
+    let welcome = {
         let runtime = room.runtime.lock().await;
-        runtime
-            .names
-            .iter()
-            .filter(|(id, _)| *id != &client_id)
-            .map(|(_, name)| name.clone())
-            .collect()
+        let token = room.media_upload_token.lock().await.clone();
+        runtime.welcome(&client_id, &name, token)
     };
-    let snapshot = room
+    // The table never changes size after the room is made.
+    let table = room
         .runtime
         .lock()
         .await
         .snapshot
-        .clone()
-        .expect("room snapshot exists");
-    // The table never changes size after the room is made.
-    let table = snapshot.scene_bounds();
+        .as_ref()
+        .expect("room snapshot exists")
+        .scene_bounds();
     let mut cursor_budget =
         TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, Instant::now());
-    let media_upload_token = if snapshot.host_id == client_id && has_unavailable_item(&snapshot) {
-        room.media_upload_token.lock().await.clone()
-    } else {
-        None
+    let sent = match welcome {
+        Ok(welcome) => send(&mut socket, &welcome).await.is_ok(),
+        Err(_) => false,
     };
-    if send(
-        &mut socket,
-        &ServerMessage::Welcome {
-            client_id: client_id.clone(),
-            name: name.clone(),
-            peers,
-            snapshot,
-            media_upload_token,
-        },
-    )
-    .await
-    .is_err()
-    {
+    if !sent {
         remove_peer(&room, &client_id, &name).await;
         persist_room(&state, &room).await;
         return;
@@ -1132,66 +1099,17 @@ async fn connect_room(
     first: ClientMessage,
 ) -> Result<(Arc<RoomRecord>, String, String, bool), String> {
     match first {
-        ClientMessage::CreateRoom {
-            name,
-            title,
-            media_sha256,
-            media_extension,
-            width,
-            height,
-            rows,
-            columns,
-            initial_snapshot,
-            duration_ms,
-        } => {
-            if !valid_sha256(&media_sha256) {
-                return Err("Invalid media fingerprint".into());
-            }
-            let name = clean_name(&name);
-            let room_id = Uuid::new_v4().to_string();
+        create @ ClientMessage::CreateRoom { .. } => {
             let invite_code = new_invite_code();
-            let clean_title = clean_title(&title);
-            let clean_extension = clean_media_extension(&media_extension)?;
-            let snapshot = if let Some(initial) = initial_snapshot {
-                let initial = *initial;
-                if initial.title != clean_title
-                    || initial.media_sha256 != media_sha256
-                    || initial.media_extension != clean_extension
-                    || initial.width != width
-                    || initial.height != height
-                    || initial.rows != rows
-                    || initial.columns != columns
-                {
-                    return Err("Imported puzzle snapshot does not match its media or grid".into());
-                }
-                initial.rehost(room_id, invite_code.clone(), client_id.to_owned())?
-            } else {
-                let mut snapshot = RoomSnapshot::create(
-                    room_id,
-                    invite_code.clone(),
-                    clean_title,
-                    media_sha256,
-                    clean_extension,
-                    width,
-                    height,
-                    rows,
-                    columns,
-                    client_id.to_owned(),
-                )?;
-                snapshot.revision = 1;
-                if let Some(first) = snapshot.queue.first_mut() {
-                    first.duration_ms = duration_ms;
-                }
-                snapshot
-            };
+            let (runtime, name) = RoomRuntime::new_room(
+                client_id,
+                create,
+                Uuid::new_v4().to_string(),
+                invite_code.clone(),
+            )?;
             let media_upload_token = Uuid::new_v4().to_string();
             let room = Arc::new(RoomRecord::new(Some(media_upload_token)));
-            {
-                let mut runtime = room.runtime.lock().await;
-                runtime.host_id = Some(client_id.to_owned());
-                runtime.names.insert(client_id.to_owned(), name.clone());
-                runtime.snapshot = Some(snapshot);
-            }
+            *room.runtime.lock().await = runtime;
             {
                 let mut rooms = state.rooms.write().await;
                 if rooms.len() >= state.max_rooms {
@@ -1222,37 +1140,15 @@ async fn connect_room(
                 .get(&invite_code)
                 .cloned()
                 .ok_or(ROOM_NOT_FOUND.to_string())?;
-            {
+            let name = {
                 let mut runtime = room.runtime.lock().await;
-                let snapshot = runtime
-                    .snapshot
-                    .as_ref()
-                    .ok_or("Room is not ready".to_string())?;
-                if media_sha256 != snapshot.media_sha256 && !snapshot.media_available {
-                    return Err("The room media is still uploading. Wait for the host and try joining again.".into());
+                let outcome = runtime.join(client_id, &name, &media_sha256)?;
+                if outcome.needs_upload_token {
+                    *room.media_upload_token.lock().await = Some(Uuid::new_v4().to_string());
                 }
-                if runtime.names.len() >= 8 {
-                    return Err("This room already has 8 players".into());
-                }
-                runtime
-                    .names
-                    .insert(client_id.to_owned(), clean_name(&name));
-                let host_present = runtime
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| runtime.names.contains_key(&snapshot.host_id));
-                if !host_present {
-                    if let Some(snapshot) = runtime.snapshot.as_mut() {
-                        snapshot.host_id = client_id.to_owned();
-                        snapshot.revision += 1;
-                        if has_unavailable_item(snapshot) {
-                            *room.media_upload_token.lock().await =
-                                Some(Uuid::new_v4().to_string());
-                        }
-                    }
-                }
-            }
-            Ok((room, invite_code, clean_name(&name), false))
+                outcome.name
+            };
+            Ok((room, invite_code, name, false))
         }
         _ => Err("First message must create or join a room".into()),
     }
@@ -1519,50 +1415,29 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     // Events go out under the room lock so they leave in revision order (see
     // `dispatch`).
     let mut runtime = room.runtime.lock().await;
-    runtime.forget_drag(client_id);
-    let name = runtime
-        .names
-        .remove(client_id)
-        .unwrap_or_else(|| fallback_name.to_owned());
-    let next_host = runtime.names.keys().next().cloned();
-    let mut changed_snapshot = None;
-    let mut upload_assignment = None;
-    if let Some(snapshot) = runtime.snapshot.as_mut() {
-        let mut changed = false;
-        for piece in &mut snapshot.pieces {
-            if piece.held_by.as_deref() == Some(client_id) {
-                piece.held_by = None;
-                changed = true;
-            }
+    let outcome = runtime.leave(client_id, fallback_name);
+    let upload_token = match &outcome.upload_assignment {
+        Some(_) => {
+            let token = Uuid::new_v4().to_string();
+            *room.media_upload_token.lock().await = Some(token.clone());
+            Some(token)
         }
-        if snapshot.host_id == client_id {
-            if let Some(next) = next_host {
-                snapshot.host_id = next.clone();
-                changed = true;
-                if let Some(pending) = snapshot.queue.iter().find(|item| !item.available) {
-                    let token = Uuid::new_v4().to_string();
-                    *room.media_upload_token.lock().await = Some(token.clone());
-                    upload_assignment = Some((next, token, pending.sha256.clone()));
-                }
-            }
-        }
-        if changed {
-            snapshot.revision += 1;
-            changed_snapshot = Some(snapshot.clone());
-        }
-    }
-    let _ = room.events.send(ServerMessage::PeerLeft { name });
+        None => None,
+    };
+    let _ = room
+        .events
+        .send(ServerMessage::PeerLeft { name: outcome.name });
     let _ = room.cursors.send(ServerMessage::CursorHidden {
         client_id: client_id.to_owned(),
     });
-    if let Some(snapshot) = changed_snapshot {
+    if let Some(snapshot) = outcome.snapshot {
         let _ = room.events.send(ServerMessage::Snapshot { snapshot });
     }
-    if let Some((client_id, token, sha256)) = upload_assignment {
+    if let (Some(assignment), Some(token)) = (outcome.upload_assignment, upload_token) {
         let _ = room.events.send(ServerMessage::MediaUploadToken {
-            client_id,
+            client_id: assignment.client_id,
             token,
-            sha256: Some(sha256),
+            sha256: Some(assignment.sha256),
         });
     }
 }
