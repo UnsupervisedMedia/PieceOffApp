@@ -48,6 +48,10 @@ the recording is silent.
 - **Race the clock.** A shared solve timer runs while anyone is in the room,
   and the finish card shows who placed how many pieces. The library keeps
   each puzzle's best time.
+- **Watch, then replay.** Tick **Watch only** to join a room as a spectator
+  who sees everything and chats but moves nothing. **Timelapse** on the
+  finish card (or **More → Watch timelapse**) replays the solve from the
+  scattered start in 20–60 seconds, on your screen only.
 - **Keep your progress.** Rooms save on the server. Rejoin after disconnects,
   or export a self-contained `.pieceoff` package with puzzle progress and media.
 - **Run your own rooms.** The desktop app and server are open source. Host
