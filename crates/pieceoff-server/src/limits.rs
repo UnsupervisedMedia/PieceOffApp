@@ -39,15 +39,7 @@ impl RateLimiter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (tokens, last) = buckets.entry(address).or_insert((self.capacity, now));
-        let earned = now.saturating_duration_since(*last).as_secs_f64() * self.per_second;
-        *tokens = (*tokens + earned).min(self.capacity);
-        *last = now;
-        if *tokens >= cost {
-            *tokens -= cost;
-            true
-        } else {
-            false
-        }
+        spend(tokens, last, self.capacity, self.per_second, cost, now)
     }
 
     /// Whether the address could spend `cost` right now, without spending.
@@ -81,6 +73,58 @@ impl RateLimiter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
+    }
+}
+
+/// Refill a bucket for the time since `last`, then spend `cost` if it is there.
+fn spend(
+    tokens: &mut f64,
+    last: &mut Instant,
+    capacity: f64,
+    per_second: f64,
+    cost: f64,
+    now: Instant,
+) -> bool {
+    let earned = now.saturating_duration_since(*last).as_secs_f64() * per_second;
+    *tokens = (*tokens + earned).min(capacity);
+    *last = now;
+    if *tokens >= cost {
+        *tokens -= cost;
+        true
+    } else {
+        false
+    }
+}
+
+/// A single token bucket owned by one connection, for messages that are
+/// limited per player rather than per address (live cursors).
+pub struct TokenBucket {
+    capacity: f64,
+    per_second: f64,
+    tokens: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    /// Allow `per_second` actions a second, in bursts of up to `burst`.
+    pub fn new(per_second: f64, burst: f64, now: Instant) -> Self {
+        Self {
+            capacity: burst.max(1.0),
+            per_second,
+            tokens: burst.max(1.0),
+            last: now,
+        }
+    }
+
+    pub fn try_take_at(&mut self, now: Instant) -> bool {
+        spend(
+            &mut self.tokens,
+            &mut self.last,
+            self.capacity,
+            self.per_second,
+            1.0,
+            now,
+        )
     }
 }
 
@@ -158,6 +202,22 @@ mod tests {
             assert!(limiter.try_take_at(ip(1), 1.0, later));
         }
         assert!(!limiter.try_take_at(ip(1), 1.0, later));
+    }
+
+    #[test]
+    fn a_connection_bucket_caps_a_steady_rate_after_its_burst() {
+        let start = Instant::now();
+        let mut bucket = TokenBucket::new(20.0, 5.0, start);
+        for _ in 0..5 {
+            assert!(bucket.try_take_at(start));
+        }
+        assert!(!bucket.try_take_at(start), "burst of five is spent");
+        // Twenty a second is one token every 50 ms.
+        assert!(!bucket.try_take_at(start + Duration::from_millis(40)));
+        assert!(bucket.try_take_at(start + Duration::from_millis(60)));
+        let later = start + Duration::from_secs(60);
+        let allowed = (0..100).filter(|_| bucket.try_take_at(later)).count();
+        assert_eq!(allowed, 5, "a long pause banks only the burst");
     }
 
     #[test]
