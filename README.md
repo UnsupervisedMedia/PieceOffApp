@@ -53,6 +53,24 @@ for implemented and remaining work.
 
 ## Play locally
 
+### Install
+
+On Linux or macOS, install the latest published release with:
+
+```sh
+./install.sh
+```
+
+Choose **release** to download the matching release bundle, or **local** to
+build from this checkout. The choice can be supplied directly with
+`./install.sh --release` or `./install.sh --local`; add `--yes` for scripts
+that should not prompt. By default the install goes under
+`~/.local/opt/PieceOff` and adds a `pieceoff` command in `~/.local/bin`.
+Running `pieceoff` starts both the room server and desktop app; pass `stop`,
+`restart`, or `status` to manage them. Use `--prefix DIR` and `--bin-dir DIR`
+to change the install locations. On Windows, download the Windows release zip
+and use its `pieceoff.ps1` launcher.
+
 ### Requirements
 
 - Rust 1.87 or newer and Cargo
