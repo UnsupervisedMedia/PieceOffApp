@@ -95,7 +95,7 @@ fn new_entry_id(media_sha256: &str) -> String {
     );
     hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
     hasher.update(std::process::id().to_le_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_owned()
+    hex(hasher.finalize())[..16].to_owned()
 }
 
 /// Write `bytes` to `path` through a flushed temporary file, so a crash never

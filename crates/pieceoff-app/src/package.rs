@@ -339,7 +339,7 @@ pub(crate) fn download_room_media_with(
         drop(file);
         // On an interruption the partial file stays for the next attempt.
         result?;
-        if format!("{:x}", hasher.finalize()) != sha256 {
+        if hex(hasher.finalize()) != sha256 {
             let _ = std::fs::remove_file(&temporary);
             return Err("downloaded media failed its SHA-256 check".to_owned());
         }
@@ -370,7 +370,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex(hasher.finalize()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -429,7 +429,7 @@ fn copy_hashed(
         hasher.update(&buffer[..count]);
         remaining -= count as u64;
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex(hasher.finalize()))
 }
 
 pub(crate) fn write_puzzle_package_with_extras(
