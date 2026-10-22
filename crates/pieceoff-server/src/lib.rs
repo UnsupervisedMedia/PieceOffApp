@@ -16,8 +16,8 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, RoomRuntime, RoomSnapshot, ServerMessage, valid_media_dimensions,
-    valid_media_extension,
+    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, ServerMessage,
+    clean_media_extension, clean_name, clean_title, valid_media_dimensions,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -396,6 +396,30 @@ fn application(state: AppState) -> Router {
         .route("/ws", get(websocket_handler))
         .route("/media/{sha256}", get(download_media).put(upload_media))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct SocketQuery {
+    /// The protocol version the client speaks. Clients older than this check
+    /// send none and are let through as before.
+    protocol: Option<u16>,
+}
+
+/// Why a client speaking `client` cannot use this server, if it cannot.
+fn protocol_mismatch(client: Option<u16>) -> Option<String> {
+    let client = client?;
+    if client == PROTOCOL_VERSION {
+        return None;
+    }
+    let newer = if client < PROTOCOL_VERSION {
+        "server"
+    } else {
+        "app"
+    };
+    Some(format!(
+        "This PieceOff {newer} is newer (app protocol v{client}, server protocol \
+         v{PROTOCOL_VERSION}). Update so the app and the room server match."
+    ))
 }
 
 #[derive(Deserialize)]
@@ -779,21 +803,10 @@ fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaI
     snapshot.queue.iter().find(|item| item.sha256 == sha256)
 }
 
-fn clean_media_extension(extension: &str) -> Result<String, String> {
-    let extension = extension
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
-    if valid_media_extension(&extension).is_some() {
-        Ok(extension)
-    } else {
-        Err("Choose a supported image or video format".into())
-    }
-}
-
 async fn websocket_handler(
     State(state): State<AppState>,
     upgrade: WebSocketUpgrade,
+    Query(query): Query<SocketQuery>,
     request: axum::extract::Request,
 ) -> Response {
     // Present when served with connect info (the real server); absent in
@@ -828,17 +841,16 @@ async fn websocket_handler(
     upgrade
         .max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| handle_socket(socket, state, address, slot))
-}
-
-fn message_is_visible_to_client(message: &ServerMessage, client_id: &str) -> bool {
-    !matches!(
-        message,
-        ServerMessage::MediaUploadToken {
-            client_id: recipient,
-            ..
-        } if recipient != client_id
-    )
+        .on_upgrade(move |mut socket| async move {
+            // Refuse a mismatched app up front, with a message every version
+            // can show, instead of messages it cannot parse.
+            if let Some(message) = protocol_mismatch(query.protocol) {
+                let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+            handle_socket(socket, state, address, slot).await
+        })
 }
 
 async fn handle_socket(
@@ -949,7 +961,7 @@ async fn handle_socket(
             }
             event = events.recv() => match event {
                 Ok(packet) => {
-                    if message_is_visible_to_client(&packet, &client_id)
+                    if packet.visible_to(&client_id)
                         && send(&mut socket, &packet).await.is_err()
                     {
                         break
@@ -1171,124 +1183,9 @@ async fn dispatch(
     // the lock was released let two players' moves overtake each other, and a
     // client then dropped the older one.
     let mut runtime = room.runtime.lock().await;
-    let (event, persist) = match message {
-        ClientMessage::DragStart { piece_id } => {
-            let (pieces, revision) = runtime.acquire(client_id, piece_id)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragStartSelection { piece_ids } => {
-            let (pieces, revision) = runtime.acquire_selection(client_id, &piece_ids)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::MovePiece { piece_id, x, y } => {
-            let (pieces, revision) = runtime.move_piece(client_id, piece_id, x, y, false)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragEnd { piece_id, x, y } => {
-            let (pieces, revision) = runtime.move_piece(client_id, piece_id, x, y, true)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::MoveSelection {
-            anchor_piece_id,
-            x,
-            y,
-        } => {
-            let (pieces, revision) =
-                runtime.move_selection(client_id, anchor_piece_id, x, y, false)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, false)
-        }
-        ClientMessage::DragEndSelection {
-            anchor_piece_id,
-            x,
-            y,
-        } => {
-            let (pieces, revision) =
-                runtime.move_selection(client_id, anchor_piece_id, x, y, true)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::SetPlayback {
-            playing,
-            position_ms,
-            rate,
-            loop_start_ms,
-            loop_end_ms,
-        } => {
-            let (playback, revision) = runtime.set_playback(
-                client_id,
-                playing,
-                position_ms,
-                rate,
-                loop_start_ms,
-                loop_end_ms,
-                now_ms(),
-            )?;
-            (ServerMessage::PlaybackChanged { playback, revision }, true)
-        }
-        ClientMessage::RestartPuzzle => {
-            let (pieces, revision) = runtime.restart(client_id, now_ms() as u32)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::RearrangeTray { arrangement } => {
-            let (pieces, revision) = runtime.rearrange_tray(arrangement, now_ms() as u32)?;
-            (ServerMessage::PiecesChanged { pieces, revision }, true)
-        }
-        ClientMessage::QueueAdd {
-            sha256,
-            extension,
-            title,
-            width,
-            height,
-            duration_ms,
-        } => {
-            let item = MediaItem {
-                sha256: sha256.to_ascii_lowercase(),
-                extension: clean_media_extension(&extension)?,
-                title: clean_title(&title),
-                width,
-                height,
-                duration_ms,
-                available: false,
-                position_ms: 0,
-                loop_start_ms: 0,
-                loop_end_ms: 0,
-            };
-            let snapshot = runtime.queue_add(client_id, item)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::QueueRemove { index } => {
-            let snapshot = runtime.queue_remove(client_id, index, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::QueueMove { from, to } => {
-            let snapshot = runtime.queue_move(client_id, from, to)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SelectItem { index } => {
-            let snapshot = runtime.select_item(client_id, index, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::NextItem => {
-            let snapshot = runtime.step_item(client_id, true, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::PrevItem => {
-            let snapshot = runtime.step_item(client_id, false, now_ms())?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SetRepeat { mode } => {
-            let snapshot = runtime.set_repeat(client_id, mode)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::SetVideoLock { locked } => {
-            let snapshot = runtime.set_video_lock(client_id, locked)?;
-            (ServerMessage::Snapshot { snapshot }, true)
-        }
-        ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
-            return Err("Already joined a room".into());
-        }
-    };
-    let _ = room.events.send(event);
-    Ok(persist)
+    let outcome = runtime.apply(client_id, message, now_ms())?;
+    let _ = room.events.send(outcome.event);
+    Ok(outcome.persist)
 }
 
 async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
@@ -1551,24 +1448,6 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     }
 }
 
-fn clean_name(name: &str) -> String {
-    let name: String = name.chars().filter(|c| !c.is_control()).take(24).collect();
-    if name.trim().is_empty() {
-        "Guest".into()
-    } else {
-        name.trim().to_owned()
-    }
-}
-
-fn clean_title(title: &str) -> String {
-    let title: String = title.chars().filter(|c| !c.is_control()).take(80).collect();
-    if title.trim().is_empty() {
-        "Untitled puzzle".into()
-    } else {
-        title.trim().to_owned()
-    }
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1583,33 +1462,20 @@ async fn send(socket: &mut WebSocket, packet: &ServerMessage) -> Result<(), axum
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mismatched_app_protocols_are_refused_with_a_reason() {
+        assert_eq!(protocol_mismatch(None), None);
+        assert_eq!(protocol_mismatch(Some(PROTOCOL_VERSION)), None);
+        let older_app = protocol_mismatch(Some(PROTOCOL_VERSION - 1)).unwrap();
+        assert!(older_app.contains("server is newer"), "{older_app}");
+        let newer_app = protocol_mismatch(Some(PROTOCOL_VERSION + 1)).unwrap();
+        assert!(newer_app.contains("app is newer"), "{newer_app}");
+    }
+
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message};
-
-    #[test]
-    fn names_are_bounded_and_control_characters_removed() {
-        assert_eq!(clean_name("\nAlice\0"), "Alice");
-        assert_eq!(clean_name(" \t "), "Guest");
-        assert!(clean_name(&"x".repeat(100)).len() <= 24);
-    }
-
-    #[test]
-    fn room_titles_are_bounded() {
-        assert_eq!(clean_title(" \n "), "Untitled puzzle");
-        assert!(clean_title(&"x".repeat(200)).len() <= 80);
-    }
-
-    #[test]
-    fn server_accepts_the_shared_media_extension_set() {
-        for extension in pieceoff_core::SUPPORTED_MEDIA_EXTENSIONS {
-            assert_eq!(clean_media_extension(extension).unwrap(), *extension);
-        }
-        assert_eq!(clean_media_extension(".APNG").unwrap(), "apng");
-        assert!(clean_media_extension("../mp4").is_err());
-        assert!(clean_media_extension("exe").is_err());
-    }
 
     #[tokio::test]
     async fn create_room_rehosts_imported_puzzle_progress() {
@@ -1892,8 +1758,8 @@ mod tests {
             token,
             sha256: None,
         };
-        assert!(message_is_visible_to_client(&message, "next-host"));
-        assert!(!message_is_visible_to_client(&message, "another-player"));
+        assert!(message.visible_to("next-host"));
+        assert!(!message.visible_to("another-player"));
     }
 
     #[tokio::test]
@@ -2314,6 +2180,40 @@ mod tests {
     type TestSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
     /// Start a server on a free port; returns its address and state.
+    #[tokio::test]
+    async fn an_app_on_another_protocol_is_told_to_update() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-proto-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut old_app, _) = connect_async(format!(
+            "ws://{address}/ws?protocol={}",
+            PROTOCOL_VERSION - 1
+        ))
+        .await
+        .unwrap();
+        let error = read_message(&mut old_app, "error").await;
+        assert!(
+            error["message"].as_str().unwrap().contains("Update"),
+            "{error}"
+        );
+        // The matching version gets through to the room handshake.
+        let (mut app, _) = connect_async(format!("ws://{address}/ws?protocol={PROTOCOL_VERSION}"))
+            .await
+            .unwrap();
+        app.send(Message::Text(
+            serde_json::json!({
+                "type":"join_room", "invite_code":"NOPE00", "name":"A",
+                "media_sha256":"", "media_extension":""
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = read_message(&mut app, "error").await;
+        assert_eq!(reply["message"], ROOM_NOT_FOUND);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     async fn queue_test_server(data_dir: &std::path::Path) -> (std::net::SocketAddr, AppState) {
         let state = AppState::new(data_dir.to_path_buf());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
