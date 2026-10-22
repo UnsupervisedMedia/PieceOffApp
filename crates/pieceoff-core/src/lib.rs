@@ -997,7 +997,23 @@ pub fn clean_chat_text(text: &str) -> Option<String> {
         // Line breaks and tabs become spaces so words stay apart.
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         .filter(|c| {
-            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            !c.is_control()
+                && !matches!(
+                    c,
+                    // Direction overrides, embeddings, isolates, and marks.
+                    '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{061c}'
+                        // Invisible spaces, joiners, and word joiners
+                        // (ZWJ stays for emoji sequences).
+                        | '\u{200b}'
+                        | '\u{200c}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{feff}'
+                        | '\u{00ad}'
+                )
         })
         .collect();
     let text: String = text.trim().chars().take(MAX_CHAT_CHARS).collect();
@@ -2857,6 +2873,17 @@ mod chat_tests {
             Some("evil")
         );
         assert_eq!(clean_chat_text(""), None);
+        // Invisible-only lines are blank; direction marks and soft hyphens go.
+        assert_eq!(clean_chat_text("\u{200b}\u{feff}\u{2060}"), None);
+        assert_eq!(
+            clean_chat_text("a\u{200f}b\u{061c}c\u{00ad}d").as_deref(),
+            Some("abcd")
+        );
+        // The emoji joiner survives.
+        assert_eq!(
+            clean_chat_text("\u{1f469}\u{200d}\u{1f4bb}").as_deref(),
+            Some("\u{1f469}\u{200d}\u{1f4bb}")
+        );
         assert_eq!(clean_chat_text(" \n\t "), None);
         assert_eq!(clean_chat_text("\u{7}"), None);
         let long = "é".repeat(MAX_CHAT_CHARS + 50);
