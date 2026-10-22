@@ -19,6 +19,8 @@ pub(crate) enum Action {
     ShuffleTray,
     ToggleHelp,
     ToggleMessages,
+    FocusChat,
+    Ping,
     PlayPause,
     SeekBack,
     SeekForward,
@@ -30,7 +32,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::FitView,
         Self::FocusBoard,
         Self::FocusTray,
@@ -41,6 +43,8 @@ impl Action {
         Self::ShuffleTray,
         Self::ToggleHelp,
         Self::ToggleMessages,
+        Self::FocusChat,
+        Self::Ping,
         Self::PlayPause,
         Self::SeekBack,
         Self::SeekForward,
@@ -64,6 +68,8 @@ impl Action {
             Self::ShuffleTray => "shuffle_tray",
             Self::ToggleHelp => "toggle_help",
             Self::ToggleMessages => "toggle_messages",
+            Self::FocusChat => "focus_chat",
+            Self::Ping => "ping",
             Self::PlayPause => "play_pause",
             Self::SeekBack => "seek_back",
             Self::SeekForward => "seek_forward",
@@ -87,6 +93,8 @@ impl Action {
             Self::ShuffleTray => "Shuffle the tray",
             Self::ToggleHelp => "Show shortcuts",
             Self::ToggleMessages => "Show message history",
+            Self::FocusChat => "Type in the room chat",
+            Self::Ping => "Ping the table where the pointer is",
             Self::PlayPause => "Play or pause",
             Self::SeekBack => "Seek back 5 seconds",
             Self::SeekForward => "Seek forward 5 seconds",
@@ -128,6 +136,10 @@ impl Action {
             // `?` needs Shift on most layouts; a binding ignores extra Shift.
             Self::ToggleHelp => plain(&[Key::F1, Key::Questionmark]),
             Self::ToggleMessages => plain(&[Key::M]),
+            Self::FocusChat => plain(&[Key::Enter]),
+            // A key rather than a click, so it never competes with the
+            // mouse options (select modifier, pan button).
+            Self::Ping => plain(&[Key::P]),
             Self::PlayPause => plain(&[Key::Space]),
             Self::SeekBack => plain(&[Key::ArrowLeft]),
             Self::SeekForward => plain(&[Key::ArrowRight]),

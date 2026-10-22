@@ -113,7 +113,7 @@ pub(crate) fn message_is_problem(text: &str) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-fn format_ago(elapsed: Duration) -> String {
+pub(crate) fn format_ago(elapsed: Duration) -> String {
     match elapsed.as_secs() {
         0..5 => "now".into(),
         seconds @ 5..60 => format!("{seconds}s ago"),
@@ -195,7 +195,7 @@ impl PieceOffApp {
     }
 
     /// A tooltip that names the keys currently bound to `action`.
-    fn hint_with_keys(&self, hint: &str, action: Action) -> String {
+    pub(crate) fn hint_with_keys(&self, hint: &str, action: Action) -> String {
         if self.controls.bindings_for(action).is_empty() {
             hint.to_owned()
         } else {
@@ -206,7 +206,9 @@ impl PieceOffApp {
     /// Board shortcuts; ignored while a text field has focus or a key is
     /// being rebound.
     pub(crate) fn handle_board_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.rebinding.is_some() {
+        // The chat box sets this again each frame it has the keyboard.
+        let typing = std::mem::take(&mut self.chat.typing);
+        if ctx.wants_keyboard_input() || typing || self.rebinding.is_some() {
             return;
         }
         let none = egui::Modifiers::NONE;
@@ -254,6 +256,13 @@ impl PieceOffApp {
         }
         if self.controls.pressed(ctx, Action::ShuffleTray) {
             self.arrange_tray(TrayArrangement::Shuffle);
+        }
+        if self.controls.pressed(ctx, Action::FocusChat) {
+            self.chat.show();
+            self.chat.focus_requested = true;
+        }
+        if self.controls.pressed(ctx, Action::Ping) {
+            self.chat.ping_requested = true;
         }
     }
 
@@ -449,6 +458,15 @@ impl PieceOffApp {
                 .changed()
             {
                 self.settings.show_ghost = ghost;
+                self.persist_settings();
+            }
+            let mut cursors = !self.settings.hide_peer_cursors;
+            if ui
+                .checkbox(&mut cursors, "Show other players' cursors")
+                .on_hover_text("Draw where everyone else is pointing, with their name")
+                .changed()
+            {
+                self.settings.hide_peer_cursors = !cursors;
                 self.persist_settings();
             }
             if !self.is_video && self.media_ready {
@@ -1162,6 +1180,9 @@ impl PieceOffApp {
                     self.render_board(ui);
                 }
             });
+        if in_room {
+            self.chat_overlay(ctx);
+        }
         self.record_status(ctx.input(|input| input.time));
         if in_room || self.clip_plan.is_some() {
             self.show_toast(ctx);

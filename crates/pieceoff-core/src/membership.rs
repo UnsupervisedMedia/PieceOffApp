@@ -186,6 +186,27 @@ impl RoomRuntime {
         }
     }
 
+    /// Media for `sha256` has finished uploading: mark every queue item with
+    /// that fingerprint available. Returns the new snapshot to broadcast, or
+    /// `None` if the room has no snapshot or no item has that fingerprint (so
+    /// nothing changed and no revision is taken).
+    pub fn mark_item_available(&mut self, sha256: &str) -> Option<RoomSnapshot> {
+        let snapshot = self.snapshot.as_mut()?;
+        let mut matched = false;
+        for item in &mut snapshot.queue {
+            if item.sha256 == sha256 {
+                item.available = true;
+                matched = true;
+            }
+        }
+        if !matched {
+            return None;
+        }
+        snapshot.sync_current_mirror();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        Some(snapshot.clone())
+    }
+
     /// The `Welcome` for a client that has just joined. `media_upload_token`
     /// is only included for the host while media is still missing.
     pub fn welcome(
@@ -429,5 +450,33 @@ mod tests {
         runtime.join("p3", "Renamed", &sha()).unwrap();
         assert_eq!(runtime.names.len(), 8);
         assert_eq!(runtime.names.get("p3").map(String::as_str), Some("Renamed"));
+    }
+
+    #[test]
+    fn mark_item_available_flags_the_item_and_bumps_the_revision() {
+        let mut runtime = room();
+        let before = runtime.snapshot.as_ref().unwrap().revision;
+        let snapshot = runtime.mark_item_available(&sha()).unwrap();
+        assert!(snapshot.queue[0].available);
+        assert!(snapshot.media_available, "the current-item mirror follows");
+        assert_eq!(snapshot.revision, before + 1);
+        assert_eq!(runtime.snapshot.unwrap().revision, before + 1);
+    }
+
+    #[test]
+    fn mark_item_available_without_a_room_is_none() {
+        assert!(RoomRuntime::default().mark_item_available(&sha()).is_none());
+    }
+
+    #[test]
+    fn mark_item_available_is_none_when_nothing_matches() {
+        let mut runtime = room();
+        let before = runtime.snapshot.as_ref().unwrap().revision;
+        assert!(runtime.mark_item_available(&"f".repeat(64)).is_none());
+        assert_eq!(
+            runtime.snapshot.unwrap().revision,
+            before,
+            "no revision is taken"
+        );
     }
 }

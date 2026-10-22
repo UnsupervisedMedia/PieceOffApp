@@ -15,10 +15,18 @@ impl ServerMessage {
     /// Whether `client_id` may see this message. Only upload tokens are
     /// addressed; everything else is room-wide.
     pub fn visible_to(&self, client_id: &str) -> bool {
-        !matches!(
-            self,
-            ServerMessage::MediaUploadToken { client_id: recipient, .. } if recipient != client_id
-        )
+        match self {
+            ServerMessage::MediaUploadToken {
+                client_id: recipient,
+                ..
+            } => recipient == client_id,
+            // A player's own pointer is never echoed back.
+            ServerMessage::Cursor {
+                client_id: owner, ..
+            }
+            | ServerMessage::CursorHidden { client_id: owner } => owner != client_id,
+            _ => true,
+        }
     }
 }
 
@@ -158,6 +166,13 @@ impl RoomRuntime {
             }
             ClientMessage::CreateRoom { .. } | ClientMessage::JoinRoom { .. } => {
                 return Err("Already joined a room".into());
+            }
+            // Hosts relay these before applying; they are never room state.
+            ClientMessage::Cursor { .. }
+            | ClientMessage::CursorHidden
+            | ClientMessage::Chat { .. }
+            | ClientMessage::Ping { .. } => {
+                return Err("Cursors, chat and pings are relayed, not applied".into());
             }
         };
         Ok(ApplyOutcome { event, persist })

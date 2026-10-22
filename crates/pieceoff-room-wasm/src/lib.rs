@@ -171,6 +171,16 @@ impl Room {
         }
     }
 
+    /// Media with this fingerprint finished uploading. The reply carries the
+    /// `snapshot` event to broadcast, or an `{"err":..}` if there is no room.
+    pub fn mark_item_available(&mut self, sha256: &str) -> String {
+        match self.runtime.mark_item_available(sha256) {
+            Some(snapshot) => serde_json::to_string(&ServerMessage::Snapshot { snapshot })
+                .unwrap_or_else(|_| r#"{"err":"encode failed"}"#.into()),
+            None => err_reply("Room is not initialized"),
+        }
+    }
+
     /// Whether `client_id` may see an event. Unreadable events are hidden.
     pub fn visible_to(event_json: &str, client_id: &str) -> bool {
         serde_json::from_str::<ServerMessage>(event_json)
@@ -371,5 +381,18 @@ mod tests {
         room.restore_player("p1", "Pat");
         assert_eq!(room.peer_count(), 1);
         assert_eq!(room.next_tick_deadline(0.0), -1.0);
+    }
+
+    #[test]
+    fn mark_item_available_returns_the_snapshot_event() {
+        let mut room = hosted();
+        let event = room.mark_item_available(SHA);
+        assert!(event.starts_with(r#"{"type":"snapshot""#), "{event}");
+        assert!(event.contains(r#""available":true"#), "{event}");
+        assert!(
+            Room::new()
+                .mark_item_available(SHA)
+                .starts_with(r#"{"err""#)
+        );
     }
 }

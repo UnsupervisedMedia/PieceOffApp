@@ -1515,6 +1515,10 @@ struct DragRig {
     cw: f32,
     ch: f32,
     messages: usize,
+    /// Our pointer as sent to the room; `None` entries are "left the table".
+    cursors_sent: Vec<Option<Pos2>>,
+    chats_sent: Vec<String>,
+    pings_sent: Vec<Pos2>,
 }
 
 impl DragRig {
@@ -1565,6 +1569,9 @@ impl DragRig {
             cw: snapshot.cell_width(),
             ch: snapshot.cell_height(),
             messages: 0,
+            cursors_sent: Vec::new(),
+            chats_sent: Vec::new(),
+            pings_sent: Vec::new(),
         };
         // Learn the on-screen mapping from piece 0's mesh.
         let output = rig.frame(Vec::new());
@@ -1651,6 +1658,23 @@ impl DragRig {
                 ClientMessage::RestartPuzzle => self.room.restart("host", 42),
                 ClientMessage::RearrangeTray { arrangement } => {
                     self.room.rearrange_tray(arrangement, 7)
+                }
+                // Live cursors are relayed, not room changes.
+                ClientMessage::Cursor { x, y } => {
+                    self.cursors_sent.push(Some(Pos2::new(x, y)));
+                    continue;
+                }
+                ClientMessage::CursorHidden => {
+                    self.cursors_sent.push(None);
+                    continue;
+                }
+                ClientMessage::Chat { text } => {
+                    self.chats_sent.push(text);
+                    continue;
+                }
+                ClientMessage::Ping { x, y } => {
+                    self.pings_sent.push(Pos2::new(x, y));
+                    continue;
                 }
                 other => panic!("unexpected message {other:?}"),
             };
@@ -1793,6 +1817,145 @@ fn arranging_the_tray_relays_loose_pieces_and_keeps_placed_ones() {
     );
 }
 
+#[test]
+fn the_pointer_is_shared_in_board_coordinates_throttled_and_hidden_off_the_board() {
+    let mut rig = DragRig::new(3, 4);
+    rig.frame(vec![egui::Event::PointerMoved(rig.to_screen(50.0, 60.0))]);
+    rig.relay();
+    let sent = rig
+        .cursors_sent
+        .last()
+        .copied()
+        .flatten()
+        .expect("a cursor");
+    assert!(
+        (sent.x - 50.0).abs() < 0.5 && (sent.y - 60.0).abs() < 0.5,
+        "board coordinates, not screen: {sent:?}"
+    );
+
+    // A pointer that moves every 50 ms frame is sent at most 15 times a second.
+    rig.cursors_sent.clear();
+    for step in 0..20 {
+        let pos = rig.to_screen(50.0 + step as f32, 60.0);
+        rig.frame(vec![egui::Event::PointerMoved(pos)]);
+        rig.relay();
+    }
+    let sends = rig.cursors_sent.len();
+    assert!((8..=16).contains(&sends), "sent {sends} updates in 1 s");
+    // Holding still: the last held-back position goes out, then nothing.
+    for _ in 0..3 {
+        rig.frame(Vec::new());
+        rig.relay();
+    }
+    let last = rig.cursors_sent.last().copied().flatten().unwrap();
+    assert!((last.x - 69.0).abs() < 0.5, "the newest position: {last:?}");
+    let settled = rig.cursors_sent.len();
+    for _ in 0..5 {
+        rig.frame(Vec::new());
+        rig.relay();
+    }
+    assert_eq!(rig.cursors_sent.len(), settled, "a still pointer is quiet");
+
+    // Leaving the window says so, once.
+    rig.cursors_sent.clear();
+    for _ in 0..4 {
+        rig.frame(vec![egui::Event::PointerGone]);
+        rig.relay();
+    }
+    assert_eq!(rig.cursors_sent, vec![None]);
+}
+
+fn painted_texts(output: &egui::FullOutput) -> Vec<String> {
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn other_players_cursors_are_drawn_with_their_names_then_fade_or_hide() {
+    let mut rig = DragRig::new(3, 4);
+    let cursor = |client_id: &str, name: &str, x: f32| ServerMessage::Cursor {
+        client_id: client_id.into(),
+        name: name.into(),
+        x,
+        y: 40.0,
+    };
+    rig.incoming_tx.send(cursor("ada", "Ada", 30.0)).unwrap();
+    // Our own pointer is never drawn, even if the server sent it.
+    rig.incoming_tx.send(cursor("host", "Me", 30.0)).unwrap();
+    rig.relay();
+    let texts = painted_texts(&rig.frame(Vec::new()));
+    assert!(texts.iter().any(|text| text == "Ada"), "{texts:?}");
+    assert!(!texts.iter().any(|text| text == "Me"));
+    assert_eq!(rig.app.cursors.remote.len(), 1);
+
+    // It glides to a new position rather than jumping.
+    let now = rig.time;
+    rig.incoming_tx.send(cursor("ada", "Ada", 130.0)).unwrap();
+    rig.relay();
+    let ada = &rig.app.cursors.remote["ada"];
+    let midway = ada.position(now + 0.03).x;
+    assert!(midway > 30.0 && midway < 130.0, "{midway}");
+    assert_eq!(ada.position(now + 0.5).x, 130.0);
+    assert_eq!(ada.color, player_color("Ada"), "a stable colour per player");
+    assert_ne!(player_color("ada"), player_color("bob"));
+
+    // The local setting hides them without forgetting them.
+    let shows_ada =
+        |rig: &mut DragRig| painted_texts(&rig.frame(Vec::new())).contains(&"Ada".to_owned());
+    rig.app.settings.hide_peer_cursors = true;
+    assert!(!shows_ada(&mut rig));
+    rig.app.settings.hide_peer_cursors = false;
+    assert!(shows_ada(&mut rig));
+
+    // Three seconds without news and it is gone.
+    rig.time += 3.0;
+    assert!(!shows_ada(&mut rig));
+    assert!(rig.app.cursors.remote.is_empty());
+
+    // "Left the board" removes one at once.
+    rig.incoming_tx.send(cursor("bob", "Bob", 10.0)).unwrap();
+    rig.relay();
+    assert!(painted_texts(&rig.frame(Vec::new())).contains(&"Bob".to_owned()));
+    rig.incoming_tx
+        .send(ServerMessage::CursorHidden {
+            client_id: "bob".into(),
+        })
+        .unwrap();
+    rig.relay();
+    assert!(rig.app.cursors.remote.is_empty());
+}
+
+#[test]
+fn other_players_cursors_setting_defaults_on_and_persists() {
+    let dir = std::env::temp_dir().join(format!("pieceoff-cursor-settings-{}", std::process::id()));
+    let path = dir.join("settings.json");
+    assert!(
+        !load_settings(&path).hide_peer_cursors,
+        "missing file shows them"
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, b"{}").unwrap();
+    assert!(
+        !load_settings(&path).hide_peer_cursors,
+        "absent key shows them"
+    );
+    save_settings(
+        &path,
+        &Settings {
+            hide_peer_cursors: true,
+            ..Settings::default()
+        },
+    );
+    assert!(load_settings(&path).hide_peer_cursors);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,
@@ -1804,6 +1967,25 @@ fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 }
 
 impl DragRig {
+    /// One frame in the order the app runs it: shortcuts, the board, then
+    /// the chat box over it.
+    fn room_frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+        self.time += 0.05;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            time: Some(self.time),
+            modifiers: self.modifiers,
+            events,
+            ..Default::default()
+        };
+        let app = &mut self.app;
+        self.ctx.run(input, |ctx| {
+            app.handle_board_shortcuts(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| app.render_board(ui));
+            app.chat_overlay(ctx);
+        })
+    }
+
     /// Run one frame that delivers `events` to the shortcut handler.
     fn press_for_shortcuts(&mut self, events: Vec<egui::Event>) {
         self.time += 0.05;
@@ -3601,4 +3783,192 @@ fn ffmpeg_has_encoder(name: &str) -> bool {
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).contains(name))
         .unwrap_or(false)
+}
+
+fn chat_line(id: u64, client_id: &str, name: &str, text: &str) -> pieceoff_core::ChatLine {
+    pieceoff_core::ChatLine {
+        id,
+        client_id: client_id.into(),
+        name: name.into(),
+        text: text.into(),
+        sent_at_ms: 1_000 + id,
+    }
+}
+
+#[test]
+fn chat_counts_unread_lines_from_others_only_while_collapsed() {
+    let mut chat = RoomChat::default();
+    assert!(
+        !chat.open,
+        "starts collapsed so it does not cover the board"
+    );
+    chat.receive(chat_line(1, "ada", "Ada", "hi"), Some("me"));
+    chat.receive(chat_line(2, "me", "Me", "hello"), Some("me"));
+    chat.note("Bob joined");
+    assert_eq!(chat.unread, 1, "our own lines and notes are not news");
+    chat.show();
+    assert_eq!(chat.unread, 0);
+    chat.receive(chat_line(3, "ada", "Ada", "look"), Some("me"));
+    assert_eq!(chat.unread, 0, "nothing is unread while it is open");
+    chat.hide();
+    chat.receive(chat_line(4, "ada", "Ada", "here"), Some("me"));
+    assert_eq!(chat.unread, 1);
+
+    // A reconnect's history adds only what we missed, in time order, and
+    // only that counts as unread.
+    chat.history(
+        vec![
+            chat_line(1, "ada", "Ada", "hi"),
+            chat_line(3, "ada", "Ada", "look"),
+            chat_line(5, "bob", "Bob", "missed this"),
+            // Ours from before a reconnect, under an older client ID.
+            chat_line(6, "old-me", "Me", "back"),
+        ],
+        "Me",
+    );
+    assert_eq!(chat.unread, 2);
+    let texts: Vec<_> = chat
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ChatEntry::Line(line) => Some(line.text.as_str()),
+            ChatEntry::Note { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["hi", "hello", "look", "here", "missed this", "back"]
+    );
+
+    // Leaving forgets the room's chat but keeps the panel where it was.
+    chat.show();
+    chat.reset();
+    assert!(chat.entries.is_empty() && chat.open && chat.unread == 0);
+}
+
+#[test]
+fn enter_opens_the_chat_types_and_sends_and_keys_typed_there_are_not_shortcuts() {
+    let mut rig = DragRig::new(3, 4);
+    rig.room_frame(Vec::new());
+    assert!(!rig.app.chat.open);
+    let none = egui::Modifiers::NONE;
+    rig.room_frame(vec![key_event(egui::Key::Enter, none)]);
+    assert!(rig.app.chat.open, "Enter opens the chat");
+    rig.room_frame(Vec::new());
+    assert!(rig.ctx.wants_keyboard_input(), "and puts the cursor in it");
+
+    // While typing, P and G are letters, not the ping and ghost shortcuts.
+    let ghost = rig.app.settings.show_ghost;
+    rig.room_frame(vec![
+        key_event(egui::Key::P, none),
+        egui::Event::Text("p".into()),
+        key_event(egui::Key::G, none),
+        egui::Event::Text("g ok".into()),
+    ]);
+    assert_eq!(rig.app.chat.draft, "pg ok");
+    assert!(!rig.app.chat.ping_requested);
+    assert_eq!(rig.app.settings.show_ghost, ghost);
+
+    rig.room_frame(vec![key_event(egui::Key::Enter, none)]);
+    rig.relay();
+    assert_eq!(rig.chats_sent, vec!["pg ok".to_owned()]);
+    assert!(rig.app.chat.draft.is_empty());
+    assert!(!rig.ctx.wants_keyboard_input(), "Enter hands the keys back");
+    assert!(rig.app.chat.open, "the history stays up");
+
+    // Escape leaves the box with the draft kept, and does not also clear
+    // the selection.
+    rig.room_frame(vec![key_event(egui::Key::Enter, none)]);
+    rig.room_frame(vec![egui::Event::Text("half".into())]);
+    rig.app.selected_pieces.insert(2);
+    rig.room_frame(vec![key_event(egui::Key::Escape, none)]);
+    rig.room_frame(Vec::new());
+    assert!(!rig.ctx.wants_keyboard_input());
+    assert_eq!(rig.app.chat.draft, "half");
+    assert!(rig.app.selected_pieces.contains(&2));
+    rig.relay();
+    assert_eq!(rig.chats_sent.len(), 1, "nothing more was sent");
+}
+
+#[test]
+fn chat_from_the_room_shows_with_names_and_an_unread_count_when_collapsed() {
+    let mut rig = DragRig::new(3, 4);
+    rig.incoming_tx
+        .send(ServerMessage::Chat(chat_line(
+            1,
+            "ada",
+            "Ada",
+            "edge pieces?",
+        )))
+        .unwrap();
+    rig.incoming_tx
+        .send(ServerMessage::PeerJoined { name: "Bob".into() })
+        .unwrap();
+    rig.relay();
+    // A new egui area is measured, unseen, on its first frame.
+    rig.room_frame(Vec::new());
+    let texts = painted_texts(&rig.room_frame(Vec::new()));
+    assert!(texts.iter().any(|text| text == "Chat · 1 new"), "{texts:?}");
+    rig.app.chat.show();
+    rig.room_frame(Vec::new());
+    let texts = painted_texts(&rig.room_frame(Vec::new())).join("\n");
+    assert!(texts.contains("Ada: edge pieces?"), "{texts}");
+    assert!(texts.contains("Bob joined"), "{texts}");
+}
+
+#[test]
+fn the_ping_key_marks_the_spot_under_the_pointer_and_pings_fade_after_three_seconds() {
+    let mut rig = DragRig::new(3, 4);
+    let none = egui::Modifiers::NONE;
+    let spot = rig.to_screen(80.0, 50.0);
+    rig.room_frame(vec![egui::Event::PointerMoved(spot)]);
+    rig.room_frame(vec![key_event(egui::Key::P, none)]);
+    rig.relay();
+    let sent = rig.pings_sent.last().copied().expect("a ping");
+    assert!(
+        (sent.x - 80.0).abs() < 0.5 && (sent.y - 50.0).abs() < 0.5,
+        "board coordinates: {sent:?}"
+    );
+
+    // Off the table there is nothing to point at.
+    rig.room_frame(vec![egui::Event::PointerGone]);
+    rig.room_frame(vec![key_event(egui::Key::P, none)]);
+    rig.relay();
+    assert_eq!(rig.pings_sent.len(), 1);
+    assert!(
+        rig.app.status.contains("Point at the table"),
+        "{}",
+        rig.app.status
+    );
+    assert!(!rig.app.chat.ping_requested, "the request does not linger");
+
+    // Everyone's pings, ours included, come back from the server.
+    rig.incoming_tx
+        .send(ServerMessage::Ping {
+            client_id: "ada".into(),
+            name: "Ada".into(),
+            x: 80.0,
+            y: 50.0,
+        })
+        .unwrap();
+    rig.relay();
+    assert_eq!(rig.app.chat.pings[0].color, player_color("Ada"));
+    assert!(painted_texts(&rig.room_frame(Vec::new())).contains(&"Ada".to_owned()));
+    rig.time += PING_SECONDS;
+    assert!(!painted_texts(&rig.room_frame(Vec::new())).contains(&"Ada".to_owned()));
+    assert!(rig.app.chat.pings.is_empty());
+}
+
+#[test]
+fn a_players_colour_follows_their_name_so_it_survives_a_reconnect() {
+    // A reconnect gets a new client ID but keeps the name.
+    let mut cursors = LiveCursors::default();
+    cursors.update("first-connection".into(), "Ada".into(), 1.0, 1.0, 0.0);
+    let before = cursors.remote["first-connection"].color;
+    cursors.update("second-connection".into(), "Ada".into(), 1.0, 1.0, 1.0);
+    assert_eq!(cursors.remote["second-connection"].color, before);
+    let mut chat = RoomChat::default();
+    chat.add_ping("Ada".into(), 0.0, 0.0, 0.0);
+    assert_eq!(chat.pings[0].color, before);
+    assert_ne!(player_color("Ada"), player_color("Bob"));
 }

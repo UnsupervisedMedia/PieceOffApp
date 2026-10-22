@@ -405,6 +405,8 @@ impl PieceOffApp {
                 "Reference image · hide it to keep puzzling",
                 Color32::WHITE,
             );
+            self.share_pointer(None, now, ui.ctx());
+            self.chat.ping_requested = false;
             return None;
         }
         let tray_layout = piece_tray_layout(
@@ -895,6 +897,33 @@ impl PieceOffApp {
         if !self.snap_flashes.is_empty() {
             ui.ctx().request_repaint();
         }
+
+        // Live cursors: ours goes out while it is over the table and this
+        // window has focus; everyone else's is drawn above the pieces.
+        let (hover, focused) = ui.input(|input| (input.pointer.hover_pos(), input.focused));
+        let on_table = hover
+            .filter(|point| {
+                focused
+                    && canvas.contains(*point)
+                    && (response.contains_pointer() || response.dragged())
+            })
+            .map(|point| view.to_board(point))
+            .filter(|point| scene.contains(point.x, point.y));
+        self.share_pointer(on_table, now, ui.ctx());
+        self.maybe_ping(on_table);
+        self.paint_pings(
+            &painter,
+            canvas,
+            |point| view.to_screen(point.x, point.y),
+            now,
+            ui.ctx(),
+        );
+        self.paint_remote_cursors(
+            &painter,
+            |point| view.to_screen(point.x, point.y),
+            now,
+            ui.ctx(),
+        );
 
         let total = snapshot.pieces.len();
         let placed = snapshot.pieces.iter().filter(|piece| piece.placed).count();

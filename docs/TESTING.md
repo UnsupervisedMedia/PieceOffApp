@@ -57,6 +57,18 @@ HTTPS for media transfer automatically.
     restore it: the download should continue from where it stopped, not start
     over. Seek around the loop controls once playing; FFmpeg seeks by keyframe,
     so jumps should land within a second or two, not stall.
+14. Move the pointer over the table on one client. The other should see an
+    arrow with that player's name follow it smoothly, sitting on any piece
+    being dragged. Move the pointer off the board or switch to another window:
+    the cursor should vanish at once. Untick More → **Show other players'
+    cursors** and they should stop being drawn, and stay off after a restart.
+15. Press Enter on one client, type a line, and press Enter: it should appear on
+    both clients with that player's name in their cursor colour, and the other
+    client's collapsed **Chat** button should count it as new. Press Esc while
+    typing: the box lets go of the keyboard and shortcuts work again. Point at
+    the table and press P: both clients should see a ring with the name for
+    about 3 s. Join a third client: it should get the earlier chat. Leave and
+    rejoin: your cursor, chat, and ping colour should not change.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the

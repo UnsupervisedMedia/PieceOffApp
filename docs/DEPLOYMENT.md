@@ -152,24 +152,69 @@ Worker size gate, measured with `scripts/wasm-size.sh` on 2026-10-21 (no
 The free-plan Worker limit is 3 MB compressed, so the room core uses about 3%
 of it.
 
-Local development: `scripts/worker-test.sh` builds the wasm module
-(`worker/build.sh`), type-checks `worker/`, and runs a two-client test against
-`wrangler dev --local` (join, piece leases, release on disconnect, bad frames,
-unknown codes, restart persistence). Nothing is deployed by it. Rooms are
-created with `POST /api/rooms` (a `create_room` body; returns `code`, the
-creator's public `client_id`, and a secret `resume_token`), then clients open
-`/ws?code=<CODE>` and send `join_room` first. A player's `client_id` is public
-(everyone sees the host's id), so it proves nothing; to come back as the same
-player, including the creator claiming the host role, put the `resume_token`
-in the `join_room` frame (`resume_token` field). Every `welcome` carries the
-joiner's own token; the server stores only its hash. Clients send the text
-`ping` about every 20 seconds and get `pong`; a socket silent for 90 seconds
-(`IDLE_SOCKET_MS`) is dropped and its pieces released. Snapshots flush within
-`FLUSH_MS` (default 5000) of a change. After a deploy or reset, players who
-are no longer connected are released on wake. Not yet in the worker: R2 media transfer, Turnstile and
-per-IP limits, quota and idle cleanup. Production publishing of anything under
-`pieceoff.app` goes through the connected GitHub to Cloudflare Workers Builds
-path, not a direct `wrangler deploy`.
+### Worker endpoints
+
+Rooms are created with `POST /api/rooms` (a `create_room` body; returns `code`,
+the creator's public `client_id`, and a secret `resume_token`). Clients then
+open `/ws?code=<CODE>` and send `join_room` first. A player's `client_id` is
+public (everyone sees the host's id), so it proves nothing; to come back as the
+same player, including the creator claiming the host role, put the
+`resume_token` in the `join_room` frame. Every `welcome` carries the joiner's
+own token; the server stores only its hash, and keeps the newest 64 for players
+who have left. Clients send the text `ping` about every 20 seconds and get
+`pong`.
+
+Media (`/api/rooms/<CODE>/media...`, bearer tokens in `Authorization`):
+
+| Call | Auth | Purpose |
+| --- | --- | --- |
+| `POST /media` `{sha256,size,part_size}` | host upload token | Start or resume; returns `upload_id`, `part_count`, `missing` |
+| `GET /media/<upload_id>` | upload token | Which parts are missing |
+| `PUT /media/<upload_id>/parts/<n>` | upload token | Stream one part; `x-part-sha256` and `Content-Length` required, hash verified while streaming |
+| `POST /media/<upload_id>/complete` | upload token | Finish; refused with the missing parts if incomplete |
+| `DELETE /media/<upload_id>` | upload token | Abort: frees the R2 parts and the reserved quota |
+| `GET /media/<sha256>` | any player's resume token | Download, honours `Range` |
+
+Only media already waiting in the room's queue (a `queue_add` item that is not
+yet available) can be uploaded. One send per part at a time: a second
+simultaneous send of the same part gets 409, and sending a part again voids the
+earlier copy until the new one is verified, so a rejected re-send simply shows
+the part as missing again. Downloads parse a single `bytes=` range; anything
+unusable is ignored (full body) and an unsatisfiable range gets 416.
+
+Objects live at `room/<room id>/<sha256>` in R2. All parts but the last must be
+the declared part size (R2 needs 5 MiB minimum, up to 10,000 parts). The upload
+token goes only to the host over the socket. The full-file hash is not checked
+by the worker; clients verify it after download.
+
+### Worker settings
+
+Variables (plain `vars` or `wrangler dev --var`): `FLUSH_MS` (5000, how long a
+change waits before reaching storage), `IDLE_SOCKET_MS` (90000, a joined socket
+silent this long is dropped), `PREJOIN_MS` (15000, a socket that never joins is
+closed), `IDLE_CLEANUP_MS` (3600000, an empty room is deleted after this),
+`UNCLAIMED_MS` (900000, a room whose creator never connects is deleted),
+`ROOM_MEDIA_QUOTA_BYTES` (1 GiB per room, stored plus in flight),
+`MAX_MEDIA_BYTES`, `MEDIA_MIN_PART_BYTES`, `MEDIA_MAX_PART_BYTES`,
+`ALLOWED_ORIGINS` (comma separated browser origins besides the site's own),
+`TURNSTILE_VERIFY_URL` (tests only). Secrets: `TURNSTILE_SECRET`
+(`wrangler secret put`, never committed). `DEV_ALLOW_UNVERIFIED_CREATE=1`
+skips Turnstile for local runs only; without a secret and without that flag,
+creation is refused. Bindings: Durable Object `ROOMS` (SQLite), R2 `MEDIA`
+(bucket `pieceoff-media`), rate limits `CREATE_LIMITER` (10 rooms per minute
+per address) and `LOOKUP_LIMITER` (20 misses per minute per address).
+
+### Local testing and production
+
+`scripts/worker-test.sh` builds the wasm module (`worker/build.sh`), type-checks
+`worker/`, and runs the unit and integration tests against a local
+`wrangler dev --local` (identity, piece leases, restart recovery, silent-socket
+sweep, multipart upload and resume, ranged download, quota, room expiry and R2
+cleanup, Turnstile, rate limits, origins, socket caps). Nothing is deployed by
+it. Still manual before going live: create the R2 bucket, the Turnstile widget
+and secret, and wire the Worker into the connected GitHub to Cloudflare Workers
+Builds path. Production publishing of anything under `pieceoff.app` does not
+use a direct `wrangler deploy`.
 
 Plan limits checked against Cloudflare's pricing pages on 2026-10-21: Durable
 Object requests count HTTP requests, RPC calls, WebSocket messages (20 : 1)
