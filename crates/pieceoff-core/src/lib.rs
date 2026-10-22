@@ -11,7 +11,7 @@ pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
 
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_QUEUE_ITEMS: usize = 64;
 pub const MAX_MEDIA_DIMENSION: u32 = 8192;
 pub const MAX_MEDIA_PIXELS: u64 = 40_000_000;
@@ -230,6 +230,17 @@ pub struct SceneBounds {
     pub max_x: f32,
     pub min_y: f32,
     pub max_y: f32,
+}
+
+impl SceneBounds {
+    /// Whether a point, such as a player's pointer, is a real spot on the
+    /// table: finite and inside the bounds.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x.is_finite()
+            && y.is_finite()
+            && (self.min_x..=self.max_x).contains(&x)
+            && (self.min_y..=self.max_y).contains(&y)
+    }
 }
 
 impl RoomSnapshot {
@@ -870,6 +881,15 @@ pub enum ClientMessage {
     SetVideoLock {
         locked: bool,
     },
+    /// Where this player's pointer is on the table, in board coordinates
+    /// (source-image pixels from the board's top-left). Relayed to the other
+    /// players and never stored.
+    Cursor {
+        x: f32,
+        y: f32,
+    },
+    /// The pointer left the table or the window lost focus.
+    CursorHidden,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -909,6 +929,18 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
+    },
+    /// Another player's pointer, in board coordinates. Never sent back to
+    /// the player it belongs to.
+    Cursor {
+        client_id: String,
+        name: String,
+        x: f32,
+        y: f32,
+    },
+    /// Another player's pointer left the table, or the player left.
+    CursorHidden {
+        client_id: String,
     },
 }
 
@@ -2006,7 +2038,7 @@ mod tests {
             "h".into(),
         )
         .unwrap();
-        assert_eq!(room.protocol_version, 8);
+        assert_eq!(room.protocol_version, PROTOCOL_VERSION);
         assert_eq!(room.queue.len(), 1);
         assert_eq!(room.queue[0].title, "Show");
         assert_eq!(room.repeat, RepeatMode::One);
@@ -2676,5 +2708,76 @@ mod scene_tests {
             snapshot.clamp_move([(left.x, left.y), (right.x, right.y)], 500.0, -500.0),
             (0.0, 0.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_messages_round_trip_in_the_wire_format() {
+        let sent = ClientMessage::Cursor { x: 12.5, y: -3.0 };
+        let text = serde_json::to_string(&sent).unwrap();
+        assert_eq!(text, r#"{"type":"cursor","x":12.5,"y":-3.0}"#);
+        match serde_json::from_str::<ClientMessage>(&text).unwrap() {
+            ClientMessage::Cursor { x, y } => assert_eq!((x, y), (12.5, -3.0)),
+            other => panic!("unexpected {other:?}"),
+        }
+        let hidden = serde_json::to_string(&ClientMessage::CursorHidden).unwrap();
+        assert_eq!(hidden, r#"{"type":"cursor_hidden"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&hidden).unwrap(),
+            ClientMessage::CursorHidden
+        ));
+
+        let relayed = ServerMessage::Cursor {
+            client_id: "a".into(),
+            name: "Ada".into(),
+            x: 1.0,
+            y: 2.0,
+        };
+        let text = serde_json::to_string(&relayed).unwrap();
+        match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+            ServerMessage::Cursor {
+                client_id,
+                name,
+                x,
+                y,
+            } => assert_eq!(
+                (client_id.as_str(), name.as_str(), x, y),
+                ("a", "Ada", 1.0, 2.0)
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+        let text = serde_json::to_string(&ServerMessage::CursorHidden {
+            client_id: "a".into(),
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"type":"cursor_hidden","client_id":"a"}"#);
+    }
+
+    #[test]
+    fn a_cursor_must_be_a_finite_point_on_the_table() {
+        let snapshot = RoomSnapshot::create(
+            "room".into(),
+            "INVITE".into(),
+            "Table".into(),
+            "a".repeat(64),
+            "png".into(),
+            400,
+            300,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let scene = snapshot.scene_bounds();
+        assert!(scene.contains(0.0, 0.0));
+        assert!(scene.contains(scene.min_x, scene.max_y));
+        assert!(!scene.contains(scene.max_x + 1.0, 0.0));
+        assert!(!scene.contains(0.0, scene.min_y - 1.0));
+        assert!(!scene.contains(f32::NAN, 0.0));
+        assert!(!scene.contains(0.0, f32::INFINITY));
     }
 }

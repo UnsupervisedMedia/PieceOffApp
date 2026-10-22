@@ -14,10 +14,10 @@ use axum::{
 };
 use config::Config;
 use futures_util::StreamExt;
-use limits::{RateLimiter, client_address, origin_allowed};
+use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, ServerMessage,
-    clean_media_extension, valid_media_dimensions, valid_sha256,
+    ClientMessage, MediaItem, PROTOCOL_VERSION, RoomRuntime, RoomSnapshot, SceneBounds,
+    ServerMessage, clean_media_extension, valid_media_dimensions, valid_sha256,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -103,9 +103,28 @@ impl AppState {
     }
 }
 
+/// Room events buffered per subscriber. A client that falls further behind
+/// gets a fresh snapshot instead.
+const EVENT_BUFFER: usize = 256;
+
+/// Live cursors travel on their own channel so a burst of pointer traffic
+/// can never push room events out of a slow client's buffer. A client that
+/// falls behind here just skips to newer positions.
+const CURSOR_BUFFER: usize = 64;
+
+/// Cursor updates allowed for a whole room, whatever the number of
+/// connections, so many sockets cannot multiply the per-player rate.
+const ROOM_CURSOR_UPDATES_PER_SECOND: f64 = 120.0;
+
+/// Live cursor updates allowed per player: the client sends about 15 a second.
+const CURSOR_UPDATES_PER_SECOND: f64 = 20.0;
+const CURSOR_BURST: f64 = 20.0;
+
 struct RoomRecord {
     runtime: Mutex<RoomRuntime>,
     events: broadcast::Sender<ServerMessage>,
+    cursors: broadcast::Sender<ServerMessage>,
+    cursor_budget: std::sync::Mutex<TokenBucket>,
     persist_lock: Mutex<()>,
     media_upload_token: Mutex<Option<String>>,
     last_activity: Arc<Mutex<SystemTime>>,
@@ -113,10 +132,12 @@ struct RoomRecord {
 
 impl RoomRecord {
     fn new(media_upload_token: Option<String>) -> Self {
-        let (events, _) = broadcast::channel(128);
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
         Self {
             runtime: Mutex::new(RoomRuntime::default()),
             events,
+            cursors: broadcast::channel(CURSOR_BUFFER).0,
+            cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(media_upload_token),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
@@ -124,10 +145,12 @@ impl RoomRecord {
     }
 
     fn with_runtime(runtime: RoomRuntime, last_activity: SystemTime) -> Self {
-        let (events, _) = broadcast::channel(128);
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
         Self {
             runtime: Mutex::new(runtime),
             events,
+            cursors: broadcast::channel(CURSOR_BUFFER).0,
+            cursor_budget: std::sync::Mutex::new(room_cursor_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(None),
             last_activity: Arc::new(Mutex::new(last_activity)),
@@ -855,6 +878,61 @@ async fn websocket_handler(
         })
 }
 
+/// Relay a live cursor message to the rest of the room. Cursors are not
+/// room state: nothing is stored or persisted, and an update that is off the
+/// table or over the player's rate is dropped without a reply (an error would
+/// cost a full snapshot). Returns false for any other message.
+fn room_cursor_budget() -> TokenBucket {
+    TokenBucket::new(
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        ROOM_CURSOR_UPDATES_PER_SECOND,
+        Instant::now(),
+    )
+}
+
+fn relay_cursor(
+    room: &RoomRecord,
+    client_id: &str,
+    name: &str,
+    table: &SceneBounds,
+    budget: &mut TokenBucket,
+    message: &ClientMessage,
+    now: Instant,
+) -> bool {
+    let (packet, valid) = match *message {
+        ClientMessage::Cursor { x, y } => (
+            ServerMessage::Cursor {
+                client_id: client_id.to_owned(),
+                name: name.to_owned(),
+                x,
+                y,
+            },
+            table.contains(x, y),
+        ),
+        ClientMessage::CursorHidden => (
+            ServerMessage::CursorHidden {
+                client_id: client_id.to_owned(),
+            },
+            true,
+        ),
+        _ => return false,
+    };
+    if !valid {
+        return true;
+    }
+    // Every update spends the player's budget and the room's, so opening
+    // more sockets cannot multiply the rate.
+    let allowed = budget.try_take_at(now)
+        && room
+            .cursor_budget
+            .lock()
+            .is_ok_and(|mut room_budget| room_budget.try_take_at(now));
+    if allowed {
+        let _ = room.cursors.send(packet);
+    }
+    true
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     state: AppState,
@@ -904,11 +982,23 @@ async fn handle_socket(
     };
     persist_room(&state, &room).await;
     let mut events = room.events.subscribe();
+    let mut cursor_events = room.cursors.subscribe();
     let welcome = {
         let runtime = room.runtime.lock().await;
         let token = room.media_upload_token.lock().await.clone();
         runtime.welcome(&client_id, &name, token)
     };
+    // The table never changes size after the room is made.
+    let table = room
+        .runtime
+        .lock()
+        .await
+        .snapshot
+        .as_ref()
+        .expect("room snapshot exists")
+        .scene_bounds();
+    let mut cursor_budget =
+        TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, Instant::now());
     let sent = match welcome {
         Ok(welcome) => send(&mut socket, &welcome).await.is_ok(),
         Err(_) => false,
@@ -952,12 +1042,27 @@ async fn handle_socket(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            cursor = cursor_events.recv() => match cursor {
+                Ok(packet) => {
+                    if packet.visible_to(&client_id)
+                        && send(&mut socket, &packet).await.is_err()
+                    {
+                        break
+                    }
+                },
+                // Missed pointer positions are stale anyway.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
                         let _ = send(&mut socket, &ServerMessage::Error { message: "Invalid message".into() }).await;
                         continue;
                     };
+                    if relay_cursor(&room, &client_id, &name, &table, &mut cursor_budget, &message, Instant::now()) {
+                        continue;
+                    }
                     let queued_sha = match &message {
                         ClientMessage::QueueAdd { sha256, .. } => Some(sha256.to_ascii_lowercase()),
                         _ => None,
@@ -1322,6 +1427,9 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     let _ = room
         .events
         .send(ServerMessage::PeerLeft { name: outcome.name });
+    let _ = room.cursors.send(ServerMessage::CursorHidden {
+        client_id: client_id.to_owned(),
+    });
     if let Some(snapshot) = outcome.snapshot {
         let _ = room.events.send(ServerMessage::Snapshot { snapshot });
     }
@@ -1761,6 +1869,205 @@ mod tests {
         .await;
         assert!(refused.is_err());
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cursors_are_relayed_to_others_validated_rate_limited_and_never_stored() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "CUR123".into(),
+            "Cursors".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let table = snapshot.scene_bounds();
+        let room = Arc::new(RoomRecord::new(None));
+        room.runtime.lock().await.snapshot = Some(snapshot.clone());
+        let mut events = room.cursors.subscribe();
+        let start = Instant::now();
+        let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, start);
+        let mut relay = |message: ClientMessage, now: Instant| {
+            relay_cursor(&room, "ada", "Ada", &table, &mut budget, &message, now)
+        };
+
+        assert!(relay(ClientMessage::Cursor { x: 10.0, y: -4.0 }, start));
+        match events.try_recv().unwrap() {
+            ServerMessage::Cursor {
+                client_id,
+                name,
+                x,
+                y,
+            } => assert_eq!(
+                (client_id.as_str(), name.as_str(), x, y),
+                ("ada", "Ada", 10.0, -4.0)
+            ),
+            other => panic!("unexpected event {other:?}"),
+        }
+        // Off the table or not a number: handled, but nothing goes out.
+        for (x, y) in [
+            (table.max_x + 1.0, 0.0),
+            (0.0, table.min_y - 1.0),
+            (f32::NAN, 0.0),
+            (0.0, f32::INFINITY),
+        ] {
+            assert!(relay(ClientMessage::Cursor { x, y }, start));
+        }
+        assert!(events.try_recv().is_err(), "invalid cursors are dropped");
+        assert!(relay(ClientMessage::CursorHidden, start));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            ServerMessage::CursorHidden { client_id } if client_id == "ada"
+        ));
+        // Anything else goes on to `dispatch`.
+        assert!(!relay(ClientMessage::NextItem, start));
+
+        // A flood is cut to what is left of the burst, then the steady rate.
+        let flood = (0..100)
+            .filter(|_| relay(ClientMessage::Cursor { x: 1.0, y: 1.0 }, start))
+            .count();
+        assert_eq!(flood, 100);
+        let mut relayed = 0;
+        while events.try_recv().is_ok() {
+            relayed += 1;
+        }
+        assert_eq!(relayed, CURSOR_BURST as usize - 2, "two were spent above");
+        relay(
+            ClientMessage::Cursor { x: 1.0, y: 1.0 },
+            start + Duration::from_millis(100),
+        );
+        assert!(events.try_recv().is_ok(), "the bucket refills");
+        drop(relay);
+
+        // Cursors are not room state.
+        let stored = room.runtime.lock().await.snapshot.clone().unwrap();
+        assert_eq!(stored, snapshot);
+        // The socket loop relays cursors before dispatch; the rules refuse them.
+        assert!(
+            dispatch(&room, "ada", ClientMessage::Cursor { x: 1.0, y: 1.0 })
+                .await
+                .is_err()
+        );
+        assert!(events.try_recv().is_err());
+
+        // Never echoed to the player it belongs to.
+        let own = ServerMessage::Cursor {
+            client_id: "ada".into(),
+            name: "Ada".into(),
+            x: 0.0,
+            y: 0.0,
+        };
+        assert!(!own.visible_to("ada"));
+        assert!(own.visible_to("bob"));
+        let hidden = ServerMessage::CursorHidden {
+            client_id: "ada".into(),
+        };
+        assert!(!hidden.visible_to("ada"));
+        assert!(hidden.visible_to("bob"));
+    }
+
+    #[tokio::test]
+    async fn many_connections_share_one_room_cursor_budget() {
+        let snapshot = RoomSnapshot::create(
+            "room-id".into(),
+            "CUR124".into(),
+            "Cursors".into(),
+            "a".repeat(64),
+            "png".into(),
+            64,
+            48,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap();
+        let table = snapshot.scene_bounds();
+        let room = RoomRecord::new(None);
+        let mut cursors = room.cursors.subscribe();
+        let mut room_events = room.events.subscribe();
+        let now = Instant::now();
+        // Twenty sockets, each with a fresh per-player budget, all at once.
+        let mut sent = 0;
+        for socket in 0..20 {
+            let mut budget = TokenBucket::new(CURSOR_UPDATES_PER_SECOND, CURSOR_BURST, now);
+            let id = format!("p{socket}");
+            for _ in 0..CURSOR_BURST as usize {
+                relay_cursor(
+                    &room,
+                    &id,
+                    "P",
+                    &table,
+                    &mut budget,
+                    &ClientMessage::Cursor { x: 1.0, y: 1.0 },
+                    now,
+                );
+            }
+        }
+        while let Ok(packet) = cursors.try_recv() {
+            assert!(matches!(packet, ServerMessage::Cursor { .. }));
+            sent += 1;
+        }
+        assert!(
+            sent <= ROOM_CURSOR_UPDATES_PER_SECOND as usize,
+            "{sent} cursors relayed"
+        );
+        // Cursor traffic never lands on the room event channel.
+        assert!(room_events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_second_player_sees_the_first_players_cursor_until_they_leave() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-cursor-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut host, code, hash) = queue_test_room(address, b"cursor clip").await;
+        let (mut guest, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        guest
+            .send(Message::Text(
+                serde_json::json!({
+                    "type":"join_room", "invite_code":code, "name":"Guest",
+                    "media_sha256":hash, "media_extension":""
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let welcome = read_message(&mut guest, "welcome").await;
+        let guest_id = welcome["client_id"].as_str().unwrap().to_owned();
+        let host_id = welcome["snapshot"]["host_id"].as_str().unwrap().to_owned();
+        read_message(&mut host, "peer_joined").await;
+
+        let cursor = |x: f32, y: f32| {
+            Message::Text(
+                serde_json::json!({"type":"cursor", "x":x, "y":y})
+                    .to_string()
+                    .into(),
+            )
+        };
+        host.send(cursor(5.0, 6.0)).await.unwrap();
+        let seen = read_message(&mut guest, "cursor").await;
+        assert_eq!(seen["client_id"], host_id.as_str());
+        assert_eq!(seen["name"], "Host");
+        assert_eq!(
+            (seen["x"].as_f64(), seen["y"].as_f64()),
+            (Some(5.0), Some(6.0))
+        );
+
+        // The host only ever hears about the guest's pointer, not its own.
+        guest.send(cursor(7.0, 8.0)).await.unwrap();
+        let echoed = read_message(&mut host, "cursor").await;
+        assert_eq!(echoed["client_id"], guest_id.as_str());
+
+        host.close(None).await.unwrap();
+        drop(host);
+        let gone = read_message(&mut guest, "cursor_hidden").await;
+        assert_eq!(gone["client_id"], host_id.as_str());
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

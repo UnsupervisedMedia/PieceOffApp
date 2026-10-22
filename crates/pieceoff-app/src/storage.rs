@@ -48,6 +48,8 @@ pub(crate) struct Settings {
     pub(crate) show_ghost: bool,
     /// Freezes pan and zoom so a stray drag or wheel cannot move the board.
     pub(crate) lock_view: bool,
+    /// Hide the other players' live cursors. Off by default, so they show.
+    pub(crate) hide_peer_cursors: bool,
     /// Last name and server used to enter a room.
     pub(crate) player_name: Option<String>,
     pub(crate) server_url: Option<String>,

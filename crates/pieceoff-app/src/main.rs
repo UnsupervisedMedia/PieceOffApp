@@ -49,6 +49,7 @@ mod audio;
 mod board;
 mod clip;
 mod controls;
+mod cursors;
 mod decoder;
 #[cfg(test)]
 mod e2e;
@@ -68,6 +69,7 @@ mod ui;
 use audio::*;
 use board::*;
 use controls::*;
+use cursors::*;
 use decoder::*;
 use library::{Library, LibrarySort};
 use net::*;
@@ -200,6 +202,8 @@ struct PieceOffApp {
     last_drift_sync: Instant,
     /// Other players currently in the room, by display name.
     peers: Vec<String>,
+    /// Other players' pointers, and what we last sent of our own.
+    cursors: LiveCursors,
     help_open: bool,
     /// Pieces already seen in place, so newly placed ones can flash.
     placed_seen: std::collections::HashSet<u32>,
@@ -369,6 +373,7 @@ impl Default for PieceOffApp {
             last_playback_send: None,
             last_drift_sync: Instant::now(),
             peers: Vec::new(),
+            cursors: LiveCursors::default(),
             help_open: false,
             placed_seen: std::collections::HashSet::new(),
             snap_flashes: Vec::new(),
@@ -1117,6 +1122,7 @@ impl PieceOffApp {
         self.network = None;
         self.snapshot = None;
         self.peers.clear();
+        self.cursors.reset();
         self.media_ready = false;
         self.media_uploading = false;
         self.client_id = None;

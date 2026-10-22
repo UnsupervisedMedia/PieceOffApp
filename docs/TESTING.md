@@ -57,6 +57,11 @@ HTTPS for media transfer automatically.
     restore it: the download should continue from where it stopped, not start
     over. Seek around the loop controls once playing; FFmpeg seeks by keyframe,
     so jumps should land within a second or two, not stall.
+14. Move the pointer over the table on one client. The other should see an
+    arrow with that player's name follow it smoothly, sitting on any piece
+    being dragged. Move the pointer off the board or switch to another window:
+    the cursor should vanish at once. Untick More → **Show other players'
+    cursors** and they should stop being drawn, and stay off after a restart.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the

@@ -451,6 +451,15 @@ impl PieceOffApp {
                 self.settings.show_ghost = ghost;
                 self.persist_settings();
             }
+            let mut cursors = !self.settings.hide_peer_cursors;
+            if ui
+                .checkbox(&mut cursors, "Show other players' cursors")
+                .on_hover_text("Draw where everyone else is pointing, with their name")
+                .changed()
+            {
+                self.settings.hide_peer_cursors = !cursors;
+                self.persist_settings();
+            }
             if !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, "Reference image");
             }
