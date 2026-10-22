@@ -45,6 +45,7 @@ mod cursors;
 mod decoder;
 #[cfg(test)]
 mod e2e;
+mod holders;
 mod library;
 mod library_ui;
 mod media_tools;
@@ -65,6 +66,7 @@ use chat::*;
 use controls::*;
 use cursors::*;
 use decoder::*;
+use holders::*;
 use library::{Library, LibrarySort};
 use net::*;
 use package::*;
@@ -201,6 +203,8 @@ struct PieceOffApp {
     cursors: LiveCursors,
     /// Room chat and board pings.
     chat: RoomChat,
+    /// Piece holders: the gesture in progress and the menu's label edits.
+    holders: HolderTool,
     /// Snap, join, finish, chat and ping sounds, separate from the clip's audio.
     effects: SoundEffects,
     help_open: bool,
@@ -376,6 +380,7 @@ impl Default for PieceOffApp {
             peers: Vec::new(),
             cursors: LiveCursors::default(),
             chat: RoomChat::default(),
+            holders: HolderTool::default(),
             effects,
             help_open: false,
             placed_seen: std::collections::HashSet::new(),
@@ -513,6 +518,7 @@ impl PieceOffApp {
         self.dragging = None;
         self.pan_drag_last = None;
         self.marquee = None;
+        self.holders.drag = None;
     }
 
     fn choose_media(&mut self, ctx: &egui::Context) {

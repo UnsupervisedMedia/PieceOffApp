@@ -4162,3 +4162,132 @@ fn effects_settings_are_clamped_on_load_and_default_on() {
     assert!(defaults.audible());
     assert_eq!(defaults.volume, DEFAULT_EFFECTS_VOLUME);
 }
+
+/// A 4×2-cell holder below the rig's board (cells are 100×100).
+fn rig_holder(owner: &str) -> pieceoff_core::PieceHolder {
+    pieceoff_core::PieceHolder {
+        id: 7,
+        owner: owner.into(),
+        label: "Sky".into(),
+        x: 0.0,
+        y: 400.0,
+        width: 400.0,
+        height: 200.0,
+        owner_away_since_ms: None,
+    }
+}
+
+/// Put `holder` and piece 0 (centred inside it) in both the room and the app.
+fn put_piece_in_holder(rig: &mut DragRig, holder: pieceoff_core::PieceHolder) {
+    for snapshot in [
+        rig.room.snapshot.as_mut().unwrap(),
+        rig.app.snapshot.as_mut().unwrap(),
+    ] {
+        snapshot.holders = vec![holder.clone()];
+        let piece = snapshot.piece_mut(0).unwrap();
+        piece.x = 100.0;
+        piece.y = 450.0;
+    }
+}
+
+#[test]
+fn a_piece_in_another_players_holder_shows_a_lock_and_stays_put() {
+    let mut rig = DragRig::new(3, 4);
+    rig.app.player_name = "Host".into();
+    rig.room.names.insert("ada".into(), "Ada".into());
+    put_piece_in_holder(&mut rig, rig_holder("Ada"));
+    let before = rig.piece(0);
+    let over = rig.to_screen(before.x + rig.cw / 2.0, before.y + rig.ch / 2.0);
+    rig.frame(vec![egui::Event::PointerMoved(over)]);
+    let output = rig.frame(vec![egui::Event::PointerMoved(over)]);
+    let texts = painted_texts(&output);
+    assert!(
+        texts.iter().any(|text| text == "🔒 In Ada's holder"),
+        "{texts:?}"
+    );
+    assert!(texts.iter().any(|text| text == "🔒 Sky · Ada"), "{texts:?}");
+    assert_eq!(
+        output.platform_output.cursor_icon,
+        egui::CursorIcon::NotAllowed
+    );
+    // The drag never reaches the room (`relay` would panic on a refusal).
+    rig.drag(0, -300.0, -300.0, egui::Modifiers::NONE);
+    assert_eq!(rig.piece(0), before);
+    assert_eq!(rig.messages, 0);
+    assert!(
+        rig.app.status.contains("Ada's holder"),
+        "{}",
+        rig.app.status
+    );
+}
+
+#[test]
+fn our_own_holder_is_made_moved_with_its_pieces_and_kept_by_the_server() {
+    let mut rig = DragRig::new(3, 4);
+    rig.app.player_name = "Host".into();
+    // The New holder key, with the pointer below the board.
+    let near = rig.to_screen(200.0, 500.0);
+    rig.frame(vec![egui::Event::PointerMoved(near)]);
+    rig.app.holders.create_requested = true;
+    rig.frame(vec![egui::Event::PointerMoved(near)]);
+    rig.relay();
+    let holder = rig.app.snapshot.as_ref().unwrap().holders[0].clone();
+    assert_eq!(holder.owner, "Host");
+    assert_eq!(holder.label, "Holder 1");
+    assert_eq!(
+        rig.room.snapshot.as_ref().unwrap().holders,
+        vec![holder.clone()]
+    );
+    // Our own piece in it is ours to pick up.
+    for snapshot in [
+        rig.room.snapshot.as_mut().unwrap(),
+        rig.app.snapshot.as_mut().unwrap(),
+    ] {
+        let piece = snapshot.piece_mut(0).unwrap();
+        piece.x = holder.x + 50.0;
+        piece.y = holder.y + 50.0;
+    }
+    let piece_before = rig.piece(0);
+
+    // Drag the tab 300 px left: the holder and the piece inside follow.
+    let tab = rig.to_screen(holder.x + 30.0, holder.y) - Vec2::new(0.0, HOLDER_TAB_HEIGHT / 2.0);
+    let end = tab - Vec2::new(300.0 * rig.scale, 0.0);
+    rig.frame(vec![egui::Event::PointerMoved(tab)]);
+    rig.button(tab, true, egui::Modifiers::NONE);
+    for step in 1..=10 {
+        let pos = tab + (end - tab) * (step as f32 / 10.0);
+        rig.frame(vec![egui::Event::PointerMoved(pos)]);
+    }
+    rig.button(end, false, egui::Modifiers::NONE);
+    rig.relay();
+    rig.frame(Vec::new());
+    let moved = rig.app.snapshot.as_ref().unwrap().holders[0].clone();
+    assert!((moved.x - (holder.x - 300.0)).abs() < 1.0, "{moved:?}");
+    assert_eq!(moved.y, holder.y);
+    assert_eq!(
+        rig.room.snapshot.as_ref().unwrap().holders,
+        vec![moved.clone()]
+    );
+    let piece = rig.piece(0);
+    assert!((piece.x - (piece_before.x + moved.x - holder.x)).abs() < 0.01);
+    assert_eq!(piece.y, piece_before.y);
+}
+
+#[test]
+fn packages_leave_holders_behind() {
+    let mut snapshot = RoomSnapshot::create(
+        "room".into(),
+        "INVITE".into(),
+        "Pack".into(),
+        "a".repeat(64),
+        "png".into(),
+        400,
+        300,
+        3,
+        4,
+        "host".into(),
+    )
+    .unwrap();
+    snapshot.holders = vec![rig_holder("Ada")];
+    assert!(portable_snapshot(&snapshot).holders.is_empty());
+}

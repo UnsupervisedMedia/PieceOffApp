@@ -1039,3 +1039,108 @@ fn queue_swap_advance_and_lock_across_two_clients() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_guest_cannot_take_a_piece_from_the_hosts_holder_until_it_is_removed() {
+    let _serial = serial();
+    if !ffmpeg_available() {
+        eprintln!("Skipping: ffmpeg is not installed.");
+        return;
+    }
+    let root = scratch("holders");
+    let video = small_video(&root);
+    let server = RunningServer::start(&config_in(&root)).unwrap();
+    let url = server.url();
+    let mut host = Player::new("Host", &url, &root);
+    let mut guest = Player::new("Guest", &url, &root);
+    let code = host_creates_a_video_room(&mut host, &video);
+    guest_joins_without_media(&mut guest, &mut host, &code);
+
+    // The host makes a holder beside the board and puts piece 0 in it.
+    let (width, height, cw, ch) = {
+        let snapshot = host.snapshot();
+        let (cw, ch) = (snapshot.cell_width(), snapshot.cell_height());
+        (4.0 * cw, 3.0 * ch, cw, ch)
+    };
+    let (x, y) = host
+        .snapshot()
+        .free_holder_spot(width, height, -width, 0.0)
+        .expect("free table space");
+    host.app.send(ClientMessage::CreateHolder {
+        x,
+        y,
+        width,
+        height,
+        label: "Sky".into(),
+    });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "both players to see the holder",
+        |p| p[0].snapshot().holders.len() == 1 && p[1].snapshot().holders.len() == 1,
+    );
+    let holder_id = guest.snapshot().holders[0].id;
+    assert_eq!(guest.snapshot().holders[0].owner, "Host");
+    let (px, py) = (x + width / 2.0 - cw / 2.0, y + height / 2.0 - ch / 2.0);
+    for message in [
+        ClientMessage::DragStartSelection { piece_ids: vec![0] },
+        ClientMessage::DragEndSelection {
+            anchor_piece_id: 0,
+            x: px,
+            y: py,
+        },
+    ] {
+        host.app.send(message);
+    }
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the piece to land in the holder on both screens",
+        |p| {
+            p[1].snapshot()
+                .piece(0)
+                .is_some_and(|piece| piece.x == px && piece.held_by.is_none())
+        },
+    );
+
+    // The guest's grab is refused by the server, and nothing moves.
+    guest
+        .app
+        .send(ClientMessage::DragStartSelection { piece_ids: vec![0] });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the guest to be told the piece is reserved",
+        |p| p[1].app.status.contains("Host's holder"),
+    );
+    guest.app.send(ClientMessage::DragEndSelection {
+        anchor_piece_id: 0,
+        x: 0.0,
+        y: 0.0,
+    });
+    run_for(&mut [&mut host, &mut guest], Duration::from_millis(400));
+    for player in [&host, &guest] {
+        let piece = player.snapshot().piece(0).unwrap();
+        assert_eq!((piece.x, piece.y), (px, py), "{}", player.name);
+        assert!(piece.held_by.is_none() && !piece.placed);
+    }
+
+    // Once the host removes the holder, the piece is anyone's where it lies.
+    host.app.send(ClientMessage::DeleteHolder { holder_id });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the holder to go",
+        |p| p[1].snapshot().holders.is_empty(),
+    );
+    guest
+        .app
+        .send(ClientMessage::DragStartSelection { piece_ids: vec![0] });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the guest to pick the piece up",
+        |p| p[0].snapshot().piece(0).unwrap().held_by.as_deref() == p[1].app.client_id.as_deref(),
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

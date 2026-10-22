@@ -264,6 +264,9 @@ impl PieceOffApp {
         if self.controls.pressed(ctx, Action::Ping) {
             self.chat.ping_requested = true;
         }
+        if self.controls.pressed(ctx, Action::NewHolder) {
+            self.holders.create_requested = true;
+        }
     }
 
     /// Files dropped on the window become the puzzle media (or package).
@@ -443,10 +446,13 @@ impl PieceOffApp {
                 ui.close();
                 self.arrange_tray(TrayArrangement::Shuffle);
             }
-            ui.weak("Assembled and held pieces stay put.");
+            ui.weak("Assembled and held pieces, and pieces in holders, stay put.");
         })
         .response
         .on_hover_text("Tidy the loose pieces in the tray");
+        ui.menu_button("Holders", |ui| self.holders_menu(ui, is_host))
+            .response
+            .on_hover_text("Your own sorting areas on the table");
         ui.menu_button("More", |ui| {
             let mut ghost = self.settings.show_ghost;
             if ui

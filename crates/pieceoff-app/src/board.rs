@@ -474,6 +474,11 @@ impl PieceOffApp {
                             piece.y + snapshot.cell_height() + tray_layout.board_y,
                         ));
                     }
+                    for holder in &snapshot.holders {
+                        let area =
+                            holder_rect(holder).translate(Vec2::new(0.0, tray_layout.board_y));
+                        everything = everything.union(area);
+                    }
                     (self.board_zoom, self.board_pan) = if everything == content {
                         (1.0, Vec2::ZERO)
                     } else {
@@ -526,6 +531,20 @@ impl PieceOffApp {
         };
         let cw = snapshot.cell_width();
         let ch = snapshot.cell_height();
+        let rect_to_screen = |area: Rect| {
+            Rect::from_min_max(
+                view.to_screen(area.min.x, area.min.y),
+                view.to_screen(area.max.x, area.max.y),
+            )
+        };
+        if std::mem::take(&mut self.holders.create_requested) {
+            // Near the pointer when it is over the table, else mid-view.
+            let near = response
+                .hover_pos()
+                .filter(|point| canvas.contains(*point))
+                .unwrap_or(canvas.center());
+            self.create_holder_near(snapshot, view.to_board(near));
+        }
 
         // The table: everywhere pieces can be put down.
         let scene = snapshot.scene_bounds();
@@ -563,6 +582,27 @@ impl PieceOffApp {
             10.0,
             Color32::from_rgb(27, 31, 39),
         );
+        // Holders lie on the table, under the pieces.
+        let holder_preview = self.holders.drag.as_ref().map(|drag| {
+            let area = drag.preview;
+            let valid = snapshot
+                .check_holder_rect(
+                    area.min.x,
+                    area.min.y,
+                    area.width(),
+                    area.height(),
+                    Some(drag.holder_id),
+                )
+                .is_ok();
+            (drag.holder_id, area, valid)
+        });
+        paint_holders(
+            &painter,
+            &snapshot.holders,
+            &self.player_name,
+            holder_preview,
+            rect_to_screen,
+        );
 
         let order = paint_order(snapshot, &self.selected_pieces);
         let grab_margin = self.settings.mouse.grab_margin;
@@ -581,11 +621,36 @@ impl PieceOffApp {
         let pressed_piece = |pointer: Option<Pos2>| {
             pointer.and_then(|pointer| hit_test(snapshot, &self.shape_cache, pointer))
         };
-        let hovered_piece = if self.dragging.is_none() && self.pan_drag_last.is_none() {
+        let idle =
+            self.dragging.is_none() && self.pan_drag_last.is_none() && self.holders.drag.is_none();
+        let grip_at = |pointer: Option<Pos2>| {
+            pointer.and_then(|pointer| {
+                holder_grip_at(
+                    &snapshot.holders,
+                    &self.player_name,
+                    pointer,
+                    rect_to_screen,
+                )
+            })
+        };
+        let hovered_grip = if idle {
+            grip_at(response.hover_pos())
+        } else {
+            None
+        };
+        let hovered_piece = if idle && hovered_grip.is_none() {
             pressed_piece(response.hover_pos())
         } else {
             None
         };
+        // Someone else's holder keeps this piece: say so instead of grabbing.
+        let reserved_owner = |piece_id: u32| {
+            snapshot
+                .piece(piece_id)
+                .and_then(|piece| snapshot.reserved_from(piece.group_id, Some(&self.player_name)))
+                .map(|holder| holder.owner.clone())
+        };
+        let hovered_reserved = hovered_piece.and_then(reserved_owner);
         let clicked_piece = if response.clicked() || response.double_clicked() {
             pressed_piece(response.interact_pointer_pos())
         } else {
@@ -598,7 +663,7 @@ impl PieceOffApp {
             let pointer = ui
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            (pointer, pressed_piece(pointer))
+            (pointer, pressed_piece(pointer), grip_at(pointer))
         });
 
         if response.double_clicked() && clicked_piece.is_none() {
@@ -621,7 +686,7 @@ impl PieceOffApp {
                 self.selected_pieces.clear();
             }
         }
-        if let Some((pointer, piece_id)) = drag_start {
+        if let Some((pointer, piece_id, grip)) = drag_start {
             let select_modifier = self.settings.mouse.select_modifier;
             let (pan_mode, control) = ui.input(|input| {
                 (
@@ -634,6 +699,19 @@ impl PieceOffApp {
             } else if pan_mode {
                 self.pan_drag_last = response.interact_pointer_pos();
                 self.dragging = None;
+            } else if let (Some(pointer), Some((holder_id, grip))) = (pointer, grip) {
+                if let Some(holder) = snapshot.holders.iter().find(|h| h.id == holder_id) {
+                    let origin = holder_rect(holder);
+                    self.holders.drag = Some(HolderDrag {
+                        holder_id,
+                        grip,
+                        start: view.to_board(pointer),
+                        origin,
+                        preview: origin,
+                    });
+                }
+            } else if let (Some(owner), Some(_)) = (piece_id.and_then(reserved_owner), pointer) {
+                self.status = format!("That piece is in {owner}'s holder.");
             } else if let (Some(pointer), Some(id)) = (pointer, piece_id) {
                 if control {
                     self.selected_pieces.insert(id);
@@ -650,13 +728,21 @@ impl PieceOffApp {
                     .filter_map(|piece_id| snapshot.piece(*piece_id))
                     .map(|piece| piece.group_id)
                     .collect();
+                let reserved = groups.iter().find_map(|group| {
+                    snapshot
+                        .reserved_from(*group, Some(&self.player_name))
+                        .map(|holder| holder.owner.clone())
+                });
                 let origins = snapshot
                     .pieces
                     .iter()
                     .filter(|piece| !piece.placed && groups.contains(&piece.group_id))
                     .map(|piece| (piece.id, piece.x, piece.y))
                     .collect::<Vec<_>>();
-                if let Some(piece) = snapshot.piece(id).filter(|_| !origins.is_empty()) {
+                if let Some(owner) = reserved {
+                    // The server would refuse the whole selection.
+                    self.status = format!("Part of that selection is in {owner}'s holder.");
+                } else if let Some(piece) = snapshot.piece(id).filter(|_| !origins.is_empty()) {
                     self.dragging = Some(ActiveDrag {
                         anchor_piece_id: id,
                         pointer_offset: pointer - view.to_screen(piece.x, piece.y),
@@ -675,7 +761,11 @@ impl PieceOffApp {
             }
         }
         if response.dragged() {
-            if let (Some(marquee), Some(pointer)) =
+            if let (Some(drag), Some(pointer)) =
+                (self.holders.drag.as_mut(), response.interact_pointer_pos())
+            {
+                drag.preview = holder_drag_preview(drag, view.to_board(pointer), cw, ch);
+            } else if let (Some(marquee), Some(pointer)) =
                 (self.marquee.as_mut(), response.interact_pointer_pos())
             {
                 marquee.1 = pointer;
@@ -729,6 +819,23 @@ impl PieceOffApp {
             }
         }
         if response.drag_stopped()
+            && let Some(drag) = self.holders.drag.take()
+            && drag.preview != drag.origin
+            && let Some(holder) = snapshot
+                .holders
+                .iter_mut()
+                .find(|holder| holder.id == drag.holder_id)
+        {
+            // Show it in the new spot now; a refusal comes back with a
+            // snapshot that puts it back.
+            let sent = holder.clone();
+            holder.x = drag.preview.min.x;
+            holder.y = drag.preview.min.y;
+            holder.width = drag.preview.width();
+            holder.height = drag.preview.height();
+            self.send_holder_update(&sent, drag.preview, sent.label.clone());
+        }
+        if response.drag_stopped()
             && let Some((start, mut end)) = self.marquee.take()
         {
             if let Some(pointer) = response.interact_pointer_pos() {
@@ -742,7 +849,12 @@ impl PieceOffApp {
                 area,
                 self.client_id.as_deref(),
             );
-            self.selected_pieces.extend(hits);
+            let me = self.player_name.clone();
+            self.selected_pieces.extend(hits.into_iter().filter(|id| {
+                snapshot.piece(*id).is_some_and(|piece| {
+                    snapshot.reserved_from(piece.group_id, Some(&me)).is_none()
+                })
+            }));
         }
         if response.drag_stopped()
             && self.pan_drag_last.take().is_none()
@@ -788,8 +900,21 @@ impl PieceOffApp {
                 egui::StrokeKind::Inside,
             );
         }
-        if self.dragging.is_some() || self.pan_drag_last.is_some() || self.button_panning {
+        let holder_grip = self
+            .holders
+            .drag
+            .as_ref()
+            .map(|drag| drag.grip)
+            .or(hovered_grip.map(|(_, grip)| grip));
+        if let Some(grip) = holder_grip {
+            ui.ctx().set_cursor_icon(match grip {
+                HolderGrip::Move => egui::CursorIcon::Move,
+                HolderGrip::Resize => egui::CursorIcon::ResizeNwSe,
+            });
+        } else if self.dragging.is_some() || self.pan_drag_last.is_some() || self.button_panning {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if hovered_reserved.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
         } else if hovered_piece.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
@@ -908,6 +1033,14 @@ impl PieceOffApp {
         }
         if !self.snap_flashes.is_empty() {
             ui.ctx().request_repaint();
+        }
+        if let (Some(owner), Some(pointer)) = (&hovered_reserved, response.hover_pos()) {
+            paint_pill(
+                &painter,
+                pointer + Vec2::new(0.0, 22.0),
+                &format!("🔒 In {owner}'s holder"),
+                Color32::WHITE,
+            );
         }
 
         // Live cursors: ours goes out while it is over the table and this

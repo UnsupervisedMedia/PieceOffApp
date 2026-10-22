@@ -358,6 +358,7 @@ impl PieceOffApp {
                     pieces,
                     revision,
                     stats,
+                    holders,
                 } => {
                     let is_host = self.is_host();
                     let mut restarted = false;
@@ -370,6 +371,9 @@ impl PieceOffApp {
                             snapshot.revision = revision;
                             if let Some(stats) = stats {
                                 snapshot.stats = stats;
+                            }
+                            if let Some(holders) = holders {
+                                snapshot.holders = holders;
                             }
                             let everything = pieces.len() == snapshot.pieces.len();
                             for piece in pieces {
