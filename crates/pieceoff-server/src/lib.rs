@@ -715,22 +715,14 @@ async fn media_storage_used_bytes(directory: &Path) -> std::io::Result<u64> {
 async fn mark_item_available(state: &AppState, room: &Arc<RoomRecord>, sha256: &str) {
     let changed = {
         let mut runtime = room.runtime.lock().await;
-        if let Some(snapshot) = runtime.snapshot.as_mut() {
-            for item in &mut snapshot.queue {
-                if item.sha256 == sha256 {
-                    item.available = true;
-                }
+        match runtime.mark_item_available(sha256) {
+            Some(snapshot) => {
+                // Sent under the lock, in revision order with every other event
+                // (see `dispatch`).
+                let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+                true
             }
-            snapshot.sync_current_mirror();
-            snapshot.revision = snapshot.revision.saturating_add(1);
-            // Sent under the lock, in revision order with every other event
-            // (see `dispatch`).
-            let _ = room.events.send(ServerMessage::Snapshot {
-                snapshot: snapshot.clone(),
-            });
-            true
-        } else {
-            false
+            None => false,
         }
     };
     if changed {
