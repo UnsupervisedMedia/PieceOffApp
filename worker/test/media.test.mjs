@@ -35,12 +35,12 @@ describe("room media", () => {
   const api = (code, suffix, init = {}) =>
     fetch(`http://127.0.0.1:${port}/api/rooms/${code}/media${suffix}`, init);
 
-  async function hostedRoom() {
+  async function hostedRoom(sha = FILE_SHA) {
     const { code, resume_token: hostToken } = await createRoom(port, {
-      media_sha256: FILE_SHA,
+      media_sha256: sha,
     });
     const host = await connect(port, code);
-    host.send(joinMessage(code, "Host", hostToken, FILE_SHA));
+    host.send(joinMessage(code, "Host", hostToken, sha));
     const welcome = await host.next(ofType("welcome"), "host welcome");
     assert.ok(welcome.media_upload_token, "host is given the upload token");
     return { code, host, hostToken, uploadToken: welcome.media_upload_token };
@@ -148,6 +148,19 @@ describe("room media", () => {
     assert.equal(ranged.headers.get("content-range"), `bytes 5-9/${FILE.length}`);
     assert.deepEqual(Buffer.from(await ranged.arrayBuffer()), FILE.subarray(5, 10));
 
+    // Unusable or unsatisfiable ranges: ignored (full body) or 416, never a wrong slice.
+    const ignored = await api(code, `/${FILE_SHA}`, {
+      headers: { ...bearer(hostToken), range: "bytes=abc" },
+    });
+    assert.equal(ignored.status, 200);
+    assert.equal((await ignored.arrayBuffer()).byteLength, FILE.length);
+    for (const range of [`bytes=${FILE.length + 5}-${FILE.length + 9}`, "bytes=-0"]) {
+      const unsat = await api(code, `/${FILE_SHA}`, { headers: { ...bearer(hostToken), range } });
+      assert.equal(unsat.status, 416, range);
+      assert.equal(unsat.headers.get("content-range"), `bytes */${FILE.length}`);
+      await unsat.arrayBuffer();
+    }
+
     // Another room's player cannot read this room's media.
     const other = await createRoom(port);
     const cross = await api(code, `/${FILE_SHA}`, { headers: bearer(other.resume_token) });
@@ -166,6 +179,23 @@ describe("room media", () => {
       const host = await connect(smallPort, code);
       host.send(joinMessage(code, "Host", resume_token, FILE_SHA));
       const { media_upload_token: token } = await host.next(ofType("welcome"), "welcome");
+      const queueMedia = async (sha256) => {
+        host.send({
+          type: "queue_add",
+          sha256,
+          extension: "mp4",
+          title: "More",
+          width: 640,
+          height: 360,
+          duration_ms: 5000,
+        });
+        await host.next(
+          (f) => f.type === "snapshot" && f.snapshot.queue.some((i) => i.sha256 === sha256),
+          `queue ${sha256.slice(0, 4)}`,
+        );
+      };
+      await queueMedia("b".repeat(64));
+      await queueMedia("c".repeat(64));
       const start = (sha256, size) =>
         fetch(`http://127.0.0.1:${smallPort}/api/rooms/${code}/media`, {
           method: "POST",
@@ -196,5 +226,118 @@ describe("room media", () => {
     const unknownRoom = await api("ZZZZZZZZ", "", { method: "POST", body: "{}" });
     assert.ok([403, 404].includes(unknownRoom.status));
     host.close();
+  });
+});
+
+describe("upload recovery and limits", () => {
+  const SMALL = randomBytes(6 * MIB); // two parts: 5 MiB and 1 MiB
+  const SMALL_SHA = createHash("sha256").update(SMALL).digest("hex");
+  const smallPart = (n) => SMALL.subarray((n - 1) * PART, Math.min(n * PART, SMALL.length));
+  let port;
+  let dir;
+  let server;
+
+  before(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "pieceoff-media-recover-"));
+    port = await freePort();
+    server = await startServer(port, dir, { ROOM_MEDIA_QUOTA_BYTES: 16 * MIB });
+  });
+  after(async () => {
+    await server?.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const call = (code, suffix, init = {}) =>
+    fetch(`http://127.0.0.1:${port}/api/rooms/${code}/media${suffix}`, init);
+
+  async function room(sha = SMALL_SHA) {
+    const { code, resume_token } = await createRoom(port, { media_sha256: sha });
+    const host = await connect(port, code);
+    host.send(joinMessage(code, "Host", resume_token, sha));
+    const welcome = await host.next(ofType("welcome"), "welcome");
+    const token = welcome.media_upload_token;
+    const start = async (size = SMALL.length, shaToStart = sha) =>
+      (
+        await call(code, "", {
+          method: "POST",
+          headers: { ...bearer(token), "content-type": "application/json" },
+          body: JSON.stringify({ sha256: shaToStart, size, part_size: PART }),
+        })
+      ).json();
+    const put = (uploadId, n, bytes, claimed = hex(bytes)) =>
+      call(code, `/${uploadId}/parts/${n}`, {
+        method: "PUT",
+        headers: { ...bearer(token), "x-part-sha256": claimed },
+        body: bytes,
+      });
+    const complete = (uploadId) =>
+      call(code, `/${uploadId}/complete`, { method: "POST", headers: bearer(token) });
+    const status = async (uploadId) =>
+      (await call(code, `/${uploadId}`, { headers: bearer(token) })).json();
+    return { code, host, token, start, put, complete, status };
+  }
+
+  it("recovers when a re-sent part is rejected after it was recorded", async () => {
+    const r = await room();
+    const up = await r.start();
+    assert.equal((await r.put(up.upload_id, 1, smallPart(1))).status, 200);
+    // The bad re-send overwrites the stored bytes, so the old record is void.
+    assert.equal((await r.put(up.upload_id, 1, smallPart(1), "0".repeat(64))).status, 400);
+    assert.deepEqual((await r.status(up.upload_id)).missing, [1, 2]);
+    assert.equal((await r.put(up.upload_id, 1, smallPart(1))).status, 200);
+    assert.equal((await r.put(up.upload_id, 2, smallPart(2))).status, 200);
+    assert.equal((await r.complete(up.upload_id)).status, 200);
+    r.host.close();
+  });
+
+  it("does not let two sends of the same part corrupt the upload", async () => {
+    const r = await room();
+    const up = await r.start();
+    const both = await Promise.all([
+      r.put(up.upload_id, 1, smallPart(1)),
+      r.put(up.upload_id, 1, smallPart(1)),
+    ]);
+    const codes = both.map((x) => x.status).sort();
+    assert.ok(
+      JSON.stringify(codes) === "[200,200]" || JSON.stringify(codes) === "[200,409]",
+      `unexpected statuses ${codes}`,
+    );
+    // Whatever happened, finishing the upload works (re-send what is missing).
+    for (const n of (await r.status(up.upload_id)).missing) {
+      assert.equal((await r.put(up.upload_id, n, smallPart(n))).status, 200);
+    }
+    assert.equal((await r.complete(up.upload_id)).status, 200);
+    r.host.close();
+  });
+
+  it("lets the host abort an upload and get its quota back", async () => {
+    const big = randomBytes(12 * MIB);
+    const bigSha = hex(big);
+    const r = await room(bigSha);
+    const first = await r.start(big.length, bigSha);
+    assert.equal(first.part_count, 3);
+    const abort = await call(r.code, `/${first.upload_id}`, {
+      method: "DELETE",
+      headers: bearer(r.token),
+    });
+    assert.equal(abort.status, 200);
+    const gone = await call(r.code, `/${first.upload_id}`, { headers: bearer(r.token) });
+    assert.equal(gone.status, 404);
+    // 16 MiB quota: a second 12 MiB upload only fits because the first was aborted.
+    const again = await r.start(big.length, bigSha);
+    assert.equal(again.part_count, 3);
+    assert.notEqual(again.upload_id, first.upload_id);
+    r.host.close();
+  });
+
+  it("only accepts media that is waiting in the room's queue", async () => {
+    const r = await room();
+    const stray = await call(r.code, "", {
+      method: "POST",
+      headers: { ...bearer(r.token), "content-type": "application/json" },
+      body: JSON.stringify({ sha256: "d".repeat(64), size: 1000, part_size: 1000 }),
+    });
+    assert.equal(stray.status, 403);
+    r.host.close();
   });
 });

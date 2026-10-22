@@ -63,3 +63,34 @@ export async function verifyTurnstile(options: {
     return false;
   }
 }
+
+/**
+ * Rate-limit and socket-cap key for a client address. IPv4 is used as is; an
+ * IPv6 client typically controls a whole /64, so those share one key.
+ */
+export function ipKey(ip: string): string {
+  if (!ip.includes(":")) return ip;
+  const [head = "", tail = ""] = ip.toLowerCase().split("::");
+  const groups = head === "" ? [] : head.split(":");
+  const rest = tail === "" ? [] : tail.split(":");
+  const missing = 8 - groups.length - rest.length;
+  const full = ip.includes("::") ? [...groups, ...Array(Math.max(0, missing)).fill("0"), ...rest] : groups;
+  const first4 = full.slice(0, 4).map((g) => (g === "" ? "0" : g.replace(/^0+(?=.)/, "")));
+  while (first4.length < 4) first4.push("0");
+  return `${first4.join(":")}::/64`;
+}
+
+/**
+ * Only a loopback address may replace Cloudflare's siteverify endpoint (the
+ * tests point it at a local stand-in). Anything else is ignored, so a stray
+ * setting can never send the Turnstile secret to another host.
+ */
+export function trustedVerifyUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    const host = new URL(url).hostname;
+    return host === "127.0.0.1" || host === "localhost" ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}

@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { parseRange } from "./range";
 
 const SHA256_RE = /^[0-9a-fA-F]{64}$/;
 const UUID_RE = /^[0-9a-f-]{36}$/;
@@ -30,6 +31,7 @@ function hex(buffer: ArrayBuffer): string {
  *   GET    "/<uploadId>"               which parts are missing
  *   PUT    "/<uploadId>/parts/<n>"     stream one part   (x-part-sha256 header)
  *   POST   "/<uploadId>/complete"      finish
+ *   DELETE "/<uploadId>"               abort and free its quota
  *   GET    "/<sha256>"                 download, honours Range
  * Uploads authenticate with the host's upload token, downloads with any
  * player's resume token, both as `Authorization: Bearer`.
@@ -82,6 +84,11 @@ export async function handleMedia(
     return json({ part_count: status.partCount, part_size: status.partSize, missing: status.missing });
   }
 
+  if (segments.length === 1 && request.method === "DELETE") {
+    const aborted = await stub.abortUpload(token, uploadId);
+    return aborted.ok ? json({ ok: true }) : failure(aborted);
+  }
+
   if (segments.length === 2 && segments[1] === "complete" && request.method === "POST") {
     const done = await stub.completeUpload(token, uploadId);
     return done.ok ? json({ ok: true }) : failure(done);
@@ -111,31 +118,46 @@ async function putPart(
   const target = await stub.preparePart(token, uploadId, n, size);
   if (!target.ok) return failure(target);
 
-  // One branch is hashed, the other goes to R2 as a fixed-length stream; the
-  // part is never held in memory. A hash mismatch leaves the stored bytes in
-  // place, but they are not recorded, and re-sending the part replaces them.
-  const [forHash, forStore] = request.body.tee();
+  // One pass over the body: each chunk is hashed and then handed on to R2 as a
+  // fixed-length stream, so back-pressure reaches the client and a part is
+  // never held in memory. R2 stores the bytes before the hash is compared, so
+  // a mismatch leaves a bad part there; the Durable Object has already voided
+  // its record of this part and a re-send replaces it.
   const digest = new crypto.DigestStream("SHA-256");
+  const digestWriter = digest.getWriter();
   const fixed = new FixedLengthStream(size);
+  const hashAndForward = new TransformStream<Uint8Array, Uint8Array>({
+    async transform(chunk, controller) {
+      await digestWriter.write(chunk);
+      controller.enqueue(chunk);
+    },
+    async flush() {
+      await digestWriter.close();
+    },
+  });
+  const piping = request.body.pipeThrough(hashAndForward).pipeTo(fixed.writable);
+  piping.catch(() => undefined); // surfaced through uploadPart; avoid an unhandled rejection
+  let recorded = false;
   try {
-    const hashing = forHash.pipeTo(digest);
-    const piping = forStore.pipeTo(fixed.writable);
     const stored = await env.MEDIA.resumeMultipartUpload(target.key, target.r2UploadId).uploadPart(
       n,
       fixed.readable,
     );
-    await Promise.all([hashing, piping]);
+    await piping;
     const actual = hex(await digest.digest);
     if (actual !== claimed) return json({ error: "Part hash mismatch" }, 400);
-    const recorded = await stub.recordUploadedPart(token, uploadId, n, {
+    const result = await stub.recordUploadedPart(token, uploadId, n, {
       hash: actual,
       size,
       etag: stored.etag,
     });
-    return recorded.ok ? json({ missing: recorded.missing }) : failure(recorded);
+    recorded = result.ok;
+    return result.ok ? json({ missing: result.missing }) : failure(result);
   } catch (error) {
     console.error("part upload failed", String(error));
     return json({ error: "Part upload failed" }, 502);
+  } finally {
+    if (!recorded) await stub.releasePart(token, uploadId, n).catch(() => undefined);
   }
 }
 
@@ -148,26 +170,32 @@ async function download(
 ): Promise<Response> {
   const target = await stub.authorizeDownload(token, sha256);
   if (!target.ok) return failure(target);
-  const wantsRange = request.headers.has("range");
-  const object = await env.MEDIA.get(target.key, wantsRange ? { range: request.headers } : undefined);
-  if (object === null) return json({ error: "No such media" }, 404);
+  const size = target.size;
+  const decision = parseRange(request.headers.get("range"), size);
   const headers = new Headers({
     "content-type": "application/octet-stream",
     "accept-ranges": "bytes",
     "cache-control": "private, no-store",
-    etag: object.httpEtag,
   });
+  if (decision.kind === "unsatisfiable") {
+    headers.set("content-range", `bytes */${size}`);
+    return new Response(null, { status: 416, headers });
+  }
+  const object =
+    decision.kind === "range"
+      ? await env.MEDIA.get(target.key, {
+          range: { offset: decision.start, length: decision.end - decision.start + 1 },
+        })
+      : await env.MEDIA.get(target.key);
+  if (object === null) return json({ error: "No such media" }, 404);
+  headers.set("etag", object.httpEtag);
   let status = 200;
-  let length = object.size;
-  const range = object.range;
-  if (wantsRange && range !== undefined) {
-    let offset = 0;
-    if ("suffix" in range && range.suffix !== undefined) offset = Math.max(0, object.size - range.suffix);
-    else if ("offset" in range && range.offset !== undefined) offset = range.offset;
-    length = "length" in range && range.length !== undefined ? range.length : object.size - offset;
-    headers.set("content-range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
+  let length = size;
+  if (decision.kind === "range") {
+    length = decision.end - decision.start + 1;
+    headers.set("content-range", `bytes ${decision.start}-${decision.end}/${size}`);
     status = 206;
   }
   headers.set("content-length", String(length));
-  return new Response("body" in object ? object.body : null, { status, headers });
+  return new Response(object.body, { status, headers });
 }

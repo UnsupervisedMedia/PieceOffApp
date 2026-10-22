@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { handleMedia } from "./media";
 import { RoomDO } from "./room";
-import { originAllowed, verifyTurnstile } from "./security";
+import { ipKey, originAllowed, trustedVerifyUrl, verifyTurnstile } from "./security";
 
 export { RoomDO };
 
@@ -24,7 +24,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 function clientIp(request: Request): string {
-  return request.headers.get("cf-connecting-ip") ?? "local";
+  return ipKey(request.headers.get("cf-connecting-ip") ?? "local");
 }
 
 /** Browser origins must be this site or listed; native clients send none. */
@@ -49,7 +49,7 @@ async function checkCreateAllowed(request: Request, env: Env): Promise<Response 
       secret: env.TURNSTILE_SECRET,
       token: request.headers.get("x-turnstile-token") ?? "",
       ip: ip === "local" ? "" : ip,
-      url: env.TURNSTILE_VERIFY_URL,
+      url: trustedVerifyUrl(env.TURNSTILE_VERIFY_URL),
     });
     return ok ? null : json({ error: "Verification failed" }, 403);
   }

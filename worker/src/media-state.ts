@@ -44,6 +44,8 @@ export type Planned = { ok: true; partCount: number } | Failure;
 
 const SHA256_RE = /^[0-9a-fA-F]{64}$/;
 
+export const isSha256 = (value: string): boolean => SHA256_RE.test(value);
+
 const fail = (status: number, error: string): Failure => ({ ok: false, status, error });
 
 export function planUpload(

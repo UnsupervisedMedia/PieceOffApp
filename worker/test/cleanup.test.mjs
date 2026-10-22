@@ -94,6 +94,19 @@ describe("room cleanup", () => {
       { method: "POST", headers: bearer(token) },
     );
     assert.equal(done.status, 200);
+    host.send({
+      type: "queue_add",
+      sha256: hex(partial),
+      extension: "mp4",
+      title: "Second",
+      width: 640,
+      height: 360,
+      duration_ms: 5000,
+    });
+    await host.next(
+      (f) => f.type === "snapshot" && f.snapshot.queue.some((i) => i.sha256 === hex(partial)),
+      "second item queued",
+    );
     const second = await startUpload(code, token, hex(partial), partial.length);
     assert.equal((await putPart(code, token, second.upload_id, partial)).status, 200);
     assert.ok((await blobCount(dir)) >= 2, "media bytes are stored");
@@ -119,5 +132,45 @@ describe("room cleanup", () => {
       headers: bearer(hostToken),
     });
     assert.ok([403, 404].includes(gone.status), `media is gone (${gone.status})`);
+  });
+});
+
+describe("room cleanup retries", () => {
+  it("finishes deleting a room after a transient R2 failure", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pieceoff-cleanup-retry-"));
+    const retryPort = await freePort();
+    const retryServer = await startServer(retryPort, dir, {
+      FLUSH_MS: 300,
+      IDLE_CLEANUP_MS: 1500,
+      FAIL_R2_DELETE_ONCE: 1,
+    });
+    try {
+      const bytes = randomBytes(1024 * 1024);
+      const sha = hex(bytes);
+      const { code, resume_token } = await createRoom(retryPort, { media_sha256: sha });
+      const host = await connect(retryPort, code);
+      host.send(joinMessage(code, "Host", resume_token, sha));
+      const { media_upload_token: token } = await host.next(ofType("welcome"), "welcome");
+      const base = `http://127.0.0.1:${retryPort}/api/rooms/${code}/media`;
+      const started = await fetch(base, {
+        method: "POST",
+        headers: { ...bearer(token), "content-type": "application/json" },
+        body: JSON.stringify({ sha256: sha, size: bytes.length, part_size: bytes.length }),
+      }).then((r) => r.json());
+      await fetch(`${base}/${started.upload_id}/parts/1`, {
+        method: "PUT",
+        headers: { ...bearer(token), "x-part-sha256": sha },
+        body: bytes,
+      });
+      await fetch(`${base}/${started.upload_id}/complete`, { method: "POST", headers: bearer(token) });
+      assert.ok((await blobCount(dir)) >= 1);
+      host.close();
+      // The first deletion attempt fails on purpose; the retry must finish the job.
+      await waitFor(async () => !(await roomExists(retryPort, code)), "room to disappear", 40000);
+      await waitFor(async () => (await blobCount(dir)) === 0, "R2 objects to be deleted", 40000);
+    } finally {
+      await retryServer.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

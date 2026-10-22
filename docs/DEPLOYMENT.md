@@ -172,7 +172,15 @@ Media (`/api/rooms/<CODE>/media...`, bearer tokens in `Authorization`):
 | `GET /media/<upload_id>` | upload token | Which parts are missing |
 | `PUT /media/<upload_id>/parts/<n>` | upload token | Stream one part; `x-part-sha256` and `Content-Length` required, hash verified while streaming |
 | `POST /media/<upload_id>/complete` | upload token | Finish; refused with the missing parts if incomplete |
+| `DELETE /media/<upload_id>` | upload token | Abort: frees the R2 parts and the reserved quota |
 | `GET /media/<sha256>` | any player's resume token | Download, honours `Range` |
+
+Only media already waiting in the room's queue (a `queue_add` item that is not
+yet available) can be uploaded. One send per part at a time: a second
+simultaneous send of the same part gets 409, and sending a part again voids the
+earlier copy until the new one is verified, so a rejected re-send simply shows
+the part as missing again. Downloads parse a single `bytes=` range; anything
+unusable is ignored (full body) and an unsatisfiable range gets 416.
 
 Objects live at `room/<room id>/<sha256>` in R2. All parts but the last must be
 the declared part size (R2 needs 5 MiB minimum, up to 10,000 parts). The upload
