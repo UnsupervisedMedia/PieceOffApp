@@ -23,12 +23,12 @@ Part of the normal process: `scripts/check.sh` runs fmt, clippy, the tests, and
 a `cargo check --all-targets` for `x86_64-pc-windows-gnu`, so a change that only
 breaks Windows is caught before a push. `scripts/check.sh --bundle` also
 assembles the Windows zip, and `scripts/bundle-windows-cross.sh` does just that:
-`dist/PieceOff-<version>-win64-gnu.zip` with both `.exe` files, the pinned
-Windows FFmpeg, licenses, docs, `pieceoff.ps1` and `START-HERE.txt`. Windows
+`dist/PieceOff-<version>-win64-gnu.zip` with both `.exe` files, a cross-built
+Windows FFmpeg with its source, licenses, docs, `pieceoff.ps1` and `START-HERE.txt`. Windows
 artifacts build in `target/windows` (`PIECEOFF_WINDOWS_TARGET_DIR` overrides).
 
 ```sh
-sudo apt-get install gcc-mingw-w64-x86-64 zip
+sudo apt-get install gcc-mingw-w64-x86-64 zip nasm
 rustup target add x86_64-pc-windows-gnu
 scripts/check.sh --bundle
 ```
@@ -43,35 +43,37 @@ Windows x86_64, macOS Apple silicon, and macOS Intel when a `v*` tag is pushed.
 The tag must equal `v` plus the version in `crates/pieceoff-app/Cargo.toml`. The
 workflow uploads the archives, a `SHA256SUMS.txt`, a build-provenance
 attestation, and a **draft** release for a maintainer to review and publish.
-Bundles exclude FFmpeg; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
+Bundles include a basic FFmpeg and its corresponding source; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
 (`workflow_dispatch`) to build bundles without publishing.
 
 ## Assemble a release bundle
 
 ```sh
-scripts/bundle.sh                # Linux/macOS bundle; users install FFmpeg separately
-.\scripts\bundle.ps1           # Windows bundle
+scripts/bundle.sh                # Linux/macOS bundle, with FFmpeg built from source
+.\scripts\bundle.ps1 -FfmpegStage dist/ffmpeg-stage   # Windows bundle (see below)
 ```
 
 The script builds release binaries and includes both the dependency license
-inventory and full third-party notices. FFmpeg is excluded by default. To bundle it,
-stage the complete corresponding source/build-material archive for that exact
-pin and set `PIECEOFF_FFMPEG_SOURCE_ARCHIVE`; the script places the archive
-and checksum beside FFmpeg. It refuses to create an FFmpeg bundle without the
-source materials; explicitly pass `--with-ffmpeg` (PowerShell:
-`-WithFfmpeg`). See [FFmpeg](FFMPEG.md) for required contents and release
-checks. Without FFmpeg, video/audio features require users to install it separately.
+inventory and full third-party notices. A basic FFmpeg (without H.264/HEVC/AAC) is included by default:
+`scripts/build-ffmpeg.sh` builds it from the pinned upstream release
+(`packaging/ffmpeg-source.txt`) and stages `ffmpeg/` and `source/` (the
+pristine tarballs, signatures, checksums, and the build script), which the
+bundle scripts copy in. A first build takes a few minutes and needs a C
+toolchain, `make`, and `nasm` on x86. Pass `--no-ffmpeg` (PowerShell:
+`-NoFfmpeg`) to leave it out. On Windows, build FFmpeg first in an MSYS2
+MINGW64 shell (`scripts/build-ffmpeg.sh win64 dist/ffmpeg-stage`) and pass that
+folder as `-FfmpegStage`; the release workflow does the same. See
+[FFmpeg](FFMPEG.md) for the license and update procedure.
 
 The bundle includes `pieceoff.sh` (or `pieceoff.ps1` on Windows), which starts
 and stops the app and local room server together. The room host runs the
-server; every participant runs the app. Without a bundled FFmpeg, install it
-with `ffmpeg` and `ffprobe` on `PATH` for video and
+server; every participant runs the app. Release bundles carry their own basic
+FFmpeg (the app offers a full one on demand); source builds need `ffmpeg` and `ffprobe` on `PATH` for video and
 animated APNG/GIF puzzles; source audio plays through the system audio device.
 Animated WebP uses the native Rust image decoder. Video files can use
 MP4, M4V, MOV, MKV, WebM, AVI, MPEG, OGV, FLV, 3GP, WMV, TS, MTS, or M2TS
 containers when the installed FFmpeg build includes their codecs. Building on Linux needs the ALSA development headers. Source builds do not bundle
-FFmpeg or codecs; release bundles include it only when its required source
-archive is supplied (see above). Video frames are decoded at source size up to 1920×1080 and
+FFmpeg or codecs; release bundles include the FFmpeg described in [FFMPEG.md](FFMPEG.md). Video frames are decoded at source size up to 1920×1080 and
 downscaled above that ceiling to keep texture and frame-buffer memory bounded;
 the original file is preserved for upload and puzzle packages.
 Imported media is limited to 8192 pixels per side and 40 megapixels total.

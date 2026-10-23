@@ -133,10 +133,13 @@ Still images and animated WebP use the native Rust image decoder. Video and
 animated APNG/GIF use FFmpeg. Common video formats include MP4, MOV, MKV,
 WebM, AVI, MPEG, OGV, FLV, 3GP, WMV, TS, MTS, and M2TS.
 
-FFmpeg is an external tool and is not included in the default release bundles.
-Install `ffmpeg` and `ffprobe`, place them beside the app, or select their
-location under **Media tools**. See [FFmpeg distribution notes](docs/FFMPEG.md)
-before changing bundle behavior.
+Release bundles include an LGPL FFmpeg in `ffmpeg/` (with its source in
+`source/`) that plays VP8/VP9, Opus, MP3 and the like but leaves out the
+patent-encumbered H.264, HEVC and AAC decoders. When you open a video that needs
+them, PieceOff asks, then downloads a full FFmpeg from a third party in one click
+(**Media tools** also has the button). Source builds include no FFmpeg: install
+`ffmpeg` and `ffprobe`, place them beside the app, or select their location under
+**Media tools**. See [FFmpeg distribution notes](docs/FFMPEG.md).
 
 The server accepts files up to 16 GiB by default, with a 50 GiB aggregate media
 quota. Both limits are configurable. Downloads resume after interruption.

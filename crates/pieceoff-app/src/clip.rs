@@ -2,7 +2,7 @@
 //! short loop (with a live animated preview) before a room is created. Cutting
 //! and previewing happen with FFmpeg off the UI thread.
 
-use crate::media_tools::{self, VideoEncoder};
+use crate::media_tools::{self, AudioEncoder, VideoEncoder};
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::{
     ffi::OsString,
@@ -111,8 +111,9 @@ impl ClipPlan {
         let ctx = ctx.clone();
         thread::spawn(move || {
             // Which encoders exist depends on the FFmpeg build, so ask it.
-            let encoder = VideoEncoder::choose(&media_tools::ffmpeg());
-            let args = clip_ffmpeg_args(&source, &output, start_ms, length_ms, audio, encoder);
+            let names = media_tools::encoder_names(&media_tools::ffmpeg());
+            let encoders = (VideoEncoder::best_of(&names), AudioEncoder::best_of(&names));
+            let args = clip_ffmpeg_args(&source, &output, start_ms, length_ms, audio, encoders);
             let _ = tx.send(run_clip_encode(args, output));
             ctx.request_repaint();
         });
@@ -501,7 +502,7 @@ fn clip_ffmpeg_args(
     start_ms: u64,
     length_ms: u64,
     audio: bool,
-    encoder: VideoEncoder,
+    (encoder, audio_encoder): (VideoEncoder, AudioEncoder),
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "-v".into(),
@@ -517,7 +518,8 @@ fn clip_ffmpeg_args(
         "0:v:0".into(),
     ];
     if audio {
-        args.extend(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k"].map(OsString::from));
+        args.extend(["-map", "0:a:0?"].map(OsString::from));
+        args.extend(audio_encoder.args().into_iter().map(OsString::from));
     } else {
         args.push("-an".into());
     }
@@ -581,7 +583,7 @@ fn grab_frame(source: &Path, at_ms: u64) -> Result<ColorImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use media_tools::VideoEncoder;
+    use media_tools::{AudioEncoder, VideoEncoder};
 
     #[test]
     fn clock_formats_minutes_and_hours() {
@@ -628,7 +630,7 @@ mod tests {
             12_500,
             10_000,
             true,
-            VideoEncoder::X264,
+            (VideoEncoder::X264, AudioEncoder::Opus),
         );
         let text: Vec<_> = with_audio
             .iter()
@@ -637,13 +639,14 @@ mod tests {
         assert!(text.windows(2).any(|w| w == ["-ss", "12.500"]));
         assert!(text.windows(2).any(|w| w == ["-t", "10.000"]));
         assert!(text.contains(&"0:a:0?".to_owned()));
+        assert!(text.windows(2).any(|w| w == ["-c:a", "opus"]));
         let silent = clip_ffmpeg_args(
             Path::new("a.mkv"),
             Path::new("o.mp4"),
             0,
             5_000,
             false,
-            VideoEncoder::Mpeg4,
+            (VideoEncoder::Mpeg4, AudioEncoder::Aac),
         );
         assert!(silent.iter().any(|a| a == "-an"));
     }
@@ -673,14 +676,10 @@ mod tests {
             return; // FFmpeg unavailable
         }
         let output = dir.join("out.mp4");
-        let args = clip_ffmpeg_args(
-            &source,
-            &output,
-            1_000,
-            3_000,
-            false,
-            VideoEncoder::choose(&media_tools::ffmpeg()),
-        );
+        let args = clip_ffmpeg_args(&source, &output, 1_000, 3_000, false, {
+            let names = media_tools::encoder_names(&media_tools::ffmpeg());
+            (VideoEncoder::best_of(&names), AudioEncoder::best_of(&names))
+        });
         run_clip_encode(args, output.clone()).unwrap();
         assert!(std::fs::metadata(&output).unwrap().len() > 0);
         let frame = grab_frame(&source, 2_000).unwrap();

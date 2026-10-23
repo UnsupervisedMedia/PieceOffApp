@@ -20,7 +20,7 @@
 | Diagnostics | `tracing` | Media pipeline and frame timing diagnostics. |
 | Build/release | Cargo, rustfmt, Clippy, GitHub Actions compile/test matrix, OS native packaging | Linux launcher and server health smoke test pass. The Windows GNU workspace builds locally; only the core crate has been checked for macOS. Native Windows/macOS launches and installers remain release work. |
 
-The Rust stack is in Cargo.toml and Cargo.lock. FFmpeg is an external executable and is optional in release bundles. Verify exact crate and FFmpeg distribution licenses and native packaging requirements before release. Avoid treating a crate's Rust license as covering bundled codec plugins or example media.
+The Rust stack is in Cargo.toml and Cargo.lock. FFmpeg is an external executable; release bundles include an LGPL build with its corresponding source (docs/FFMPEG.md). Verify exact crate and FFmpeg distribution licenses and native packaging requirements before release. Avoid treating a crate's Rust license as covering bundled codec plugins or example media.
 
 ## Video rendering model
 

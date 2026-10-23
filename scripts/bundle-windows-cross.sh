@@ -1,27 +1,28 @@
 #!/bin/sh
 # Cross-build the Windows (x86_64 GNU) bundle from Linux: app and server .exe,
-# optional Windows FFmpeg, license notices, docs, and a launcher, packed into
+# Windows FFmpeg (cross-built by scripts/build-ffmpeg.sh) with its source,
+# license notices, docs, and a launcher, packed into
 # dist/PieceOff-<version>-win64-gnu.zip.
 #
-#   scripts/bundle-windows-cross.sh [--with-ffmpeg] [--skip-build]
+#   scripts/bundle-windows-cross.sh [--no-ffmpeg] [--skip-build]
 #
 # This proves the tree compiles and links for Windows and gives testers a zip.
 # It does not run anything: launch it on a real Windows machine before
 # calling Windows verified (docs/TESTING.md). Needs the x86_64-pc-windows-gnu
-# rustup target, mingw-w64 (x86_64-w64-mingw32-gcc), python3 and zip.
+# rustup target, mingw-w64 (x86_64-w64-mingw32-gcc), nasm, python3 and zip.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 TARGET=x86_64-pc-windows-gnu
-WITH_FFMPEG=no
+WITH_FFMPEG=yes
 BUILD=yes
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-ffmpeg) WITH_FFMPEG=no ;;
-    --with-ffmpeg) WITH_FFMPEG=yes ;;
+    --with-ffmpeg) WITH_FFMPEG=yes ;;  # the default; kept for old scripts
     --skip-build) BUILD=no ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -58,22 +59,10 @@ cp docs/PACKAGING.md docs/FFMPEG.md docs/TESTING.md docs/DEPLOYMENT.md docs/LICE
 sed "s/@VERSION@/$VERSION/" packaging/windows-START-HERE.txt >"$OUT/START-HERE.txt"
 
 if [ "$WITH_FFMPEG" = yes ]; then
-  SOURCE_ARCHIVE=${PIECEOFF_FFMPEG_SOURCE_ARCHIVE:-}
-  if [ -z "$SOURCE_ARCHIVE" ] || [ ! -f "$SOURCE_ARCHIVE" ]; then
-    echo "FFmpeg redistribution requires PIECEOFF_FFMPEG_SOURCE_ARCHIVE with the complete corresponding source/build materials; see docs/FFMPEG.md." >&2
-    echo "Omit --with-ffmpeg to make a bundle requiring users to install FFmpeg separately." >&2
-    exit 1
-  fi
-  case "$SOURCE_ARCHIVE" in
-    *.tar.xz) SOURCE_NAME=FFmpeg-corresponding-source.tar.xz ;;
-    *.tar.gz) SOURCE_NAME=FFmpeg-corresponding-source.tar.gz ;;
-    *.zip) SOURCE_NAME=FFmpeg-corresponding-source.zip ;;
-    *) echo "Source archive must end in .tar.xz, .tar.gz, or .zip." >&2; exit 1 ;;
-  esac
-  mkdir -p "$OUT/source"
-  cp "$SOURCE_ARCHIVE" "$OUT/source/$SOURCE_NAME"
-  (cd "$OUT/source" && sha256sum "$SOURCE_NAME" 2>/dev/null || shasum -a 256 "$SOURCE_NAME") >"$OUT/source/FFmpeg-corresponding-source.sha256"
-  "$ROOT/scripts/fetch-ffmpeg.sh" win64 "$OUT"
+  [ "${PIECEOFF_FFMPEG_NO_ASM:-0}" = 1 ] || need nasm "install nasm (the x86 FFmpeg build needs it)"
+  STAGE=${PIECEOFF_FFMPEG_STAGE:-$ROOT/dist/.ffmpeg-win64-cross}
+  "$ROOT/scripts/build-ffmpeg.sh" win64 "$STAGE"
+  cp -R "$STAGE/ffmpeg" "$STAGE/source" "$OUT/"
 fi
 python3 scripts/license-report.py "$OUT/THIRD_PARTY_LICENSES.txt"
 python3 scripts/third-party-notices.py "$OUT/THIRD_PARTY_NOTICES.txt"

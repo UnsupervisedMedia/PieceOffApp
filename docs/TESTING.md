@@ -8,8 +8,9 @@ HTTPS for media transfer automatically.
 
 1. Start `pieceoff-server` on the host machine.
 2. Open `pieceoff-app`, choose a short video or image, set the server address,
-   then create a room. For video and animated APNG/GIF, install FFmpeg tools
-   (`ffmpeg` and `ffprobe`) on each client. Animated WebP
+   then create a room. Release bundles carry a basic FFmpeg; for H.264/HEVC/AAC
+   video each client accepts the in-app codec install once (or, from a source
+   build, installs `ffmpeg` and `ffprobe`). Animated WebP
    and still images use the native Rust decoder.
    The row/column controls allow grids up to 400 pieces and limit each choice
    so the total stays within that cap.
@@ -230,3 +231,25 @@ Still needing people and an audio device:
 
 - Audible audio sync between two machines, and audio after seek/loop wrap.
 - Play on two real machines over a real network, on each operating system.
+
+## Manual: the in-app codec install (needs each OS)
+
+Run on every platform you ship; none of this is covered by automated tests
+beyond the manifest, download, and unpack unit tests in `codec_pack.rs`.
+
+1. Start from a release bundle with nothing on `PATH` and no `codecs` folder in
+   the app data directory. **You → Media tools** shows "Video codecs: H.264,
+   HEVC and AAC are not installed."
+2. Open an H.264 MP4. The consent window appears (host, size, license, patent
+   note). **Not now** leaves the video unloaded; **Open anyway** continues
+   without codecs.
+3. Open it again and choose **Install video codecs**. The progress bar moves,
+   **Cancel** stops cleanly (no `codecs.installing` folder left), and a second
+   attempt succeeds. The video then loads and plays with sound.
+4. Check `<data>/codecs/INSTALLED.txt` and that **Media tools** now says the
+   codecs are available; **Remove downloaded codecs** returns to step 1.
+5. Unplug the network and retry: a clear error, and the prompt stays open.
+6. Windows: SmartScreen and antivirus may inspect the downloaded `ffmpeg.exe`;
+   macOS: confirm the downloaded programs run without a Gatekeeper prompt
+   (they are fetched by the app, not a browser).
+`cargo test -p pieceoff-app -- --ignored real_pack` runs the real download.

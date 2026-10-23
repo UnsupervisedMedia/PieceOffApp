@@ -1,28 +1,30 @@
 #!/bin/sh
-# Assemble a release bundle for this machine: the app and server, license
-# notices, and docs, packed into dist/<name>.tar.gz. FFmpeg is excluded by default.
+# Assemble a release bundle for this machine: the app and server, FFmpeg with
+# its corresponding source, license notices, and docs, packed into
+# dist/<name>.tar.gz.
 #
-#   scripts/bundle.sh [--target linux64|linuxarm64|macos] [--with-ffmpeg]
+#   scripts/bundle.sh [--target linux64|linuxarm64|macos] [--no-ffmpeg]
 #                     [--skip-build] [--skip-verify]
 #
-# FFmpeg redistribution is opt-in and requires corresponding source materials
-# (see docs/FFMPEG.md). Windows uses scripts/bundle.ps1.
+# FFmpeg is built from source by scripts/build-ffmpeg.sh (see docs/FFMPEG.md);
+# set PIECEOFF_FFMPEG_STAGE to a folder it already filled to reuse that build.
+# Windows uses scripts/bundle.ps1.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 TARGET=
-WITH_FFMPEG=no
+WITH_FFMPEG=yes
 BUILD=yes
 VERIFY=yes
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) TARGET=${2:?--target needs a value}; shift ;;
     --no-ffmpeg) WITH_FFMPEG=no ;;
-    --with-ffmpeg) WITH_FFMPEG=yes ;;
+    --with-ffmpeg) WITH_FFMPEG=yes ;;  # the default; kept for old scripts
     --skip-build) BUILD=no ;;
     --skip-verify) VERIFY=no ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -55,52 +57,9 @@ cp README.md LICENSE CONTRIBUTING.md "$OUT/"
 cp docs/PACKAGING.md docs/FFMPEG.md docs/TESTING.md docs/DEPLOYMENT.md docs/LICENSING.md "$OUT/docs/" 2>/dev/null || true
 
 if [ "$WITH_FFMPEG" = yes ]; then
-  SOURCE_ARCHIVE=${PIECEOFF_FFMPEG_SOURCE_ARCHIVE:-}
-  if [ -z "$SOURCE_ARCHIVE" ] || [ ! -f "$SOURCE_ARCHIVE" ]; then
-    echo "FFmpeg redistribution requires a staged corresponding-source archive." >&2
-    echo "Set PIECEOFF_FFMPEG_SOURCE_ARCHIVE to the complete source/build-materials archive for this exact FFmpeg pin." >&2
-    echo "See docs/FFMPEG.md. Omit --with-ffmpeg to make a bundle requiring users to install FFmpeg separately." >&2
-    exit 1
-  fi
-  mkdir -p "$OUT/source"
-  case "$SOURCE_ARCHIVE" in
-    *.tar.xz) SOURCE_NAME=FFmpeg-corresponding-source.tar.xz ;;
-    *.tar.gz) SOURCE_NAME=FFmpeg-corresponding-source.tar.gz ;;
-    *.zip) SOURCE_NAME=FFmpeg-corresponding-source.zip ;;
-    *) echo "Source archive must end in .tar.xz, .tar.gz, or .zip." >&2; exit 1 ;;
-  esac
-  cp "$SOURCE_ARCHIVE" "$OUT/source/$SOURCE_NAME"
-  (cd "$OUT/source" && sha256sum "$SOURCE_NAME" 2>/dev/null || shasum -a 256 "$SOURCE_NAME") >"$OUT/source/FFmpeg-corresponding-source.sha256"
-  case "$TARGET" in
-    macos)
-      if [ -z "${FFMPEG_DIR:-}" ]; then
-        echo "macOS has no pinned FFmpeg: set FFMPEG_DIR to a folder with ffmpeg and ffprobe," >&2
-        echo "or omit --with-ffmpeg (see docs/FFMPEG.md)." >&2
-        exit 1
-      fi
-      mkdir -p "$OUT/ffmpeg"
-      cp "$FFMPEG_DIR/ffmpeg" "$FFMPEG_DIR/ffprobe" "$OUT/ffmpeg/"
-      LICENSE_FILE=
-      for license in LICENSE LICENSE.txt LICENSE-FFmpeg.txt; do
-        if [ -f "$FFMPEG_DIR/$license" ]; then
-          LICENSE_FILE=$FFMPEG_DIR/$license
-          break
-        fi
-      done
-      if [ -z "$LICENSE_FILE" ] || [ ! -f "$FFMPEG_DIR/FFMPEG-BUILD.txt" ]; then
-        echo "The macOS FFmpeg folder must contain its license text and an FFMPEG-BUILD.txt source/build notice." >&2
-        echo "See docs/FFMPEG.md for the required release information." >&2
-        exit 1
-      fi
-      cp "$LICENSE_FILE" "$OUT/ffmpeg/LICENSE-FFmpeg.txt"
-      cp "$FFMPEG_DIR/FFMPEG-BUILD.txt" "$OUT/ffmpeg/FFMPEG-BUILD.txt"
-      cat >>"$OUT/ffmpeg/FFMPEG-BUILD.txt" <<'INFO'
-
-PieceOff includes the source archive and its SHA-256 under ../source/.
-INFO
-      ;;
-    *) "$ROOT/scripts/fetch-ffmpeg.sh" "$TARGET" "$OUT" ;;
-  esac
+  STAGE=${PIECEOFF_FFMPEG_STAGE:-$ROOT/dist/.ffmpeg-$TARGET-$(uname -m)}
+  "$ROOT/scripts/build-ffmpeg.sh" "$TARGET" "$STAGE"
+  cp -R "$STAGE/ffmpeg" "$STAGE/source" "$OUT/"
 fi
 
 python3 scripts/license-report.py "$OUT/THIRD_PARTY_LICENSES.txt"

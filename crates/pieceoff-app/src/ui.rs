@@ -4,7 +4,7 @@ use eframe::egui::RichText;
 pub(crate) const ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
 pub(crate) const ACCENT_FILL: Color32 = Color32::from_rgb(37, 99, 235);
 pub(crate) const SUCCESS: Color32 = Color32::from_rgb(110, 220, 145);
-const WARNING: Color32 = Color32::from_rgb(245, 190, 80);
+pub(crate) const WARNING: Color32 = Color32::from_rgb(245, 190, 80);
 const DANGER: Color32 = Color32::from_rgb(240, 110, 110);
 const PANEL: Color32 = Color32::from_rgb(24, 27, 33);
 const CARD: Color32 = Color32::from_rgb(32, 36, 44);
@@ -893,6 +893,7 @@ impl PieceOffApp {
                 if missing {
                     ui.weak("Video puzzles need FFmpeg. Install it, or choose the folder that holds ffmpeg and ffprobe.");
                 }
+                self.codec_status_ui(ui);
                 ui.horizontal(|ui| {
                     if ui.button("Choose folder…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -1169,6 +1170,7 @@ impl PieceOffApp {
             self.refresh_tools();
         }
         self.poll_tools();
+        self.poll_codec_install(ctx);
         self.handle_video_shortcuts(ctx);
         self.handle_queue_shortcuts(ctx);
         self.handle_board_shortcuts(ctx);
@@ -1263,6 +1265,7 @@ impl PieceOffApp {
                     });
                 });
         }
+        self.codec_window(ctx);
         if self.help_open {
             self.help_window(ctx);
         }
