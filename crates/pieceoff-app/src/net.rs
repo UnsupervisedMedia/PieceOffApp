@@ -362,9 +362,12 @@ impl PieceOffApp {
                 } => {
                     let is_host = self.is_host();
                     let mut restarted = false;
+                    let mut effect = None;
                     if let Some(snapshot) = &mut self.snapshot {
                         if revision >= snapshot.revision {
                             let had_progress = snapshot.progress_percent() > 0;
+                            let was_complete = snapshot.completed();
+                            let change = piece_change(snapshot, &pieces);
                             snapshot.revision = revision;
                             if let Some(stats) = stats {
                                 snapshot.stats = stats;
@@ -377,7 +380,17 @@ impl PieceOffApp {
                             }
                             restarted =
                                 everything && had_progress && snapshot.progress_percent() == 0;
+                            effect = pieces_changed_effect(
+                                change,
+                                was_complete,
+                                snapshot.completed(),
+                                restarted,
+                            );
                         }
+                    }
+                    if let Some(effect) = effect {
+                        let now = ctx.input(|input| input.time);
+                        self.effects.play(effect, now);
                     }
                     if restarted {
                         self.chat.note("The puzzle was restarted");
@@ -429,6 +442,10 @@ impl PieceOffApp {
                 ServerMessage::CursorHidden { client_id } => self.cursors.hide(&client_id),
                 ServerMessage::Chat(line) => {
                     let own = self.client_id.clone();
+                    if own.as_deref() != Some(line.client_id.as_str()) {
+                        let now = ctx.input(|input| input.time);
+                        self.effects.play(Effect::Chat, now);
+                    }
                     self.chat.receive(line, own.as_deref());
                 }
                 ServerMessage::ChatHistory { lines } => {
@@ -437,6 +454,7 @@ impl PieceOffApp {
                 ServerMessage::Ping { name, x, y, .. } => {
                     let now = ctx.input(|input| input.time);
                     self.chat.add_ping(name, x, y, now);
+                    self.effects.play(Effect::Ping, now);
                     ctx.request_repaint();
                 }
                 ServerMessage::Error { message } => {

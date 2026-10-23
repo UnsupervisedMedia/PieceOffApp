@@ -39,7 +39,9 @@ the recording is silent.
 - **Work naturally with pieces.** Drag, snap, join, multi-select, and move
   linked groups. Pan and zoom around a shared board and a loose-piece tray.
 - **Talk while you puzzle.** Room chat in the corner of the board, and a
-  key that pings a spot on the table for everyone to see.
+  key that pings a spot on the table for everyone to see. Short synthesised
+  sounds mark snaps, joins, the finish, chat, and pings, with their own
+  volume under More.
 - **Race the clock.** A shared solve timer runs while anyone is in the room,
   and the finish card shows who placed how many pieces. The library keeps
   each puzzle's best time.
