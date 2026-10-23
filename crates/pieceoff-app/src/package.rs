@@ -152,6 +152,24 @@ pub(crate) fn upload_room_media(
             format_bytes(MAX_ROOM_MEDIA_BYTES)
         ));
     }
+    // Ask first whether the server already holds this asset: it answers
+    // without reading a body, so streaming one regardless ends in a broken
+    // pipe. Older servers treat the empty probe as a failed upload; carry on.
+    let probe = http_media_url(ws_url, &format!("/media/{sha256}?token={token}&probe=1"))?;
+    let held = media_upload_client(TransferTimeouts::DEFAULT)
+        .ok()
+        .and_then(|client| {
+            client
+                .put(probe)
+                .header(reqwest::header::CONTENT_LENGTH, 0)
+                .body(Vec::new())
+                .send()
+                .ok()
+        })
+        .is_some_and(|response| response.status() == reqwest::StatusCode::CREATED);
+    if held {
+        return Ok(());
+    }
     let url = http_media_url(ws_url, &format!("/media/{sha256}?token={token}"))?;
     UPLOAD_PROGRESS.begin(0, length);
     let result = media_upload_client(TransferTimeouts::DEFAULT).and_then(|client| {
@@ -339,7 +357,7 @@ pub(crate) fn download_room_media_with(
         drop(file);
         // On an interruption the partial file stays for the next attempt.
         result?;
-        if format!("{:x}", hasher.finalize()) != sha256 {
+        if hex(hasher.finalize()) != sha256 {
             let _ = std::fs::remove_file(&temporary);
             return Err("downloaded media failed its SHA-256 check".to_owned());
         }
@@ -370,7 +388,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex(hasher.finalize()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -436,7 +454,7 @@ fn copy_hashed(
         hasher.update(&buffer[..count]);
         remaining -= count as u64;
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex(hasher.finalize()))
 }
 
 pub(crate) fn write_puzzle_package_with_extras(
