@@ -59,6 +59,7 @@ impl RoomRuntime {
             columns,
             initial_snapshot,
             duration_ms,
+            cut_style,
             ..
         } = message
         else {
@@ -79,6 +80,7 @@ impl RoomRuntime {
                 || initial.height != height
                 || initial.rows != rows
                 || initial.columns != columns
+                || initial.cut_style != cut_style
             {
                 return Err("Imported puzzle snapshot does not match its media or grid".into());
             }
@@ -95,7 +97,8 @@ impl RoomRuntime {
                 rows,
                 columns,
                 client_id.to_owned(),
-            )?;
+            )?
+            .with_cut_style(cut_style);
             snapshot.revision = 1;
             if let Some(first) = snapshot.queue.first_mut() {
                 first.duration_ms = duration_ms;
@@ -263,6 +266,7 @@ mod tests {
             initial_snapshot: None,
             duration_ms: 5000,
             player_key: String::new(),
+            cut_style: Default::default(),
         }
     }
 

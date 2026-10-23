@@ -87,15 +87,14 @@ pub(crate) enum PieceFilter {
 }
 
 impl PieceFilter {
-    pub(crate) fn includes(self, piece: &Piece, rows: u16, columns: u16) -> bool {
-        let is_edge = piece.row == 0
-            || piece.column == 0
-            || piece.row == rows.saturating_sub(1)
-            || piece.column == columns.saturating_sub(1);
+    /// Edge pieces have a straight side on the picture border, whatever the
+    /// cut style; a triangle that only touches the border with a point is an
+    /// interior piece.
+    pub(crate) fn includes(self, piece: &Piece, snapshot: &RoomSnapshot) -> bool {
         match self {
             Self::All => true,
-            Self::Edges => is_edge,
-            Self::Interior => !is_edge,
+            Self::Edges => snapshot.border_sides(piece) > 0,
+            Self::Interior => snapshot.border_sides(piece) == 0,
         }
     }
 }
@@ -103,11 +102,9 @@ impl PieceFilter {
 pub(crate) fn piece_visible_for_filter(
     filter: PieceFilter,
     piece: &Piece,
-    width: u32,
-    rows: u16,
-    columns: u16,
+    snapshot: &RoomSnapshot,
 ) -> bool {
-    piece.placed || piece.x < width as f32 || filter.includes(piece, rows, columns)
+    piece.placed || piece.x < snapshot.width as f32 || filter.includes(piece, snapshot)
 }
 
 /// Something the board asks the app to do once the room snapshot is back in
@@ -185,16 +182,7 @@ fn piece_at(
             .iter()
             .rev()
             .map(|&index| &snapshot.pieces[index])
-            .filter(|piece| {
-                !piece.placed
-                    && piece_visible_for_filter(
-                        filter,
-                        piece,
-                        snapshot.width,
-                        snapshot.rows,
-                        snapshot.columns,
-                    )
-            })
+            .filter(|piece| !piece.placed && piece_visible_for_filter(filter, piece, snapshot))
     };
     let exact = candidates().find(|piece| {
         let Some(shape) = shapes.get(&piece.id) else {
@@ -264,13 +252,7 @@ fn pieces_touching(
                     .held_by
                     .as_deref()
                     .is_none_or(|holder| Some(holder) == me)
-                && piece_visible_for_filter(
-                    filter,
-                    piece,
-                    snapshot.width,
-                    snapshot.rows,
-                    snapshot.columns,
-                )
+                && piece_visible_for_filter(filter, piece, snapshot)
         })
         .filter(|piece| {
             let bounds = shapes.get(&piece.id).map_or_else(
@@ -450,12 +432,7 @@ impl PieceOffApp {
             self.chat.ping_requested = false;
             return None;
         }
-        let tray_layout = piece_tray_layout(
-            snapshot.width,
-            snapshot.height,
-            snapshot.rows,
-            snapshot.columns,
-        );
+        let tray_layout = snapshot.tray_layout();
         let content_size = Vec2::new(tray_layout.content_width, tray_layout.content_height);
         let base_scale = (canvas.width() * 0.92 / content_size.x)
             .min(canvas.height() * 0.92 / content_size.y)
@@ -979,13 +956,7 @@ impl PieceOffApp {
                     break;
                 }
                 cursor += 1;
-                if !piece_visible_for_filter(
-                    self.piece_filter,
-                    piece,
-                    snapshot.width,
-                    snapshot.rows,
-                    snapshot.columns,
-                ) {
+                if !piece_visible_for_filter(self.piece_filter, piece, snapshot) {
                     continue;
                 }
                 let Some(shape) = self.shape_cache.get(&piece.id) else {

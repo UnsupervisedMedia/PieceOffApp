@@ -8,7 +8,7 @@
 //! pieces in and out freely, and anyone may drop a piece into a holder (it is
 //! then reserved for the owner). Placed pieces are never reserved.
 
-use crate::{Piece, RoomRuntime, RoomSnapshot, ServerMessage, clean_chat_text, piece_tray_layout};
+use crate::{Piece, RoomRuntime, RoomSnapshot, ServerMessage, clean_chat_text};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -132,7 +132,7 @@ impl RoomSnapshot {
             return Err("A holder must lie on the table".into());
         }
         let (pad_x, pad_y) = (HOLDER_CLEARANCE_CELLS * cw, HOLDER_CLEARANCE_CELLS * ch);
-        let tray = piece_tray_layout(self.width, self.height, self.rows, self.columns);
+        let tray = self.tray_layout();
         let board = (
             -pad_x,
             -pad_y,

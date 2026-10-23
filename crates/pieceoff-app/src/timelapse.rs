@@ -193,14 +193,17 @@ pub(crate) fn settle_view(view: &mut RoomSnapshot) {
         node
     }
     for (index_a, piece) in view.pieces.iter().enumerate() {
-        for (row, column, dx, dy) in [
-            (piece.row, piece.column + 1, cw, 0.0),
-            (piece.row + 1, piece.column, 0.0, ch),
-        ] {
+        // Each pair is seen from both sides; look only forwards.
+        for (row, column) in view.neighbours(piece) {
+            if (row, column) < (piece.row, piece.column) {
+                continue;
+            }
             let Some(&index_b) = index.get(&(row, column)) else {
                 continue;
             };
             let other = &view.pieces[index_b];
+            let dx = (f32::from(column) - f32::from(piece.column)) * cw;
+            let dy = (f32::from(row) - f32::from(piece.row)) * ch;
             if near(other.x - piece.x, dx) && near(other.y - piece.y, dy) {
                 let (a, b) = (root(&mut parent, index_a), root(&mut parent, index_b));
                 parent[a.max(b)] = a.min(b);

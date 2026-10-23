@@ -38,6 +38,8 @@ the recording is silent.
   [media guide](docs/BUILTIN_MEDIA.md) for their source and license.
 - **Work naturally with pieces.** Drag, snap, join, multi-select, and move
   linked groups. Pan and zoom around a shared board and a loose-piece tray.
+- **Pick a cut.** Classic jigsaw pieces, hexagons, or triangles, previewed
+  on the picture before you create the room.
 - **Talk while you puzzle.** Room chat in the corner of the board, and a
   key that pings a spot on the table for everyone to see. Short synthesised
   sounds mark snaps, joins, the finish, chat, and pings, with their own

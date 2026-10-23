@@ -1896,6 +1896,7 @@ mod tests {
             initial_snapshot: Some(Box::new(imported)),
             duration_ms: 0,
             player_key: String::new(),
+            cut_style: Default::default(),
         };
         let wire_message = serde_json::to_string(&request).unwrap();
         let decoded_message: ClientMessage = serde_json::from_str(&wire_message).unwrap();
@@ -1912,6 +1913,68 @@ mod tests {
         assert_eq!(snapshot.playback.position_ms, 750);
         assert!(!snapshot.playback.playing);
         assert!(!snapshot.media_available);
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn create_room_cuts_the_requested_style_and_imports_keep_theirs() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-cut-{}", Uuid::new_v4()));
+        let state = AppState::new(data_dir.clone());
+        let request =
+            |cut_style, initial_snapshot: Option<RoomSnapshot>| ClientMessage::CreateRoom {
+                name: "Host".into(),
+                title: "Cut".into(),
+                media_sha256: "c".repeat(64),
+                media_extension: "png".into(),
+                width: 640,
+                height: 360,
+                rows: 4,
+                columns: 6,
+                initial_snapshot: initial_snapshot.map(Box::new),
+                duration_ms: 0,
+                player_key: String::new(),
+                cut_style,
+            };
+        let (_, invite_code, _, _, _) = connect_room(
+            &state,
+            "host",
+            request(pieceoff_core::CutStyle::Hexagon, None),
+        )
+        .await
+        .unwrap();
+        let room = state.rooms.read().await.get(&invite_code).cloned().unwrap();
+        let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
+        assert_eq!(snapshot.cut_style, pieceoff_core::CutStyle::Hexagon);
+        let tray = snapshot.tray_layout();
+        assert!(
+            snapshot
+                .pieces
+                .iter()
+                .all(|piece| piece.x >= tray.tray_x - 0.01)
+        );
+
+        // A package cut as hexagons cannot be rehosted as another style.
+        let mut package = snapshot.clone();
+        package.title = "Cut".into();
+        let error = connect_room(
+            &state,
+            "other",
+            request(pieceoff_core::CutStyle::Triangle, Some(package.clone())),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("does not match"), "{error}");
+        let (_, rehosted, _, _, _) = connect_room(
+            &state,
+            "other",
+            request(pieceoff_core::CutStyle::Hexagon, Some(package)),
+        )
+        .await
+        .unwrap();
+        let room = state.rooms.read().await.get(&rehosted).cloned().unwrap();
+        let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
+        assert_eq!(snapshot.cut_style, pieceoff_core::CutStyle::Hexagon);
         fs::remove_dir_all(data_dir).ok();
     }
 
@@ -4639,6 +4702,7 @@ mod hardening_tests {
             initial_snapshot: None,
             duration_ms: 0,
             player_key: String::new(),
+            cut_style: Default::default(),
         };
         let (_, first_code, _, _, _) = connect_room(&state, "host-1", create("First"))
             .await
@@ -4778,6 +4842,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: String::new(),
+                cut_style: Default::default(),
             },
         )
         .await
@@ -4829,6 +4894,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: String::new(),
+                cut_style: Default::default(),
             },
         )
         .await
@@ -4915,6 +4981,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: String::new(),
+                cut_style: Default::default(),
             },
         )
         .await
@@ -5060,6 +5127,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: "host-key".into(),
+                cut_style: Default::default(),
             },
         )
         .await
@@ -5126,6 +5194,7 @@ mod hardening_tests {
                 initial_snapshot: None,
                 duration_ms: 0,
                 player_key: "host-key".into(),
+                cut_style: Default::default(),
             },
         )
         .await
@@ -5271,6 +5340,7 @@ mod hardening_tests {
             initial_snapshot: None,
             duration_ms: 0,
             player_key: String::new(),
+            cut_style: Default::default(),
         }
     }
 

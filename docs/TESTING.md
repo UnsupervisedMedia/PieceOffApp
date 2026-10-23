@@ -109,6 +109,11 @@ HTTPS for media transfer automatically.
     length menu changes the speed, and **Close** (or Esc) returns to the live
     room, which kept changing meanwhile. Finish the puzzle and use
     **Timelapse** on the finish card.
+21. Create rooms with **Cut → Hexagons** and **Cut → Triangles**: the preview
+    shows the cut, the guest sees the same shapes, neighbouring pieces
+    (including a hexagon's diagonal neighbours) join when dropped close,
+    pieces snap home, **Edges** shows only pieces with a flat border side,
+    and **Arrange → Edges first** starts with the four corners.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the
