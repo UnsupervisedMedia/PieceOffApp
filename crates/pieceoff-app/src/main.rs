@@ -37,6 +37,15 @@ use tokio::{runtime::Builder, sync::mpsc as tokio_mpsc};
 
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+/// Lowercase hex encoding; sha2 0.11 digests no longer implement `LowerHex`.
+pub(crate) fn hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    bytes.as_ref().iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
 mod audio;
 mod board;
 mod chat;
