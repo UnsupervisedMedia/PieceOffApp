@@ -44,7 +44,14 @@ sha256_of() {
 # --disable-autodetect keeps every system library, hardware API and system
 # codec out, so only what is listed here is linked. --disable-network:
 # PieceOff only reads local files.
-CONFIGURE="--disable-gpl --disable-nonfree --disable-autodetect --enable-zlib --disable-debug --disable-doc --disable-ffplay --disable-network --enable-static --disable-shared"
+#
+# The decoders and encoder below implement formats that are covered by active
+# patent pools (AVC/H.264, HEVC, VVC, VC-1, AAC, E-AC-3). PieceOff does not
+# ship them: the app offers to download a full FFmpeg from a third party when
+# the player wants them (docs/FFMPEG.md). Demuxers and parsers stay, so
+# ffprobe can still name the codec of a file this build cannot decode.
+PATENTED_DECODERS=h264,hevc,vvc,vc1,vc1image,wmv3,wmv3image,aac,aac_fixed,aac_latm,eac3
+CONFIGURE="--disable-gpl --disable-nonfree --disable-autodetect --enable-zlib --disable-debug --disable-doc --disable-ffplay --disable-network --enable-static --disable-shared --disable-decoder=$PATENTED_DECODERS --disable-encoder=aac"
 EXE=
 CROSS=no
 ZCONFIGURE_ENV=
@@ -148,13 +155,24 @@ $STRIP "$WORK/build/ffmpeg$EXE" "$WORK/build/ffprobe$EXE"
 if [ "$CROSS" = no ]; then
   FF=$WORK/build/ffmpeg$EXE
   "$FF" -v error -f lavfi -i testsrc=duration=1:size=64x48:rate=10 \
-    -f lavfi -t 1 -i anullsrc=r=44100:cl=mono -c:v mpeg4 -c:a aac -y "$WORK/selftest.mp4"
+    -f lavfi -t 1 -i anullsrc=r=44100:cl=mono -c:v mpeg4 -c:a flac -strict -2 -y "$WORK/selftest.mp4"
   "$WORK/build/ffprobe$EXE" -v error -show_entries stream=codec_name -of csv=p=0 "$WORK/selftest.mp4" | grep -q mpeg4 \
     || { echo "FFmpeg self-test failed (MP4)." >&2; exit 1; }
   # PNG needs zlib: thumbnails are PNG, and APNG is decoded with FFmpeg.
   "$FF" -v error -i "$WORK/selftest.mp4" -frames:v 1 -c:v png -f image2pipe - >"$WORK/selftest.png"
   [ "$(head -c 4 "$WORK/selftest.png" | tail -c 3)" = PNG ] || { echo "FFmpeg self-test failed (PNG)." >&2; exit 1; }
   "$FF" -v error -i "$WORK/selftest.png" -f null - || { echo "FFmpeg self-test failed (PNG decode)." >&2; exit 1; }
+  # The patented decoders must really be gone, and the free ones present.
+  DECODERS=$("$FF" -hide_banner -decoders)
+  for gone in h264 hevc aac; do
+    if echo "$DECODERS" | grep -qE " $gone( |$)"; then
+      echo "The build still has the $gone decoder." >&2
+      exit 1
+    fi
+  done
+  for kept in vp9 opus mpeg4 png; do
+    echo "$DECODERS" | grep -qE " $kept( |$)" || { echo "The build lacks the $kept decoder." >&2; exit 1; }
+  done
   # No GPL or nonfree component may have slipped in.
   if "$FF" -version | grep -qE -- '--enable-(gpl|nonfree|libx26)'; then
     echo "The build enabled a GPL or nonfree component." >&2

@@ -29,7 +29,7 @@ impl Tool {
         }
     }
 
-    fn file_name(self) -> String {
+    pub(crate) fn file_name(self) -> String {
         format!("{}{}", self.name(), std::env::consts::EXE_SUFFIX)
     }
 }
@@ -41,6 +41,8 @@ pub(crate) enum ToolSource {
     Chosen,
     /// `PIECEOFF_FFMPEG_DIR`, `PIECEOFF_FFMPEG`, or `PIECEOFF_FFPROBE`.
     Environment,
+    /// The full FFmpeg the player installed from inside the app.
+    Installed,
     /// Shipped beside the app.
     Bundled,
     /// Found on `PATH`.
@@ -54,6 +56,7 @@ impl ToolSource {
         match self {
             Self::Chosen => "chosen folder",
             Self::Environment => "environment",
+            Self::Installed => "downloaded video codecs",
             Self::Bundled => "bundled with PieceOff",
             Self::System => "system",
             Self::Missing => "not found",
@@ -75,6 +78,8 @@ pub(crate) struct Search {
     pub(crate) env_dir: Option<PathBuf>,
     pub(crate) env_ffmpeg: Option<PathBuf>,
     pub(crate) env_ffprobe: Option<PathBuf>,
+    /// Where the in-app codec install puts its programs.
+    pub(crate) installed_dir: Option<PathBuf>,
     /// The folder holding the running app.
     pub(crate) app_dir: Option<PathBuf>,
     pub(crate) path_dirs: Vec<PathBuf>,
@@ -104,6 +109,7 @@ impl Search {
             env_dir: env_path("PIECEOFF_FFMPEG_DIR"),
             env_ffmpeg: env_path(Tool::Ffmpeg.env_file()),
             env_ffprobe: env_path(Tool::Ffprobe.env_file()),
+            installed_dir: Some(crate::codec_pack::install_dir()),
             app_dir: std::env::current_exe()
                 .ok()
                 .and_then(|exe| exe.parent().map(Path::to_path_buf)),
@@ -157,6 +163,12 @@ impl Search {
                     .and_then(|path| found(ToolSource::Environment, path))
             })
             .or_else(|| {
+                self.installed_dir
+                    .as_deref()
+                    .and_then(in_dir)
+                    .and_then(|path| found(ToolSource::Installed, path))
+            })
+            .or_else(|| {
                 self.bundled_dirs()
                     .iter()
                     .find_map(|dir| in_dir(dir))
@@ -194,6 +206,45 @@ pub(crate) struct ToolReport {
     pub(crate) resolved: ResolvedTool,
     /// The first line of `-version`, when the program runs.
     pub(crate) version: Option<String>,
+    /// For ffmpeg: the decoder names it lists (None when it will not run).
+    pub(crate) decoders: Option<HashSet<String>>,
+}
+
+/// The decoder names `program` lists (None when it will not run).
+pub(crate) fn decoder_names(program: &OsStr) -> Option<HashSet<String>> {
+    let output = Command::new(program)
+        .args(["-hide_banner", "-v", "error", "-decoders"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(parse_codec_names(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// A codec name for people: `h264` is "H.264".
+pub(crate) fn codec_label(name: &str) -> String {
+    match name {
+        "h264" => "H.264".into(),
+        "hevc" => "HEVC (H.265)".into(),
+        "vvc" => "VVC (H.266)".into(),
+        "aac" => "AAC audio".into(),
+        "eac3" => "E-AC-3 audio".into(),
+        "vc1" | "wmv3" => "VC-1".into(),
+        other => other.to_uppercase(),
+    }
+}
+
+/// Which of `codecs` (ffprobe codec names) `decoders` cannot decode.
+pub(crate) fn undecodable(decoders: &HashSet<String>, codecs: &[String]) -> Vec<String> {
+    let mut missing: Vec<String> = codecs
+        .iter()
+        .filter(|codec| !decoders.contains(codec.as_str()))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 pub(crate) fn report(tool: Tool) -> ToolReport {
@@ -219,10 +270,14 @@ pub(crate) fn report(tool: Tool) -> ToolReport {
                         .to_owned()
                 })
         });
+    let decoders = (tool == Tool::Ffmpeg)
+        .then(|| decoder_names(&resolved.program))
+        .flatten();
     ToolReport {
         tool,
         resolved,
         version,
+        decoders,
     }
 }
 
@@ -267,24 +322,63 @@ impl VideoEncoder {
             .find(|encoder| available.contains(encoder.name()))
             .unwrap_or(Self::Mpeg4)
     }
+}
 
-    /// Ask `program` which video encoders it has.
-    pub(crate) fn choose(program: &OsStr) -> Self {
-        let listing = Command::new(program)
-            .args(["-hide_banner", "-v", "error", "-encoders"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            .unwrap_or_default();
-        Self::best_of(&parse_encoder_names(&listing))
+/// How a clip's audio is encoded. AAC is patent-encumbered, so the bundled
+/// build has none; FFmpeg's native Opus encoder (experimental, hence
+/// `-strict -2`) is the fallback, and it plays everywhere PieceOff does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioEncoder {
+    Aac,
+    Opus,
+}
+
+impl AudioEncoder {
+    const PREFERENCE: [Self; 2] = [Self::Aac, Self::Opus];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Aac => "aac",
+            Self::Opus => "opus",
+        }
+    }
+
+    /// The encoder options for an MP4 clip's audio track.
+    pub(crate) fn args(self) -> Vec<&'static str> {
+        let mut args = vec!["-c:a", self.name()];
+        args.extend(match self {
+            Self::Aac => ["-b:a", "128k"].as_slice(),
+            // Opus runs at 48 kHz (or a divisor), whatever the source is.
+            Self::Opus => ["-strict", "-2", "-b:a", "96k", "-ar", "48000"].as_slice(),
+        });
+        args
+    }
+
+    /// The best encoder among `available` names; Opus when none is listed.
+    pub(crate) fn best_of(available: &HashSet<String>) -> Self {
+        Self::PREFERENCE
+            .into_iter()
+            .find(|encoder| available.contains(encoder.name()))
+            .unwrap_or(Self::Opus)
     }
 }
 
-/// Encoder names from `ffmpeg -encoders`: lines look like
+/// The encoder names `program` lists (empty when it will not run).
+pub(crate) fn encoder_names(program: &OsStr) -> HashSet<String> {
+    let listing = Command::new(program)
+        .args(["-hide_banner", "-v", "error", "-encoders"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    parse_codec_names(&listing)
+}
+
+/// Codec names from `ffmpeg -encoders` or `-decoders`: lines look like
 /// ` V....D libx264   H.264 / AVC`, after a header ending in `------`.
-pub(crate) fn parse_encoder_names(listing: &str) -> HashSet<String> {
+pub(crate) fn parse_codec_names(listing: &str) -> HashSet<String> {
     let mut lines = listing.lines();
     let mut names = HashSet::new();
     for line in lines.by_ref() {
@@ -434,7 +528,7 @@ mod tests {
              V....D libopenh264          OpenH264 H.264 / AVC\n \
              V.S..D mpeg4                MPEG-4 part 2\n \
              A....D aac                  AAC (Advanced Audio Coding)\n";
-        let names = parse_encoder_names(listing);
+        let names = parse_codec_names(listing);
         assert!(names.contains("libopenh264") && names.contains("mpeg4") && names.contains("aac"));
         assert!(!names.contains("Video"), "legend lines are not encoders");
         assert_eq!(VideoEncoder::best_of(&names), VideoEncoder::OpenH264);
@@ -443,13 +537,23 @@ mod tests {
         with_x264.insert("libx264".into());
         assert_eq!(VideoEncoder::best_of(&with_x264), VideoEncoder::X264);
 
+        assert_eq!(AudioEncoder::best_of(&names), AudioEncoder::Aac);
         // A build with neither falls back to the encoder every build has.
         assert_eq!(VideoEncoder::best_of(&HashSet::new()), VideoEncoder::Mpeg4);
+        assert_eq!(AudioEncoder::best_of(&HashSet::new()), AudioEncoder::Opus);
         // And a missing program does the same rather than failing.
-        assert_eq!(
-            VideoEncoder::choose(OsStr::new("/definitely/not/ffmpeg")),
-            VideoEncoder::Mpeg4
-        );
+        let none = encoder_names(OsStr::new("/definitely/not/ffmpeg"));
+        assert!(none.is_empty());
+        assert_eq!(VideoEncoder::best_of(&none), VideoEncoder::Mpeg4);
+    }
+
+    #[test]
+    fn the_opus_fallback_enables_the_experimental_encoder_and_a_legal_rate() {
+        let args = AudioEncoder::Opus.args();
+        assert_eq!(args[..2], ["-c:a", "opus"]);
+        assert!(args.windows(2).any(|pair| pair == ["-strict", "-2"]));
+        assert!(args.windows(2).any(|pair| pair == ["-ar", "48000"]));
+        assert!(!AudioEncoder::Aac.args().contains(&"-strict"));
     }
 
     #[test]

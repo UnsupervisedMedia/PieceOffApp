@@ -50,6 +50,8 @@ mod audio;
 mod board;
 mod chat;
 mod clip;
+mod codec_pack;
+mod codec_ui;
 mod controls;
 mod cursors;
 mod decoder;
@@ -283,6 +285,8 @@ struct PieceOffApp {
     /// What was found for FFmpeg and FFprobe; filled in by a worker thread.
     tools: Vec<media_tools::ToolReport>,
     tools_rx: Option<mpsc::Receiver<Vec<media_tools::ToolReport>>>,
+    /// The offer to download the video codecs, and the download itself.
+    codec: codec_ui::CodecState,
 }
 
 impl Default for PieceOffApp {
@@ -453,6 +457,7 @@ impl Default for PieceOffApp {
             decoder_gave_up_reported: false,
             tools: Vec::new(),
             tools_rx: None,
+            codec: Default::default(),
         }
     }
 }
@@ -587,9 +592,11 @@ impl PieceOffApp {
         self.clip_plan = None;
         thread::spawn(move || {
             let outcome = probe_media(&worker_path, skip_setup);
+            let undecodable = undecodable_codecs(&outcome);
             let _ = tx.send(ProbeResult {
                 path: worker_path,
                 outcome,
+                undecodable,
             });
             repaint.request_repaint();
         });
@@ -602,6 +609,9 @@ impl PieceOffApp {
         self.probe_rx = None;
         match result.outcome {
             Ok(ProbeOutcome::Ready(metadata)) => {
+                if self.needs_codec_install(&result.path, &result.undecodable) {
+                    return;
+                }
                 if let Err(error) = self.apply_media(result.path, metadata, ctx) {
                     self.status = error;
                 }
@@ -610,7 +620,11 @@ impl PieceOffApp {
                 duration_ms,
                 has_audio,
                 size,
+                ..
             }) => {
+                if self.needs_codec_install(&result.path, &result.undecodable) {
+                    return;
+                }
                 let plan = clip::ClipPlan::new(result.path, duration_ms, has_audio, size);
                 self.clip_source_title = Some(plan.source_stem());
                 self.status = "Choose how to play this video.".into();

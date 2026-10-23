@@ -3,6 +3,24 @@ use super::*;
 pub(crate) struct ProbeResult {
     pub(crate) path: PathBuf,
     pub(crate) outcome: Result<ProbeOutcome, String>,
+    /// Codecs in the file that the current FFmpeg cannot decode.
+    pub(crate) undecodable: Vec<String>,
+}
+
+/// Which of the file's codecs the current FFmpeg lacks a decoder for. Asked
+/// on the probe's worker thread, so it never waits on the UI's tool list.
+pub(crate) fn undecodable_codecs(outcome: &Result<ProbeOutcome, String>) -> Vec<String> {
+    let codecs = match outcome {
+        Ok(ProbeOutcome::ChooseSetup { codecs, .. }) => codecs.as_slice(),
+        Ok(ProbeOutcome::Ready(metadata)) => metadata.codecs.as_slice(),
+        Err(_) => return Vec::new(),
+    };
+    if codecs.is_empty() {
+        return Vec::new();
+    }
+    media_tools::decoder_names(&media_tools::ffmpeg())
+        .map(|decoders| media_tools::undecodable(&decoders, codecs))
+        .unwrap_or_default()
 }
 
 pub(crate) enum ProbeOutcome {
@@ -12,6 +30,8 @@ pub(crate) enum ProbeOutcome {
         duration_ms: u64,
         has_audio: bool,
         size: (u32, u32),
+        /// ffprobe's codec name for every stream, to see what must be decoded.
+        codecs: Vec<String>,
     },
 }
 
@@ -22,6 +42,8 @@ pub(crate) struct MediaMetadata {
     pub(crate) is_video: bool,
     pub(crate) has_audio: bool,
     pub(crate) sha256: String,
+    /// ffprobe's codec name for every stream (empty for still images).
+    pub(crate) codecs: Vec<String>,
 }
 
 pub(crate) fn supported_media_extension(path: &Path) -> Result<String, String> {
@@ -57,6 +79,7 @@ pub(crate) fn probe_media(path: &Path, skip_setup: bool) -> Result<ProbeOutcome,
             duration_ms: metadata.duration_ms,
             has_audio: metadata.has_audio,
             size: metadata.size,
+            codecs: metadata.codecs,
         });
     }
     Ok(ProbeOutcome::Ready(hash_media(path, metadata)?))
@@ -113,6 +136,7 @@ pub(crate) fn inspect_media_basic(path: &Path) -> Result<MediaMetadata, String> 
             .is_some_and(|(animated, _, _)| !animated),
         _ => false,
     };
+    let mut codecs = Vec::new();
     let (size, duration, is_video, has_audio) = if let Some((_, size, duration)) = animated_webp {
         (*size, *duration, true, false)
     } else if is_image {
@@ -128,7 +152,7 @@ pub(crate) fn inspect_media_basic(path: &Path) -> Result<MediaMetadata, String> 
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=codec_type,width,height:format=duration",
+                "stream=codec_type,codec_name,width,height:format=duration",
                 "-of",
                 "json",
             ])
@@ -143,6 +167,7 @@ pub(crate) fn inspect_media_basic(path: &Path) -> Result<MediaMetadata, String> 
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("Invalid video metadata: {error}"))?;
         let (size, duration, has_audio) = parse_video_metadata(&value)?;
+        codecs = parse_stream_codecs(&value);
         (size, duration, true, has_audio)
     };
     if !valid_media_dimensions(size.0, size.1) {
@@ -154,6 +179,7 @@ pub(crate) fn inspect_media_basic(path: &Path) -> Result<MediaMetadata, String> 
         is_video,
         has_audio,
         sha256: String::new(),
+        codecs,
     })
 }
 
@@ -226,6 +252,21 @@ pub(crate) fn webp_animation_metadata(path: &Path) -> Result<(bool, (u32, u32), 
         return Err("Animated WebP contains no frames".into());
     }
     Ok((true, dimensions, duration_ms))
+}
+
+/// ffprobe's `codec_name` for every stream that has one.
+pub(crate) fn parse_stream_codecs(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("streams")
+        .and_then(|x| x.as_array())
+        .map(|streams| {
+            streams
+                .iter()
+                .filter_map(|stream| stream.get("codec_name").and_then(|x| x.as_str()))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn parse_video_metadata(

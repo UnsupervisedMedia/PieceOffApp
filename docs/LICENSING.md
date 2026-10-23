@@ -37,8 +37,11 @@ licenses and required notices continue to apply. The release bundles include
 a generated Rust dependency inventory (`THIRD_PARTY_LICENSES.txt`) and
 third-party license texts/notices (`THIRD_PARTY_NOTICES.txt`). Official
 bundles include FFmpeg as a separate, unmodified LGPL-2.1+ executable built
-from the pinned upstream release, with zlib linked statically, and ship the
-corresponding source and build script beside it. See [FFmpeg distribution
+from the pinned upstream release, with the patent-encumbered decoders (H.264,
+HEVC, AAC and similar) disabled and zlib linked statically, and ship the
+corresponding source and build script beside it. A full FFmpeg is offered as an
+optional, consented download from a third party; PieceOff does not host or
+redistribute it. See [FFmpeg distribution
 notes](FFMPEG.md) before changing how it is built or bundled.
 These generated files help preserve notices but do not replace reviewing the
 exact components and obligations in each release.

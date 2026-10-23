@@ -43,7 +43,7 @@ Windows x86_64, macOS Apple silicon, and macOS Intel when a `v*` tag is pushed.
 The tag must equal `v` plus the version in `crates/pieceoff-app/Cargo.toml`. The
 workflow uploads the archives, a `SHA256SUMS.txt`, a build-provenance
 attestation, and a **draft** release for a maintainer to review and publish.
-Bundles include FFmpeg and its corresponding source; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
+Bundles include a basic FFmpeg and its corresponding source; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
 (`workflow_dispatch`) to build bundles without publishing.
 
 ## Assemble a release bundle
@@ -54,7 +54,7 @@ scripts/bundle.sh                # Linux/macOS bundle, with FFmpeg built from so
 ```
 
 The script builds release binaries and includes both the dependency license
-inventory and full third-party notices. FFmpeg is included by default:
+inventory and full third-party notices. A basic FFmpeg (without H.264/HEVC/AAC) is included by default:
 `scripts/build-ffmpeg.sh` builds it from the pinned upstream release
 (`packaging/ffmpeg-source.txt`) and stages `ffmpeg/` and `source/` (the
 pristine tarballs, signatures, checksums, and the build script), which the
@@ -67,8 +67,8 @@ folder as `-FfmpegStage`; the release workflow does the same. See
 
 The bundle includes `pieceoff.sh` (or `pieceoff.ps1` on Windows), which starts
 and stops the app and local room server together. The room host runs the
-server; every participant runs the app. Release bundles carry their own FFmpeg;
-source builds need `ffmpeg` and `ffprobe` on `PATH` for video and
+server; every participant runs the app. Release bundles carry their own basic
+FFmpeg (the app offers a full one on demand); source builds need `ffmpeg` and `ffprobe` on `PATH` for video and
 animated APNG/GIF puzzles; source audio plays through the system audio device.
 Animated WebP uses the native Rust image decoder. Video files can use
 MP4, M4V, MOV, MKV, WebM, AVI, MPEG, OGV, FLV, 3GP, WMV, TS, MTS, or M2TS
