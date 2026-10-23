@@ -192,7 +192,7 @@ fn portable_package_preserves_puzzle_state_and_verifies_embedded_media() {
     let media = format!("portable test image {stamp}").into_bytes();
     let media_path = directory.join("source.png");
     std::fs::write(&media_path, &media).unwrap();
-    let media_hash = format!("{:x}", Sha256::digest(&media));
+    let media_hash = hex(Sha256::digest(&media));
     let mut snapshot = RoomSnapshot::create(
         "room-id".into(),
         "ROOM42".into(),
@@ -1184,7 +1184,7 @@ fn audio_player_arguments_follow_the_shared_loop_and_speed_with_local_volume() {
 fn room_media_http_transfer_uploads_and_downloads_verified_bytes() {
     let _serial = crate::package::transfer_test_lock();
     let content = b"PieceOff room media transfer test".to_vec();
-    let hash = format!("{:x}", Sha256::digest(&content));
+    let hash = hex(Sha256::digest(&content));
     let source = std::env::temp_dir().join(format!("pieceoff-upload-{hash}.png"));
     std::fs::write(&source, &content).unwrap();
     let cached = std::env::temp_dir()
@@ -1195,10 +1195,23 @@ fn room_media_http_transfer_uploads_and_downloads_verified_bytes() {
     let server_content = content.clone();
     let server_hash = hash.clone();
     let server = thread::spawn(move || {
+        // The client first asks whether the server already holds the media.
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
         let (request, length) = read_test_request(&mut reader);
         assert!(request.starts_with("PUT /media/"));
+        assert!(request.contains("probe=1"));
+        assert_eq!(length, 0);
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .unwrap();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let (request, length) = read_test_request(&mut reader);
+        assert!(request.starts_with("PUT /media/"));
+        assert!(!request.contains("probe=1"));
         assert!(request.contains(&server_hash));
         assert!(request.contains("token=upload-token"));
         let mut body = vec![0; length];
@@ -1941,8 +1954,10 @@ fn the_hud_clock_waits_for_the_first_pickup_then_runs_from_the_room_clock() {
     let mut rig = DragRig::new(3, 4);
     let texts = painted_texts(&rig.frame(Vec::new()));
     assert!(!texts.iter().any(|text| text.contains(':')), "{texts:?}");
-    // The room clock started 65 s ago on the host.
-    rig.room_clock_ms = board::wall_clock_ms() - 65_000;
+    // The room clock started 65.5 s ago on the host. The half second keeps the
+    // display at 01:05 whatever offset a parallel test left in the global
+    // server-clock estimate (the e2e tests learn a few ms from a real server).
+    rig.room_clock_ms = board::wall_clock_ms() - 65_500;
     rig.drag(0, 2_000.0, 0.0, egui::Modifiers::NONE);
     let texts = painted_texts(&rig.frame(Vec::new()));
     assert!(texts.iter().any(|text| text == "01:05"), "{texts:?}");
@@ -3679,7 +3694,7 @@ fn read_request_head(reader: &mut BufReader<TcpStream>) -> (String, Vec<String>)
 fn an_interrupted_download_resumes_with_a_range_request() {
     let _serial = crate::package::transfer_test_lock();
     let content: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
-    let hash = format!("{:x}", Sha256::digest(&content));
+    let hash = hex(Sha256::digest(&content));
     let cached = std::env::temp_dir()
         .join("pieceoff-media-cache")
         .join(format!("{hash}.png"));
@@ -3736,7 +3751,7 @@ fn a_slow_but_steady_transfer_is_not_cut_off_by_a_total_timeout() {
     // 1.2 s of trickling bytes with a 0.4 s idle limit: only a limit on the
     // whole request would end this.
     let content = vec![9u8; 8];
-    let hash = format!("{:x}", Sha256::digest(&content));
+    let hash = hex(Sha256::digest(&content));
     let cached = std::env::temp_dir()
         .join("pieceoff-media-cache")
         .join(format!("{hash}.png"));

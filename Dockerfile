@@ -6,7 +6,7 @@
 # See docs/DEPLOYMENT.md for the settings (PIECEOFF_*) and for running behind
 # a TLS reverse proxy.
 
-FROM rust:1.94-slim-bookworm AS build
+FROM rust:1.98-slim-bookworm AS build
 WORKDIR /src
 # Only the server and the core crate it uses are compiled; the desktop app
 # (and its audio/GUI system libraries) never enter the build.
