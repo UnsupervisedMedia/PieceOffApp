@@ -1922,8 +1922,10 @@ fn the_hud_clock_waits_for_the_first_pickup_then_runs_from_the_room_clock() {
     let mut rig = DragRig::new(3, 4);
     let texts = painted_texts(&rig.frame(Vec::new()));
     assert!(!texts.iter().any(|text| text.contains(':')), "{texts:?}");
-    // The room clock started 65 s ago on the host.
-    rig.room_clock_ms = board::wall_clock_ms() - 65_000;
+    // The room clock started 65.5 s ago on the host. The half second keeps the
+    // display at 01:05 whatever offset a parallel test left in the global
+    // server-clock estimate (the e2e tests learn a few ms from a real server).
+    rig.room_clock_ms = board::wall_clock_ms() - 65_500;
     rig.drag(0, 2_000.0, 0.0, egui::Modifiers::NONE);
     let texts = painted_texts(&rig.frame(Vec::new()));
     assert!(texts.iter().any(|text| text == "01:05"), "{texts:?}");
