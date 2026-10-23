@@ -157,6 +157,8 @@ fn accepted_room_welcome_is_saved_and_can_refill_the_rejoin_form() {
             peers: Vec::new(),
             snapshot,
             media_upload_token: None,
+            spectator: false,
+            spectators: Vec::new(),
             server_now_ms: 0,
         })
         .unwrap();
@@ -1691,6 +1693,14 @@ impl DragRig {
                     self.pings_sent.push(Pos2::new(x, y));
                     continue;
                 }
+                // The host answers this to the asker alone.
+                ClientMessage::RequestTimelapse => {
+                    let timelapse = self.room.timelapse.clone();
+                    self.incoming_tx
+                        .send(ServerMessage::Timelapse { timelapse })
+                        .unwrap();
+                    continue;
+                }
                 _ => {}
             }
             let outcome = self
@@ -2511,7 +2521,10 @@ fn player_list_tracks_peers_and_skips_our_own_join_echo() {
         "host-id".into(),
     )
     .unwrap();
-    let joined = |name: &str| ServerMessage::PeerJoined { name: name.into() };
+    let joined = |name: &str| ServerMessage::PeerJoined {
+        name: name.into(),
+        spectator: false,
+    };
     for message in [
         ServerMessage::Welcome {
             client_id: "guest-id".into(),
@@ -2519,12 +2532,17 @@ fn player_list_tracks_peers_and_skips_our_own_join_echo() {
             peers: vec!["Ana".into()],
             snapshot,
             media_upload_token: None,
+            spectator: false,
+            spectators: Vec::new(),
             server_now_ms: 0,
         },
         joined("Me"),
         joined("Bo"),
         joined("Me"),
-        ServerMessage::PeerLeft { name: "Ana".into() },
+        ServerMessage::PeerLeft {
+            name: "Ana".into(),
+            spectator: false,
+        },
     ] {
         incoming_tx.send(message).unwrap();
     }
@@ -4026,7 +4044,10 @@ fn chat_from_the_room_shows_with_names_and_an_unread_count_when_collapsed() {
         )))
         .unwrap();
     rig.incoming_tx
-        .send(ServerMessage::PeerJoined { name: "Bob".into() })
+        .send(ServerMessage::PeerJoined {
+            name: "Bob".into(),
+            spectator: false,
+        })
         .unwrap();
     rig.relay();
     // A new egui area is measured, unseen, on its first frame.
@@ -4327,4 +4348,222 @@ fn packages_leave_holders_behind() {
     .unwrap();
     snapshot.holders = vec![rig_holder("Ada")];
     assert!(portable_snapshot(&snapshot).holders.is_empty());
+}
+
+#[test]
+fn a_spectator_drags_the_view_not_the_pieces_and_sends_nothing() {
+    let mut rig = DragRig::new(3, 4);
+    rig.app.spectating = true;
+    let before = rig.app.snapshot.clone().unwrap();
+    let pan = rig.app.board_pan;
+    let piece = rig.piece(0);
+    rig.drag(0, piece.x + 200.0, piece.y + 50.0, egui::Modifiers::NONE);
+    rig.relay();
+    assert_eq!(rig.messages, 0, "no room change was sent");
+    assert!(
+        rig.cursors_sent.is_empty(),
+        "a spectator's pointer stays private"
+    );
+    assert_eq!(rig.app.snapshot.as_ref().unwrap().pieces, before.pieces);
+    assert_ne!(rig.app.board_pan, pan, "dragging pans the view instead");
+    assert!(rig.app.status.contains("watching"), "{}", rig.app.status);
+    // Shortcuts that would change the room do nothing either.
+    rig.app.arrange_tray(TrayArrangement::Shuffle);
+    rig.app.chat.ping_requested = true;
+    rig.frame(Vec::new());
+    rig.relay();
+    assert_eq!(rig.messages, 0);
+    assert!(rig.pings_sent.is_empty());
+}
+
+#[test]
+fn welcome_and_peer_messages_track_spectators_apart_from_players() {
+    let mut rig = DragRig::new(2, 2);
+    let snapshot = rig.app.snapshot.clone().unwrap();
+    for message in [
+        ServerMessage::Welcome {
+            client_id: "me".into(),
+            name: "Me".into(),
+            peers: vec!["Ana".into()],
+            snapshot,
+            media_upload_token: None,
+            spectator: true,
+            spectators: vec!["Bo".into()],
+            server_now_ms: 0,
+        },
+        ServerMessage::PeerJoined {
+            name: "Cy".into(),
+            spectator: true,
+        },
+        ServerMessage::PeerLeft {
+            name: "Bo".into(),
+            spectator: true,
+        },
+    ] {
+        rig.incoming_tx.send(message).unwrap();
+    }
+    rig.relay();
+    assert!(rig.app.spectating);
+    assert!(rig.app.watch_only, "a reconnect rejoins as a spectator");
+    assert_eq!(rig.app.peers, ["Ana"]);
+    assert_eq!(rig.app.spectators, ["Cy"]);
+    assert_eq!(
+        presence_label(rig.app.peers.len(), rig.app.spectators.len(), true),
+        "1 player · 2 watching"
+    );
+    rig.app.leave_room();
+    assert!(!rig.app.spectating && rig.app.spectators.is_empty());
+}
+
+#[test]
+fn presence_counts_players_and_watchers() {
+    assert_eq!(presence_label(0, 0, false), "Just you");
+    assert_eq!(presence_label(2, 0, false), "3 players");
+    assert_eq!(presence_label(1, 1, false), "2 players · 1 watching");
+    assert_eq!(presence_label(0, 0, true), "0 players · 1 watching");
+}
+
+#[test]
+fn the_timelapse_replays_the_solve_step_by_step_without_touching_the_room() {
+    let mut rig = DragRig::new(3, 4);
+    let start = rig.app.snapshot.clone().unwrap();
+    rig.drag(0, 0.0, 0.0, egui::Modifiers::NONE);
+    let (x, y) = (rig.piece(5).x - 60.0, rig.piece(5).y + 10.0);
+    rig.drag(5, x, y, egui::Modifiers::NONE);
+    let live = rig.app.snapshot.clone().unwrap();
+    assert!(live.piece(0).unwrap().placed);
+
+    rig.app.request_timelapse();
+    rig.relay();
+    let mut replay = rig.app.replay.take().expect("the replay opened");
+    assert_eq!(replay.steps(), 2);
+    assert!(replay.playing);
+
+    // Step 0 is the scattered start.
+    replay.seek(0.0);
+    let view = replay.view_of(&live);
+    for piece in &start.pieces {
+        let shown = view.piece(piece.id).unwrap();
+        assert!((shown.x - piece.x).abs() <= 0.5 && (shown.y - piece.y).abs() <= 0.5);
+        assert!(!shown.placed);
+    }
+    // Half a step animates the first drop part-way.
+    replay.seek(0.5);
+    let view = replay.view_of(&live);
+    let from = start.piece(0).unwrap();
+    let halfway = view.piece(0).unwrap();
+    assert!(
+        (halfway.x - from.x.round() / 2.0).abs() <= 1.0,
+        "{}",
+        halfway.x
+    );
+    // One step: the first piece is home, and counts as placed.
+    replay.seek(1.0);
+    let view = replay.view_of(&live);
+    assert!(view.piece(0).unwrap().placed);
+    assert_eq!(view.piece(5).unwrap().x, start.piece(5).unwrap().x.round());
+    // The end matches the room.
+    replay.seek(2.0);
+    let view = replay.view_of(&live);
+    for piece in &live.pieces {
+        let shown = view.piece(piece.id).unwrap();
+        assert!((shown.x - piece.x).abs() <= 0.5 && (shown.y - piece.y).abs() <= 0.5);
+    }
+    // And back again: scrubbing backwards rebuilds from the start.
+    replay.seek(0.0);
+    assert!(!replay.view_of(&live).piece(0).unwrap().placed);
+
+    // Playing covers the whole solve in the chosen time, then stops.
+    replay.seconds = 20;
+    replay.playing = true;
+    replay.advance(100.0);
+    replay.advance(110.0);
+    assert!((replay.position - 1.0).abs() < 1e-9, "{}", replay.position);
+    replay.advance(200.0);
+    assert!(replay.finished() && !replay.playing);
+    replay.toggle();
+    assert!(
+        replay.playing && replay.position == 0.0,
+        "play again from the start"
+    );
+
+    // Drawing the replay changes nothing in the live room or on the wire.
+    rig.app.replay = Some(replay);
+    rig.frame(Vec::new());
+    let piece = rig.piece(3);
+    rig.drag(3, piece.x + 100.0, piece.y, egui::Modifiers::NONE);
+    assert_eq!(rig.app.snapshot.as_ref().unwrap().pieces, live.pieces);
+}
+
+#[test]
+fn an_empty_or_foreign_timelapse_does_not_open() {
+    let mut rig = DragRig::new(2, 2);
+    rig.app.request_timelapse();
+    rig.relay();
+    assert!(rig.app.replay.is_none());
+    assert!(
+        rig.app.status.contains("Nothing to replay"),
+        "{}",
+        rig.app.status
+    );
+    let pieces = rig.app.snapshot.as_ref().unwrap().pieces.clone();
+    let mut foreign = pieceoff_core::Timelapse::default();
+    foreign.ensure_started(&pieces[..3]);
+    foreign.record(5, &pieces[..1]);
+    assert!(Replay::new(foreign, &pieces).is_err());
+    // An answer nobody asked for is ignored.
+    let mut log = pieceoff_core::Timelapse::default();
+    log.ensure_started(&pieces);
+    log.record(5, &pieces[..1]);
+    rig.incoming_tx
+        .send(ServerMessage::Timelapse { timelapse: log })
+        .unwrap();
+    rig.relay();
+    assert!(rig.app.replay.is_none());
+}
+
+#[test]
+fn replay_views_work_out_placement_and_joins_from_positions() {
+    let mut snapshot = RoomSnapshot::create(
+        "room".into(),
+        "CODE".into(),
+        "Joins".into(),
+        "a".repeat(64),
+        "png".into(),
+        300,
+        200,
+        2,
+        3,
+        "host".into(),
+    )
+    .unwrap();
+    let (cw, ch) = (snapshot.cell_width(), snapshot.cell_height());
+    // Pieces 0 and 1 meet edge to edge off the board (rounded to pixels);
+    // piece 5 is home; the rest are scattered far apart.
+    for piece in &mut snapshot.pieces {
+        let (x, y) = match (piece.row, piece.column) {
+            (0, 0) => (1000.0, 1000.0),
+            (0, 1) => ((1000.0 + cw).round(), 1000.0),
+            (1, 2) => (2.0 * cw, ch),
+            (row, column) => (3000.0 + 500.0 * f32::from(column), 500.0 * f32::from(row)),
+        };
+        piece.x = x;
+        piece.y = y;
+        piece.placed = false;
+        piece.group_id = piece.id;
+    }
+    timelapse::settle_view(&mut snapshot);
+    let at = |row, column| {
+        snapshot
+            .pieces
+            .iter()
+            .find(|piece| piece.row == row && piece.column == column)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(at(0, 0).group_id, at(0, 1).group_id);
+    assert_ne!(at(0, 0).group_id, at(1, 0).group_id);
+    assert!(!at(0, 0).placed);
+    assert!(at(1, 2).placed);
+    assert_eq!(snapshot.settled_pieces(), 3);
 }

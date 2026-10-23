@@ -113,6 +113,22 @@ pub(crate) fn message_is_problem(text: &str) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+/// The toolbar's head count: "Just you", "3 players", "2 players · 1 watching".
+pub(crate) fn presence_label(peers: usize, watchers: usize, spectating: bool) -> String {
+    let players = peers + usize::from(!spectating);
+    let watchers = watchers + usize::from(spectating);
+    let players = match players {
+        1 if !spectating => "Just you".to_owned(),
+        1 => "1 player".to_owned(),
+        count => format!("{count} players"),
+    };
+    if watchers == 0 {
+        players
+    } else {
+        format!("{players} · {watchers} watching")
+    }
+}
+
 pub(crate) fn format_ago(elapsed: Duration) -> String {
     match elapsed.as_secs() {
         0..5 => "now".into(),
@@ -216,7 +232,9 @@ impl PieceOffApp {
             self.help_open = !self.help_open;
         }
         if ctx.input_mut(|input| input.consume_key(none, egui::Key::Escape)) {
-            if self.help_open {
+            if self.replay.is_some() {
+                self.replay = None;
+            } else if self.help_open {
                 self.help_open = false;
             } else if self.controls_open {
                 self.controls_open = false;
@@ -251,10 +269,12 @@ impl PieceOffApp {
             self.settings.show_ghost = !self.settings.show_ghost;
             self.persist_settings();
         }
-        if self.controls.pressed(ctx, Action::TidyTray) {
+        // Spectators and replays leave the room's pieces alone.
+        let playing = !self.spectating && self.replay.is_none();
+        if self.controls.pressed(ctx, Action::TidyTray) && playing {
             self.arrange_tray(TrayArrangement::EdgesFirst);
         }
-        if self.controls.pressed(ctx, Action::ShuffleTray) {
+        if self.controls.pressed(ctx, Action::ShuffleTray) && playing {
             self.arrange_tray(TrayArrangement::Shuffle);
         }
         if self.controls.pressed(ctx, Action::FocusChat) {
@@ -264,7 +284,7 @@ impl PieceOffApp {
         if self.controls.pressed(ctx, Action::Ping) {
             self.chat.ping_requested = true;
         }
-        if self.controls.pressed(ctx, Action::NewHolder) {
+        if self.controls.pressed(ctx, Action::NewHolder) && playing {
             self.holders.create_requested = true;
         }
     }
@@ -321,44 +341,53 @@ impl PieceOffApp {
         }
         if self.connected {
             status_dot(ui, SUCCESS);
-            let count = self.peers.len() + 1;
-            let label = if count == 1 {
-                "Just you".to_owned()
-            } else {
-                format!("{count} players")
-            };
-            ui.menu_button(label, |ui| {
-                let me = if is_host {
-                    format!("{} (you, host)", self.player_name)
-                } else {
-                    format!("{} (you)", self.player_name)
-                };
-                ui.label(RichText::new(me).strong());
-                for peer in &self.peers {
-                    ui.label(peer);
-                }
-                if self.peers.is_empty() {
-                    ui.weak("Share the invite code to play together.");
-                }
-                if is_host {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.holders.release_input)
-                                .hint_text("Name")
-                                .desired_width(110.0),
-                        );
-                        if ui
-                            .button("Release name")
-                            .on_hover_text("Free an absent player's name so they can rejoin from another device. Names also free up 10 minutes after their player leaves.")
-                            .clicked()
-                        {
-                            let name = std::mem::take(&mut self.holders.release_input);
-                            self.release_name(&name);
-                        }
-                    });
-                }
-            });
+            ui.menu_button(
+                presence_label(self.peers.len(), self.spectators.len(), self.spectating),
+                |ui| {
+                    let me = if is_host {
+                        format!("{} (you, host)", self.player_name)
+                    } else if self.spectating {
+                        format!("{} (you, watching)", self.player_name)
+                    } else {
+                        format!("{} (you)", self.player_name)
+                    };
+                    ui.label(RichText::new(me).strong());
+                    for peer in &self.peers {
+                        ui.label(peer);
+                    }
+                    if self.peers.is_empty() && !self.spectating {
+                        ui.weak("Share the invite code to play together.");
+                    }
+                    if !self.spectators.is_empty() {
+                        ui.separator();
+                        ui.weak(format!("Watching: {}", self.spectators.join(", ")));
+                    }
+                    if is_host {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.holders.release_input)
+                                    .hint_text("Name")
+                                    .desired_width(110.0),
+                            );
+                            if ui
+                                .button("Release name")
+                                .on_hover_text("Free an absent player's name so they can rejoin from another device. Names also free up 10 minutes after their player leaves.")
+                                .clicked()
+                            {
+                                let name = std::mem::take(&mut self.holders.release_input);
+                                self.release_name(&name);
+                            }
+                        });
+                    }
+                },
+            );
+            if self.spectating {
+                ui.label(RichText::new("Watching").color(ACCENT))
+                    .on_hover_text(
+                        "You joined to watch: chat works, pieces and holders do not move",
+                    );
+            }
         } else if self.network.is_some() {
             status_dot(ui, WARNING);
             ui.colored_label(WARNING, "Connecting…");
@@ -439,38 +468,38 @@ impl PieceOffApp {
             }
         }
         ui.separator();
-        ui.menu_button("Arrange", |ui| {
-            if ui
-                .button("Edges first")
-                .on_hover_text(self.hint_with_keys(
-                    "Corners, then edges, then the rest, in order",
-                    Action::TidyTray,
-                ))
-                .clicked()
-            {
-                ui.close();
-                self.arrange_tray(TrayArrangement::EdgesFirst);
-            }
-            if ui
-                .button("Shuffle")
-                .on_hover_text(
-                    self.hint_with_keys(
+        if !self.spectating {
+            ui.menu_button("Arrange", |ui| {
+                if ui
+                    .button("Edges first")
+                    .on_hover_text(self.hint_with_keys(
+                        "Corners, then edges, then the rest, in order",
+                        Action::TidyTray,
+                    ))
+                    .clicked()
+                {
+                    ui.close();
+                    self.arrange_tray(TrayArrangement::EdgesFirst);
+                }
+                if ui
+                    .button("Shuffle")
+                    .on_hover_text(self.hint_with_keys(
                         "Mix the loose pieces into a new order",
                         Action::ShuffleTray,
-                    ),
-                )
-                .clicked()
-            {
-                ui.close();
-                self.arrange_tray(TrayArrangement::Shuffle);
-            }
-            ui.weak("Assembled and held pieces, and pieces in holders, stay put.");
-        })
-        .response
-        .on_hover_text("Tidy the loose pieces in the tray");
-        ui.menu_button("Holders", |ui| self.holders_menu(ui, is_host))
+                    ))
+                    .clicked()
+                {
+                    ui.close();
+                    self.arrange_tray(TrayArrangement::Shuffle);
+                }
+                ui.weak("Assembled and held pieces, and pieces in holders, stay put.");
+            })
             .response
-            .on_hover_text("Your own sorting areas on the table");
+            .on_hover_text("Tidy the loose pieces in the tray");
+            ui.menu_button("Holders", |ui| self.holders_menu(ui, is_host))
+                .response
+                .on_hover_text("Your own sorting areas on the table");
+        }
         ui.menu_button("More", |ui| {
             let mut ghost = self.settings.show_ghost;
             if ui
@@ -509,6 +538,16 @@ impl PieceOffApp {
             if ui.button("Controls…").clicked() {
                 ui.close();
                 self.controls_open = true;
+            }
+            if ui
+                .button("Watch timelapse")
+                .on_hover_text(
+                    "Replay this solve so far from the scattered start, on your screen only",
+                )
+                .clicked()
+            {
+                ui.close();
+                self.request_timelapse();
             }
             ui.separator();
             if ui
@@ -685,6 +724,8 @@ impl PieceOffApp {
                     self.join_room();
                 }
             });
+            ui.checkbox(&mut self.watch_only, "Watch only")
+                .on_hover_text("Join as a spectator: see the room and chat, without moving pieces or counting as a player");
             if !self.recent_rooms.is_empty() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -1055,6 +1096,7 @@ impl PieceOffApp {
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),
                     media_extension: self.media_extension.clone(),
+                    spectator: self.watch_only,
                     player_key: self.settings.player_key.clone(),
                 };
                 self.connect(message);
@@ -1217,6 +1259,7 @@ impl PieceOffApp {
             });
         if in_room {
             self.chat_overlay(ctx);
+            self.replay_controls(ctx);
         }
         self.record_status(ctx.input(|input| input.time));
         if in_room || self.clip_plan.is_some() {

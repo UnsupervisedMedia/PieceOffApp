@@ -235,6 +235,8 @@ impl RoomRuntime {
             peers,
             snapshot,
             media_upload_token,
+            spectator: false,
+            spectators: Vec::new(),
             server_now_ms: 0,
         })
     }
@@ -303,6 +305,7 @@ mod tests {
             name: "n".into(),
             media_sha256: sha(),
             media_extension: "mp4".into(),
+            spectator: false,
             player_key: String::new(),
         };
         let wrong = RoomRuntime::new_room("h", join, "i".into(), "C".into());

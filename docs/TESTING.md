@@ -99,6 +99,16 @@ HTTPS for media transfer automatically.
     lets the other client join under the name. Without it, the name frees up
     10 minutes after the owner left. The host's **Clear** removes anyone's
     holder, and Play again clears all of them.
+19. Join from a third client with **Watch only** ticked. Players see
+    "· 1 watching" and no cursor from it; the spectator sees moves, cursors
+    and pings, can chat, cannot drag pieces (a hint says so; dragging pans),
+    has no Arrange or Holders menus, and cannot ping. With only the spectator
+    left, its solve clock stops.
+20. After a few drops, **More → Watch timelapse**: the replay starts from the
+    scattered layout, steps animate, the scrub bar seeks both ways, the
+    length menu changes the speed, and **Close** (or Esc) returns to the live
+    room, which kept changing meanwhile. Finish the puzzle and use
+    **Timelapse** on the finish card.
 
 For a one-machine smoke test, run a server and two app instances, choose a
 different local WebSocket address in both apps, and join the room from the

@@ -114,6 +114,18 @@ pub(crate) fn piece_visible_for_filter(
 /// place.
 enum BoardAction {
     PlayAgain,
+    WatchTimelapse,
+}
+
+/// How the board responds to the pointer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoardMode {
+    /// A player: pieces and holders move.
+    Play,
+    /// A spectator: the live room, looked at but not touched.
+    Watch,
+    /// A timelapse replay over a copy of the room.
+    Replay,
 }
 
 /// Maps source-image pixels to screen points.
@@ -308,10 +320,22 @@ impl PieceOffApp {
             self.render_media_preview(ui);
             return;
         };
-        let action = self.render_room(ui, &mut snapshot);
+        let action = if let Some(mut replay) = self.replay.take() {
+            let mut view = replay.view_of(&snapshot);
+            self.replay = Some(replay);
+            self.render_room(ui, &mut view, BoardMode::Replay)
+        } else {
+            let mode = if self.spectating {
+                BoardMode::Watch
+            } else {
+                BoardMode::Play
+            };
+            self.render_room(ui, &mut snapshot, mode)
+        };
         self.snapshot = Some(snapshot);
         match action {
             Some(BoardAction::PlayAgain) => self.restart_puzzle(),
+            Some(BoardAction::WatchTimelapse) => self.request_timelapse(),
             None => {}
         }
     }
@@ -378,7 +402,9 @@ impl PieceOffApp {
         &mut self,
         ui: &mut egui::Ui,
         snapshot: &mut RoomSnapshot,
+        mode: BoardMode,
     ) -> Option<BoardAction> {
+        let interactive = mode == BoardMode::Play;
         let Some(texture_id) = self
             .still_assist_texture
             .as_ref()
@@ -391,7 +417,10 @@ impl PieceOffApp {
             return None;
         };
         let now = ui.input(|input| input.time);
-        self.sync_room_state(snapshot, now);
+        // A replay is a copy: its pieces must not flash or record a finish.
+        if mode != BoardMode::Replay {
+            self.sync_room_state(snapshot, now);
+        }
         let available = ui.available_size().max(Vec2::splat(1.0));
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let canvas = response.rect;
@@ -537,7 +566,7 @@ impl PieceOffApp {
                 view.to_screen(area.max.x, area.max.y),
             )
         };
-        if std::mem::take(&mut self.holders.create_requested) {
+        if std::mem::take(&mut self.holders.create_requested) && interactive {
             // Near the pointer when it is over the table, else mid-view.
             let near = response
                 .hover_pos()
@@ -596,6 +625,7 @@ impl PieceOffApp {
                 .is_ok();
             (drag.holder_id, area, valid)
         });
+        // A replay's copy has no holders; they are not in the log.
         paint_holders(
             &painter,
             &snapshot.holders,
@@ -621,8 +651,10 @@ impl PieceOffApp {
         let pressed_piece = |pointer: Option<Pos2>| {
             pointer.and_then(|pointer| hit_test(snapshot, &self.shape_cache, pointer))
         };
-        let idle =
-            self.dragging.is_none() && self.pan_drag_last.is_none() && self.holders.drag.is_none();
+        let idle = interactive
+            && self.dragging.is_none()
+            && self.pan_drag_last.is_none()
+            && self.holders.drag.is_none();
         let grip_at = |pointer: Option<Pos2>| {
             pointer.and_then(|pointer| {
                 holder_grip_at(
@@ -651,7 +683,7 @@ impl PieceOffApp {
                 .map(|holder| holder.owner.clone())
         };
         let hovered_reserved = hovered_piece.and_then(reserved_owner);
-        let clicked_piece = if response.clicked() || response.double_clicked() {
+        let clicked_piece = if interactive && (response.clicked() || response.double_clicked()) {
             pressed_piece(response.interact_pointer_pos())
         } else {
             None
@@ -663,14 +695,23 @@ impl PieceOffApp {
             let pointer = ui
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            (pointer, pressed_piece(pointer), grip_at(pointer))
+            if interactive {
+                (pointer, pressed_piece(pointer), grip_at(pointer))
+            } else {
+                (pointer, None, None)
+            }
         });
+        if mode == BoardMode::Watch
+            && drag_start.is_some_and(|(pointer, ..)| pressed_piece(pointer).is_some())
+        {
+            self.status = "You are watching: only players can move pieces.".into();
+        }
 
         if response.double_clicked() && clicked_piece.is_none() {
             self.view_command = Some(ViewCommand::Fit);
             ui.ctx().request_repaint();
         }
-        if response.clicked() {
+        if response.clicked() && interactive {
             let select_modifier = self.settings.mouse.select_modifier;
             let control = ui.input(|input| select_modifier.held(&input.modifiers));
             if let Some(id) = clicked_piece {
@@ -752,11 +793,15 @@ impl PieceOffApp {
                         piece_ids: selected,
                     });
                 }
-            } else if let (true, Some(pointer)) = (control, pointer) {
+            } else if let (true, true, Some(pointer)) = (interactive, control, pointer) {
                 // Holding the select modifier on empty space draws a box.
                 self.marquee = Some((pointer, pointer));
-            } else if pointer.is_some() && !locked && self.settings.mouse.drag_empty_pans {
-                // Dragging empty space pans, like Shift-drag.
+            } else if pointer.is_some()
+                && !locked
+                && (self.settings.mouse.drag_empty_pans || !interactive)
+            {
+                // Dragging empty space pans, like Shift-drag; when nothing
+                // on the board can move, any drag pans.
                 self.pan_drag_last = response.interact_pointer_pos();
             }
         }
@@ -1054,21 +1099,29 @@ impl PieceOffApp {
             })
             .map(|point| view.to_board(point))
             .filter(|point| scene.contains(point.x, point.y));
-        self.share_pointer(on_table, now, ui.ctx());
-        self.maybe_ping(on_table);
-        self.paint_pings(
-            &painter,
-            canvas,
-            |point| view.to_screen(point.x, point.y),
-            now,
-            ui.ctx(),
-        );
-        self.paint_remote_cursors(
-            &painter,
-            |point| view.to_screen(point.x, point.y),
-            now,
-            ui.ctx(),
-        );
+        // Only players point and ping; a replay shows none of the live room.
+        let pointing = on_table.filter(|_| interactive);
+        self.share_pointer(pointing, now, ui.ctx());
+        if interactive {
+            self.maybe_ping(on_table);
+        } else if std::mem::take(&mut self.chat.ping_requested) && mode == BoardMode::Watch {
+            self.status = "Spectators can chat but cannot ping the board.".into();
+        }
+        if mode != BoardMode::Replay {
+            self.paint_pings(
+                &painter,
+                canvas,
+                |point| view.to_screen(point.x, point.y),
+                now,
+                ui.ctx(),
+            );
+            self.paint_remote_cursors(
+                &painter,
+                |point| view.to_screen(point.x, point.y),
+                now,
+                ui.ctx(),
+            );
+        }
 
         let total = snapshot.pieces.len();
         let placed = snapshot.pieces.iter().filter(|piece| piece.placed).count();
@@ -1084,7 +1137,10 @@ impl PieceOffApp {
             placed
         };
         let completed = snapshot.completed();
-        let solve_time = Self::solve_time(snapshot);
+        let solve_time = match (mode, self.replay.as_ref()) {
+            (BoardMode::Replay, Some(replay)) => Some(replay.solve_time()),
+            _ => Self::solve_time(snapshot),
+        };
         let shown_time = if self.settings.hide_solve_timer {
             None
         } else {
@@ -1098,13 +1154,25 @@ impl PieceOffApp {
                 u64::from(1_000 - into_second).max(50),
             ));
         }
-        if self.still_assist_texture.is_some() {
+        let banner = match mode {
+            BoardMode::Replay => Some(("Timelapse replay · the live room carries on", ACCENT)),
+            BoardMode::Watch => Some(("Watching · only players move pieces", ACCENT)),
+            BoardMode::Play if self.still_assist_texture.is_some() => Some((
+                "Still-frame assist · playback continues",
+                Color32::LIGHT_YELLOW,
+            )),
+            BoardMode::Play => None,
+        };
+        if let Some((text, color)) = banner {
             paint_pill(
                 &painter,
                 canvas.center_top() + Vec2::new(0.0, 12.0),
-                "Still-frame assist · playback continues",
-                Color32::LIGHT_YELLOW,
+                text,
+                color,
             );
+        }
+        if mode == BoardMode::Replay {
+            return None;
         }
         if !completed {
             self.win_dismissed_room = None;
@@ -1164,21 +1232,31 @@ impl PieceOffApp {
             }
             let is_host = self.client_id.as_deref() == Some(snapshot.host_id.as_str());
             let row_y = card.center_bottom().y - 24.0;
-            let (watch_x, again_x) = if is_host {
-                (card.center().x - 75.0, card.center().x + 75.0)
-            } else {
-                (card.center().x, card.center().x)
+            let buttons = if is_host { 3.0 } else { 2.0 };
+            let button = |index: f32| {
+                let x = card.center().x + (index - (buttons - 1.0) / 2.0) * 118.0;
+                Rect::from_center_size(Pos2::new(x, row_y), Vec2::new(110.0, 28.0))
             };
-            let watch = Rect::from_center_size(Pos2::new(watch_x, row_y), Vec2::new(130.0, 28.0));
-            if ui.put(watch, egui::Button::new("Keep watching")).clicked() {
+            if ui
+                .put(button(0.0), egui::Button::new("Keep watching"))
+                .clicked()
+            {
                 self.win_dismissed_room = Some(snapshot.id.clone());
             }
-            if is_host {
-                let again =
-                    Rect::from_center_size(Pos2::new(again_x, row_y), Vec2::new(130.0, 28.0));
-                if ui.put(again, egui::Button::new("Play again")).clicked() {
-                    action = Some(BoardAction::PlayAgain);
-                }
+            if ui
+                .put(button(1.0), egui::Button::new("Timelapse"))
+                .on_hover_text("Replay the whole solve in under a minute")
+                .clicked()
+            {
+                self.win_dismissed_room = Some(snapshot.id.clone());
+                action = Some(BoardAction::WatchTimelapse);
+            }
+            if is_host
+                && ui
+                    .put(button(2.0), egui::Button::new("Play again"))
+                    .clicked()
+            {
+                action = Some(BoardAction::PlayAgain);
             }
             ui.ctx().request_repaint();
         }
