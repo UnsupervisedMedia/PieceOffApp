@@ -157,6 +157,7 @@ fn accepted_room_welcome_is_saved_and_can_refill_the_rejoin_form() {
             peers: Vec::new(),
             snapshot,
             media_upload_token: None,
+            server_now_ms: 0,
         })
         .unwrap();
 
@@ -208,11 +209,20 @@ fn portable_package_preserves_puzzle_state_and_verifies_embedded_media() {
     snapshot.playback.playing = true;
     snapshot.playback.position_ms = 500;
     snapshot.media_available = true;
+    // A run in progress: 40 s banked, and the clock still running.
+    snapshot.stats.started = true;
+    snapshot.stats.elapsed_ms = 40_000;
+    snapshot.stats.running_since_ms = Some(board::wall_clock_ms());
+    snapshot.stats.credit("Ada", 3);
     let package_path = directory.join("puzzle.pieceoff");
 
     write_puzzle_package(&package_path, &media_path, &snapshot).unwrap();
     let (restored, restored_media) = read_puzzle_package(&package_path).unwrap();
     assert_eq!(restored.title, snapshot.title);
+    // Solve stats travel with the puzzle, stopped and with the time banked.
+    assert!(restored.stats.started && !restored.stats.running());
+    assert!((40_000..50_000).contains(&restored.stats.elapsed_ms));
+    assert_eq!(restored.stats.players, snapshot.stats.players);
     assert_eq!(restored.media_sha256, media_hash);
     assert!(restored.pieces[0].placed);
     assert_eq!(restored.pieces[0].held_by, None);
@@ -1515,6 +1525,8 @@ struct DragRig {
     cw: f32,
     ch: f32,
     messages: usize,
+    /// The host clock the room is given, in ms since the Unix epoch.
+    room_clock_ms: u64,
     /// Our pointer as sent to the room; `None` entries are "left the table".
     cursors_sent: Vec<Option<Pos2>>,
     chats_sent: Vec<String>,
@@ -1541,6 +1553,7 @@ impl DragRig {
         let mut room = RoomRuntime::default();
         room.snapshot = Some(snapshot.clone());
         room.host_id = Some("host".into());
+        room.names.insert("host".into(), "Host".into());
         let (outgoing, outgoing_rx) = tokio_mpsc::unbounded_channel();
         let (incoming_tx, incoming) = mpsc::channel();
         let texture = ctx.load_texture(
@@ -1569,6 +1582,7 @@ impl DragRig {
             cw: snapshot.cell_width(),
             ch: snapshot.cell_height(),
             messages: 0,
+            room_clock_ms: board::wall_clock_ms(),
             cursors_sent: Vec::new(),
             chats_sent: Vec::new(),
             pings_sent: Vec::new(),
@@ -1637,29 +1651,8 @@ impl DragRig {
     /// Pass the app's pending messages to the room and its answers back.
     fn relay(&mut self) {
         while let Ok(message) = self.outgoing_rx.try_recv() {
-            let result = match message {
-                ClientMessage::DragStartSelection { piece_ids } => {
-                    self.room.acquire_selection("host", &piece_ids)
-                }
-                ClientMessage::MoveSelection {
-                    anchor_piece_id,
-                    x,
-                    y,
-                } => self
-                    .room
-                    .move_selection("host", anchor_piece_id, x, y, false),
-                ClientMessage::DragEndSelection {
-                    anchor_piece_id,
-                    x,
-                    y,
-                } => self
-                    .room
-                    .move_selection("host", anchor_piece_id, x, y, true),
-                ClientMessage::RestartPuzzle => self.room.restart("host", 42),
-                ClientMessage::RearrangeTray { arrangement } => {
-                    self.room.rearrange_tray(arrangement, 7)
-                }
-                // Live cursors are relayed, not room changes.
+            match message {
+                // Live cursors, chat and pings are relayed, not room changes.
                 ClientMessage::Cursor { x, y } => {
                     self.cursors_sent.push(Some(Pos2::new(x, y)));
                     continue;
@@ -1676,12 +1669,13 @@ impl DragRig {
                     self.pings_sent.push(Pos2::new(x, y));
                     continue;
                 }
-                other => panic!("unexpected message {other:?}"),
-            };
-            let (pieces, revision) = result.expect("room accepts the message");
-            self.incoming_tx
-                .send(ServerMessage::PiecesChanged { pieces, revision })
-                .unwrap();
+                _ => {}
+            }
+            let outcome = self
+                .room
+                .apply("host", message, self.room_clock_ms)
+                .expect("room accepts the message");
+            self.incoming_tx.send(outcome.event).unwrap();
             self.messages += 1;
         }
         self.app.process_network(&self.ctx.clone());
@@ -1755,10 +1749,12 @@ fn host_can_play_again_after_finishing() {
     for id in 0..12 {
         rig.drag_to_target(id);
     }
-    assert!(rig.app.snapshot.as_ref().unwrap().completed());
-    assert!(rig.app.timer_solved.is_some(), "the solve time is frozen");
-    // Click the real "Play again" button on the completion card.
-    let again = Pos2::new(675.0, 139.0);
+    let snapshot = rig.app.snapshot.as_ref().unwrap();
+    assert!(snapshot.completed());
+    assert!(snapshot.stats.finished, "the solve clock is stopped");
+    // Click the real "Play again" button on the completion card, below the
+    // one player row.
+    let again = Pos2::new(675.0, 161.0);
     rig.frame(vec![egui::Event::PointerMoved(again)]);
     rig.frame(Vec::new());
     rig.button(again, true, egui::Modifiers::NONE);
@@ -1771,8 +1767,11 @@ fn host_can_play_again_after_finishing() {
     assert!(snapshot.pieces.iter().all(|p| !p.placed));
     assert!(rig.app.win_dismissed_room.is_none());
     rig.frame(Vec::new());
-    assert!(rig.app.timer_solved.is_none(), "a restart begins a new run");
-    assert!(rig.app.timer_started.is_some());
+    let stats = &rig.app.snapshot.as_ref().unwrap().stats;
+    assert!(
+        !stats.started && stats.players.is_empty(),
+        "a restart begins a new run"
+    );
     // And it is playable again.
     rig.drag_to_target(0);
     assert!(rig.piece(0).placed);
@@ -1863,6 +1862,108 @@ fn the_pointer_is_shared_in_board_coordinates_throttled_and_hidden_off_the_board
         rig.relay();
     }
     assert_eq!(rig.cursors_sent, vec![None]);
+}
+
+#[test]
+fn the_completion_card_shows_the_solve_time_and_who_placed_what() {
+    let mut rig = DragRig::new(3, 4);
+    rig.room.names.insert("guest".into(), "Bea".into());
+    // Bea places two pieces from her own client.
+    for id in [10, 11] {
+        let piece = rig.piece(id);
+        let (x, y) = (piece.column as f32 * rig.cw, piece.row as f32 * rig.ch);
+        for message in [
+            ClientMessage::DragStart { piece_id: id },
+            ClientMessage::DragEnd { piece_id: id, x, y },
+        ] {
+            let outcome = rig.room.apply("guest", message, rig.room_clock_ms).unwrap();
+            rig.incoming_tx.send(outcome.event).unwrap();
+        }
+    }
+    rig.app.process_network(&rig.ctx.clone());
+    assert!(rig.app.snapshot.as_ref().unwrap().stats.running());
+    for id in 0..10 {
+        if id == 9 {
+            rig.room_clock_ms += 83_000;
+        }
+        rig.drag_to_target(id);
+    }
+    let output = rig.frame(Vec::new());
+    let texts = painted_texts(&output);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "All 12 pieces joined in 01:23"),
+        "{texts:?}"
+    );
+    // The HUD clock is stopped at the same time.
+    assert!(texts.iter().any(|text| text == "01:23"), "{texts:?}");
+    let host = texts.iter().position(|text| text == "Host").unwrap();
+    let bea = texts.iter().position(|text| text == "Bea").unwrap();
+    assert!(host < bea, "most pieces first: {texts:?}");
+    assert_eq!(texts[host + 1], "10 pieces");
+    assert_eq!(texts[bea + 1], "2 pieces");
+    let lines = board::completion_lines(
+        rig.app.snapshot.as_ref().unwrap(),
+        Some(Duration::from_secs(83)),
+    );
+    assert_eq!(lines.players[0].2, player_color("Host"));
+    assert_eq!(lines.players[1].2, player_color("Bea"));
+
+    // The timer setting hides the HUD clock but not the card.
+    rig.app.settings.hide_solve_timer = true;
+    let texts = painted_texts(&rig.frame(Vec::new()));
+    assert!(!texts.iter().any(|text| text == "01:23"), "{texts:?}");
+    assert!(texts.iter().any(|text| text.ends_with("in 01:23")));
+}
+
+#[test]
+fn the_hud_clock_waits_for_the_first_pickup_then_runs_from_the_room_clock() {
+    let mut rig = DragRig::new(3, 4);
+    let texts = painted_texts(&rig.frame(Vec::new()));
+    assert!(!texts.iter().any(|text| text.contains(':')), "{texts:?}");
+    // The room clock started 65.5 s ago on the host. The half second keeps the
+    // display at 01:05 whatever offset a parallel test left in the global
+    // server-clock estimate (the e2e tests learn a few ms from a real server).
+    rig.room_clock_ms = board::wall_clock_ms() - 65_500;
+    rig.drag(0, 2_000.0, 0.0, egui::Modifiers::NONE);
+    let texts = painted_texts(&rig.frame(Vec::new()));
+    assert!(texts.iter().any(|text| text == "01:05"), "{texts:?}");
+}
+
+#[test]
+fn a_finished_library_puzzle_records_one_solve() {
+    let mut rig = DragRig::new(3, 4);
+    let mut entry = library::LibraryEntry {
+        id: "0123456789abcdef".into(),
+        title: "Shelf".into(),
+        rows: 3,
+        columns: 4,
+        is_video: false,
+        media_sha256: "a".repeat(64),
+        progress_percent: 0,
+        added_ms: 0,
+        updated_ms: 0,
+        package_bytes: 0,
+        best_time_ms: Some(500_000),
+        completions: 1,
+    };
+    std::fs::create_dir_all(&rig.app.library.dir).unwrap();
+    std::fs::write(rig.app.library.package_path(&entry.id), b"").unwrap();
+    rig.app.library.upsert(entry.clone()).unwrap();
+    rig.app.library_entry_id = Some(entry.id.clone());
+    for id in 0..12 {
+        if id == 11 {
+            rig.room_clock_ms += 90_000;
+        }
+        rig.drag_to_target(id);
+    }
+    rig.frame(Vec::new());
+    rig.frame(Vec::new());
+    entry = rig.app.library.entries[0].clone();
+    assert_eq!(entry.completions, 2, "counted once");
+    assert_eq!(entry.best_time_ms, Some(90_000));
+    assert_eq!(entry.status_line(), "0% assembled · best 01:30 · solved 2×");
 }
 
 fn painted_texts(output: &egui::FullOutput) -> Vec<String> {
@@ -2396,6 +2497,7 @@ fn player_list_tracks_peers_and_skips_our_own_join_echo() {
             peers: vec!["Ana".into()],
             snapshot,
             media_upload_token: None,
+            server_now_ms: 0,
         },
         joined("Me"),
         joined("Bo"),

@@ -409,6 +409,13 @@ pub(crate) fn portable_snapshot(snapshot: &RoomSnapshot) -> RoomSnapshot {
     portable.media_available = false;
     portable.playback.playing = false;
     portable.playback.changed_at_ms = 0;
+    // Keep the solve time and credits, banked and stopped.
+    portable.stats.pause(
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
     for piece in &mut portable.pieces {
         piece.held_by = None;
     }

@@ -40,6 +40,9 @@ the recording is silent.
   linked groups. Pan and zoom around a shared board and a loose-piece tray.
 - **Talk while you puzzle.** Room chat in the corner of the board, and a
   key that pings a spot on the table for everyone to see.
+- **Race the clock.** A shared solve timer runs while anyone is in the room,
+  and the finish card shows who placed how many pieces. The library keeps
+  each puzzle's best time.
 - **Keep your progress.** Rooms save on the server. Rejoin after disconnects,
   or export a self-contained `.pieceoff` package with puzzle progress and media.
 - **Run your own rooms.** The desktop app and server are open source. Host

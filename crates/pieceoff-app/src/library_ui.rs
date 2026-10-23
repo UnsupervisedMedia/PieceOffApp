@@ -461,11 +461,7 @@ fn library_card(
                         ACCENT_FILL
                     },
                 ));
-                ui.weak(if entry.finished() {
-                    "Finished".to_owned()
-                } else {
-                    format!("{}% assembled", entry.progress_percent)
-                });
+                ui.weak(entry.status_line());
                 if deleting {
                     ui.label("Delete this puzzle from the library?");
                     ui.horizontal(|ui| {

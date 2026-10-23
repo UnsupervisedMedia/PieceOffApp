@@ -94,6 +94,22 @@ impl Room {
         serde_json::to_string(&self.runtime.snapshot).unwrap_or_else(|_| "null".into())
     }
 
+    /// The snapshot to save at `now_ms`, with the solve clock banked.
+    pub fn stored_snapshot_json(&self, now_ms: f64) -> String {
+        let stored = self
+            .runtime
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.for_storage(clock(now_ms)));
+        serde_json::to_string(&stored).unwrap_or_else(|_| "null".into())
+    }
+
+    /// Tell the room whether anyone is connected: the solve clock only runs
+    /// while someone is.
+    pub fn set_occupied(&mut self, occupied: bool, now_ms: f64) {
+        self.runtime.set_occupied(occupied, clock(now_ms));
+    }
+
     pub fn handle(&mut self, client_id: &str, message_json: &str, now_ms: f64) -> String {
         let message: ClientMessage = match serde_json::from_str(message_json) {
             Ok(message) => message,
@@ -282,6 +298,21 @@ mod tests {
         let json = room.snapshot_json();
         let again = Room::from_snapshot(&json).unwrap();
         assert_eq!(again.snapshot_json(), json);
+    }
+
+    #[test]
+    fn the_solve_clock_pauses_when_empty_and_is_banked_for_storage() {
+        let mut room = created();
+        room.handle("host", r#"{"type":"drag_start","piece_id":0}"#, 1_000.0);
+        let stored: pieceoff_core::RoomSnapshot =
+            serde_json::from_str(&room.stored_snapshot_json(3_000.0)).unwrap();
+        assert_eq!(stored.stats.elapsed_ms, 2_000);
+        assert!(!stored.stats.running());
+        room.set_occupied(false, 4_000.0);
+        room.set_occupied(true, 10_000.0);
+        let live: pieceoff_core::RoomSnapshot =
+            serde_json::from_str(&room.snapshot_json()).unwrap();
+        assert_eq!(live.stats.elapsed_at(11_000), 4_000);
     }
 
     #[test]

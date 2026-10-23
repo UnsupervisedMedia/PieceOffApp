@@ -23,6 +23,12 @@ pub(crate) struct LibraryEntry {
     pub(crate) added_ms: u64,
     pub(crate) updated_ms: u64,
     pub(crate) package_bytes: u64,
+    /// Fastest finished run, by the room's solve clock.
+    #[serde(default)]
+    pub(crate) best_time_ms: Option<u64>,
+    /// How many runs of this puzzle were finished.
+    #[serde(default)]
+    pub(crate) completions: u32,
 }
 
 impl LibraryEntry {
@@ -32,6 +38,23 @@ impl LibraryEntry {
 
     pub(crate) fn finished(&self) -> bool {
         self.progress_percent >= 100
+    }
+
+    /// Progress, then the best time and finish count once there is one.
+    pub(crate) fn status_line(&self) -> String {
+        let progress = if self.finished() {
+            "Finished".to_owned()
+        } else {
+            format!("{}% assembled", self.progress_percent)
+        };
+        match self.best_time_ms {
+            Some(best) => format!(
+                "{progress} · best {} · solved {}×",
+                format_elapsed(Duration::from_millis(best)),
+                self.completions.max(1)
+            ),
+            None => progress,
+        }
     }
 }
 
@@ -195,9 +218,14 @@ impl Library {
         let mut updated = self.entries.clone();
         match updated.iter_mut().find(|existing| existing.id == entry.id) {
             Some(existing) => {
-                // Keep the original add date when progress is re-saved.
-                let added_ms = existing.added_ms;
-                *existing = LibraryEntry { added_ms, ..entry };
+                // Keep the original add date and solve record when progress
+                // is re-saved.
+                *existing = LibraryEntry {
+                    added_ms: existing.added_ms,
+                    best_time_ms: existing.best_time_ms,
+                    completions: existing.completions,
+                    ..entry
+                };
             }
             None => {
                 if updated.len() >= MAX_LIBRARY_ENTRIES {
@@ -208,6 +236,27 @@ impl Library {
                 updated.push(entry);
             }
         }
+        let previous = std::mem::replace(&mut self.entries, updated);
+        if let Err(error) = self.save_index() {
+            self.entries = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Count a finished run of entry `id` and keep the faster time.
+    pub(crate) fn record_solve(&mut self, id: &str, solve_ms: u64) -> Result<(), String> {
+        let mut updated = self.entries.clone();
+        let entry = updated
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or("That puzzle is no longer in the library")?;
+        entry.completions = entry.completions.saturating_add(1);
+        entry.best_time_ms = Some(
+            entry
+                .best_time_ms
+                .map_or(solve_ms, |best| best.min(solve_ms)),
+        );
         let previous = std::mem::replace(&mut self.entries, updated);
         if let Err(error) = self.save_index() {
             self.entries = previous;
@@ -356,6 +405,8 @@ pub(crate) fn save_to_library(request: SaveRequest) -> Result<LibraryEntry, Stri
         package_bytes: std::fs::metadata(&package)
             .map(|metadata| metadata.len())
             .unwrap_or(0),
+        best_time_ms: None,
+        completions: 0,
     })
 }
 
@@ -400,6 +451,8 @@ pub(crate) fn import_into_library(
         package_bytes: std::fs::metadata(&package)
             .map(|metadata| metadata.len())
             .unwrap_or(0),
+        best_time_ms: None,
+        completions: 0,
     })
 }
 
@@ -661,5 +714,40 @@ mod tests {
             entry.updated_ms -= index as u64 * 86_400_000;
             library.upsert(entry).unwrap();
         }
+    }
+    #[test]
+    fn solves_keep_the_best_time_through_resaves_and_old_indexes_load() {
+        let scratch = scratch_dir("best");
+        let shelf = scratch.join("shelf");
+        let (mut library, _) = Library::load(shelf.clone());
+        let entry = save(&scratch, &library, "Meadow", 70);
+        library.upsert(entry.clone()).unwrap();
+        assert_eq!(entry.best_time_ms, None);
+        assert_eq!(entry.status_line(), "0% assembled");
+
+        library.record_solve(&entry.id, 200_000).unwrap();
+        library.record_solve(&entry.id, 125_000).unwrap();
+        library.record_solve(&entry.id, 300_000).unwrap();
+        // Re-saving progress on leaving keeps the record.
+        library.upsert(entry.clone()).unwrap();
+        let (reloaded, _) = Library::load(shelf.clone());
+        let saved = &reloaded.entries[0];
+        assert_eq!(saved.best_time_ms, Some(125_000));
+        assert_eq!(saved.completions, 3);
+        assert!(saved.status_line().ends_with("best 02:05 · solved 3×"));
+        assert!(library.record_solve("ffffffffffffffff", 1).is_err());
+
+        // An index written before solve records existed still loads.
+        let mut old = serde_json::to_value(&reloaded.entries).unwrap();
+        for entry in old.as_array_mut().unwrap() {
+            let entry = entry.as_object_mut().unwrap();
+            entry.remove("best_time_ms");
+            entry.remove("completions");
+        }
+        std::fs::write(shelf.join("index.json"), old.to_string()).unwrap();
+        let (older, notice) = Library::load(shelf);
+        assert!(notice.is_none());
+        assert_eq!(older.entries[0].best_time_ms, None);
+        assert_eq!(older.entries[0].completions, 0);
     }
 }

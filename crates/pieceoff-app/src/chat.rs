@@ -59,13 +59,6 @@ pub(crate) struct RoomChat {
     pub(crate) typing: bool,
 }
 
-pub(crate) fn wall_clock_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 impl RoomChat {
     /// Forget everything, on leaving a room or entering another.
     pub(crate) fn reset(&mut self) {
@@ -130,7 +123,7 @@ impl RoomChat {
     pub(crate) fn note(&mut self, text: impl Into<String>) {
         self.push(ChatEntry::Note {
             text: text.into(),
-            at_ms: wall_clock_ms(),
+            at_ms: crate::board::server_clock_ms(),
         });
     }
 
@@ -265,7 +258,7 @@ impl PieceOffApp {
     /// The chat box in the bottom-left corner of the board: a button with an
     /// unread count when collapsed, the history and a text box when open.
     pub(crate) fn chat_overlay(&mut self, ctx: &egui::Context) {
-        let now_ms = wall_clock_ms();
+        let now_ms = crate::board::server_clock_ms();
         let hint = self.hint_with_keys("Room chat", Action::FocusChat);
         let send_hint = format!(
             "Say something · Enter sends · Esc goes back to the board{}",

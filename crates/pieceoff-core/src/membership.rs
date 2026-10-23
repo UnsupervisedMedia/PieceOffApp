@@ -234,6 +234,7 @@ impl RoomRuntime {
             peers,
             snapshot,
             media_upload_token,
+            server_now_ms: 0,
         })
     }
 }

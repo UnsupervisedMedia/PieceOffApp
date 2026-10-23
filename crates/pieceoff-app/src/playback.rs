@@ -104,10 +104,7 @@ impl PieceOffApp {
             return;
         }
         let end = item_end_ms(&snapshot.playback, self.media_duration_ms);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = crate::board::server_clock_ms();
         if end == 0 || unwrapped_position_at(&snapshot.playback, now) < end {
             return;
         }
@@ -372,12 +369,11 @@ impl PieceOffApp {
     }
 }
 
+/// Where the room's playback is now. The server stamps playback changes with
+/// its own clock, so read the server's clock too: a client whose clock is off
+/// would otherwise play ahead of or behind everyone else.
 pub(crate) fn estimated_position_ms(playback: &PlaybackState) -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    estimated_position_at(playback, now)
+    estimated_position_at(playback, crate::board::server_clock_ms())
 }
 
 /// Position at `now_ms` without wrapping at the loop end.
