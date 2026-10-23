@@ -16,12 +16,21 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ChatLine, ClientMessage, MediaItem, NameClaim, REPLACED_BY_NEW_CONNECTION, RoomRuntime,
-    RoomSnapshot, SceneBounds, ServerMessage, clean_chat_text, clean_media_extension, clean_name,
-    clean_title, valid_media_dimensions,
+    ChatLine, ClientMessage, MediaItem, NameClaim, PROTOCOL_VERSION, REPLACED_BY_NEW_CONNECTION,
+    RoomRuntime, RoomSnapshot, SceneBounds, ServerMessage, clean_chat_text, clean_media_extension,
+    clean_name, valid_media_dimensions, valid_sha256,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+/// Lowercase hex encoding; sha2 0.11 digests no longer implement `LowerHex`.
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    bytes.as_ref().iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -507,9 +516,39 @@ fn application(state: AppState) -> Router {
 }
 
 #[derive(Deserialize)]
+struct SocketQuery {
+    /// The protocol version the client speaks. Clients older than this check
+    /// send none and are let through as before.
+    protocol: Option<u16>,
+}
+
+/// Why a client speaking `client` cannot use this server, if it cannot.
+fn protocol_mismatch(client: Option<u16>) -> Option<String> {
+    let client = client?;
+    if client == PROTOCOL_VERSION {
+        return None;
+    }
+    let newer = if client < PROTOCOL_VERSION {
+        "server"
+    } else {
+        "app"
+    };
+    Some(format!(
+        "This PieceOff {newer} is newer (app protocol v{client}, server protocol \
+         v{PROTOCOL_VERSION}). Update so the app and the room server match."
+    ))
+}
+
+#[derive(Deserialize)]
 struct MediaQuery {
     code: Option<String>,
     token: Option<String>,
+    /// An upload with `probe=1` only asks whether the server already holds
+    /// the asset: 201 if so (and the item is marked available), 204 if the
+    /// client should send it. Clients probe first so they never stream a
+    /// body the server will not read.
+    #[serde(default)]
+    probe: Option<u8>,
 }
 
 const ROOM_NOT_FOUND: &str = "Room code not found";
@@ -702,6 +741,9 @@ async fn upload_media(
         mark_item_available(&state, &room, &sha256).await;
         return StatusCode::CREATED.into_response();
     }
+    if query.probe.is_some() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     // Promise this upload its space up front, so that several large uploads
     // at once cannot together pass the quota, and none of them has to wait
     // for the others to finish.
@@ -773,7 +815,7 @@ async fn upload_media(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     drop(file);
-    let received_hash = format!("{:x}", hasher.finalize());
+    let received_hash = hex(hasher.finalize());
     if received_hash != sha256 {
         let _ = tokio_fs::remove_file(&temporary).await;
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
@@ -823,22 +865,14 @@ async fn media_storage_used_bytes(directory: &Path) -> std::io::Result<u64> {
 async fn mark_item_available(state: &AppState, room: &Arc<RoomRecord>, sha256: &str) {
     let changed = {
         let mut runtime = room.runtime.lock().await;
-        if let Some(snapshot) = runtime.snapshot.as_mut() {
-            for item in &mut snapshot.queue {
-                if item.sha256 == sha256 {
-                    item.available = true;
-                }
+        match runtime.mark_item_available(sha256) {
+            Some(snapshot) => {
+                // Sent under the lock, in revision order with every other event
+                // (see `dispatch`).
+                let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+                true
             }
-            snapshot.sync_current_mirror();
-            snapshot.revision = snapshot.revision.saturating_add(1);
-            // Sent under the lock, in revision order with every other event
-            // (see `dispatch`).
-            let _ = room.events.send(ServerMessage::Snapshot {
-                snapshot: snapshot.clone(),
-            });
-            true
-        } else {
-            false
+            None => false,
         }
     };
     if changed {
@@ -875,14 +909,6 @@ fn new_invite_code() -> String {
         .collect()
 }
 
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn has_unavailable_item(snapshot: &RoomSnapshot) -> bool {
-    snapshot.queue.iter().any(|item| !item.available)
-}
-
 fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaItem> {
     snapshot.queue.iter().find(|item| item.sha256 == sha256)
 }
@@ -890,6 +916,7 @@ fn queue_item<'a>(snapshot: &'a RoomSnapshot, sha256: &str) -> Option<&'a MediaI
 async fn websocket_handler(
     State(state): State<AppState>,
     upgrade: WebSocketUpgrade,
+    Query(query): Query<SocketQuery>,
     request: axum::extract::Request,
 ) -> Response {
     // Present when served with connect info (the real server); absent in
@@ -924,7 +951,16 @@ async fn websocket_handler(
     upgrade
         .max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| handle_socket(socket, state, address, slot))
+        .on_upgrade(move |mut socket| async move {
+            // Refuse a mismatched app up front, with a message every version
+            // can show, instead of messages it cannot parse.
+            if let Some(message) = protocol_mismatch(query.protocol) {
+                let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+            handle_socket(socket, state, address, slot).await
+        })
 }
 
 /// Relay the messages that are not room state: live cursors, chat, and
@@ -1095,44 +1131,33 @@ async fn handle_socket(
     persist_room(&state, &room).await;
     let (mut events, chat_history) = subscribe_with_chat(&room);
     let mut cursor_events = room.cursors.subscribe();
-    let peers = {
+    let welcome = {
         let runtime = room.runtime.lock().await;
+        let token = room.media_upload_token.lock().await.clone();
         runtime
-            .names
-            .iter()
-            .filter(|(id, _)| *id != &client_id)
-            .map(|(_, name)| name.clone())
-            .collect()
+            .welcome(&client_id, &name, token)
+            .map(|mut welcome| {
+                if let ServerMessage::Welcome { server_now_ms, .. } = &mut welcome {
+                    *server_now_ms = now_ms();
+                }
+                welcome
+            })
     };
-    let snapshot = room
+    // The table never changes size after the room is made.
+    let table = room
         .runtime
         .lock()
         .await
         .snapshot
-        .clone()
-        .expect("room snapshot exists");
-    // The table never changes size after the room is made.
-    let table = snapshot.scene_bounds();
+        .as_ref()
+        .expect("room snapshot exists")
+        .scene_bounds();
     let mut relay_budgets = RelayBudgets::new(Instant::now());
-    let media_upload_token = if snapshot.host_id == client_id && has_unavailable_item(&snapshot) {
-        room.media_upload_token.lock().await.clone()
-    } else {
-        None
+    let sent = match welcome {
+        Ok(welcome) => send(&mut socket, &welcome).await.is_ok(),
+        Err(_) => false,
     };
-    if send(
-        &mut socket,
-        &ServerMessage::Welcome {
-            client_id: client_id.clone(),
-            name: name.clone(),
-            peers,
-            snapshot,
-            media_upload_token,
-            server_now_ms: now_ms(),
-        },
-    )
-    .await
-    .is_err()
-    {
+    if !sent {
         remove_peer(&room, &client_id, &name).await;
         persist_room(&state, &room).await;
         return;
@@ -1278,7 +1303,7 @@ fn player_key_hash(room_id: &str, key: &str) -> Result<Option<String>, String> {
     digest.update(room_id.as_bytes());
     digest.update(b"\0");
     digest.update(key.as_bytes());
-    Ok(Some(format!("{:x}", digest.finalize())))
+    Ok(Some(hex(digest.finalize())))
 }
 
 async fn connect_room(
@@ -1287,69 +1312,25 @@ async fn connect_room(
     first: ClientMessage,
 ) -> Result<(Arc<RoomRecord>, String, String, bool), String> {
     match first {
-        ClientMessage::CreateRoom {
-            name,
-            title,
-            media_sha256,
-            media_extension,
-            width,
-            height,
-            rows,
-            columns,
-            initial_snapshot,
-            duration_ms,
-            player_key,
-        } => {
-            if !valid_sha256(&media_sha256) {
-                return Err("Invalid media fingerprint".into());
-            }
-            let name = clean_name(&name);
-            let room_id = Uuid::new_v4().to_string();
-            let key_hash = player_key_hash(&room_id, &player_key)?;
-            let invite_code = new_invite_code();
-            let clean_title = clean_title(&title);
-            let clean_extension = clean_media_extension(&media_extension)?;
-            let snapshot = if let Some(initial) = initial_snapshot {
-                let initial = *initial;
-                if initial.title != clean_title
-                    || initial.media_sha256 != media_sha256
-                    || initial.media_extension != clean_extension
-                    || initial.width != width
-                    || initial.height != height
-                    || initial.rows != rows
-                    || initial.columns != columns
-                {
-                    return Err("Imported puzzle snapshot does not match its media or grid".into());
-                }
-                initial.rehost(room_id, invite_code.clone(), client_id.to_owned())?
-            } else {
-                let mut snapshot = RoomSnapshot::create(
-                    room_id,
-                    invite_code.clone(),
-                    clean_title,
-                    media_sha256,
-                    clean_extension,
-                    width,
-                    height,
-                    rows,
-                    columns,
-                    client_id.to_owned(),
-                )?;
-                snapshot.revision = 1;
-                if let Some(first) = snapshot.queue.first_mut() {
-                    first.duration_ms = duration_ms;
-                }
-                snapshot
+        create @ ClientMessage::CreateRoom { .. } => {
+            let create_key = match &create {
+                ClientMessage::CreateRoom { player_key, .. } => player_key.clone(),
+                _ => String::new(),
             };
+            let invite_code = new_invite_code();
+            let room_id = Uuid::new_v4().to_string();
+            let key_hash = player_key_hash(&room_id, &create_key)?;
+            let (runtime, name) =
+                RoomRuntime::new_room(client_id, create, room_id, invite_code.clone())?;
             let media_upload_token = Uuid::new_v4().to_string();
             let room = Arc::new(RoomRecord::new(Some(media_upload_token)));
             {
-                let mut runtime = room.runtime.lock().await;
-                runtime.host_id = Some(client_id.to_owned());
+                let mut runtime = runtime;
+                // Seat the creator through the name-claim rules so their key claims the name.
                 runtime.admit_player(client_id, &name, key_hash.as_deref(), now_ms())?;
-                runtime.snapshot = Some(snapshot);
                 // An imported puzzle's clock carries on with its host here.
                 runtime.sync_clock_to_players(now_ms());
+                *room.runtime.lock().await = runtime;
             }
             {
                 let mut rooms = state.rooms.write().await;
@@ -1382,16 +1363,22 @@ async fn connect_room(
                 .get(&invite_code)
                 .cloned()
                 .ok_or(ROOM_NOT_FOUND.to_string())?;
-            {
+            let name = {
                 let mut runtime = room.runtime.lock().await;
-                let snapshot = runtime
-                    .snapshot
-                    .as_ref()
-                    .ok_or("Room is not ready".to_string())?;
-                if media_sha256 != snapshot.media_sha256 && !snapshot.media_available {
+                let (snapshot_id, media_ready) = {
+                    let snapshot = runtime
+                        .snapshot
+                        .as_ref()
+                        .ok_or("Room is not ready".to_string())?;
+                    (
+                        snapshot.id.clone(),
+                        media_sha256 == snapshot.media_sha256 || snapshot.media_available,
+                    )
+                };
+                if !media_ready {
                     return Err("The room media is still uploading. Wait for the host and try joining again.".into());
                 }
-                let key_hash = player_key_hash(&snapshot.id, &player_key)?;
+                let key_hash = player_key_hash(&snapshot_id, &player_key)?;
                 let replaced = runtime.admit_player(
                     client_id,
                     &clean_name(&name),
@@ -1401,23 +1388,14 @@ async fn connect_room(
                 for old in replaced {
                     let _ = room.replaced.send(old);
                 }
+                let outcome = runtime.join(client_id, &name, &media_sha256)?;
                 runtime.sync_clock_to_players(now_ms());
-                let host_present = runtime
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| runtime.names.contains_key(&snapshot.host_id));
-                if !host_present {
-                    if let Some(snapshot) = runtime.snapshot.as_mut() {
-                        snapshot.host_id = client_id.to_owned();
-                        snapshot.revision += 1;
-                        if has_unavailable_item(snapshot) {
-                            *room.media_upload_token.lock().await =
-                                Some(Uuid::new_v4().to_string());
-                        }
-                    }
+                if outcome.needs_upload_token {
+                    *room.media_upload_token.lock().await = Some(Uuid::new_v4().to_string());
                 }
-            }
-            Ok((room, invite_code, clean_name(&name), false))
+                outcome.name
+            };
+            Ok((room, invite_code, name, false))
         }
         _ => Err("First message must create or join a room".into()),
     }
@@ -1735,55 +1713,36 @@ async fn remove_peer(room: &Arc<RoomRecord>, client_id: &str, fallback_name: &st
     // Events go out under the room lock so they leave in revision order (see
     // `dispatch`).
     let mut runtime = room.runtime.lock().await;
-    runtime.forget_drag(client_id);
     // A connection replaced by its player's new one was unseated then; the
     // player has not left, so nobody is told.
-    let seated = runtime.names.remove(client_id);
-    let left = seated.is_some();
-    let name = seated.unwrap_or_else(|| fallback_name.to_owned());
+    let left = runtime.names.contains_key(client_id);
+    let outcome = runtime.leave(client_id, fallback_name);
     // The last player out pauses the solve clock.
     runtime.sync_clock_to_players(now_ms());
-    let next_host = runtime.names.keys().next().cloned();
-    let mut changed_snapshot = None;
-    let mut upload_assignment = None;
-    if let Some(snapshot) = runtime.snapshot.as_mut() {
-        let mut changed = false;
-        for piece in &mut snapshot.pieces {
-            if piece.held_by.as_deref() == Some(client_id) {
-                piece.held_by = None;
-                changed = true;
-            }
+    let upload_token = match &outcome.upload_assignment {
+        Some(_) => {
+            let token = Uuid::new_v4().to_string();
+            *room.media_upload_token.lock().await = Some(token.clone());
+            Some(token)
         }
-        if snapshot.host_id == client_id {
-            if let Some(next) = next_host {
-                snapshot.host_id = next.clone();
-                changed = true;
-                if let Some(pending) = snapshot.queue.iter().find(|item| !item.available) {
-                    let token = Uuid::new_v4().to_string();
-                    *room.media_upload_token.lock().await = Some(token.clone());
-                    upload_assignment = Some((next, token, pending.sha256.clone()));
-                }
-            }
-        }
-        if changed {
-            snapshot.revision += 1;
-            changed_snapshot = Some(snapshot.clone());
-        }
-    }
+        None => None,
+    };
     if left {
-        let _ = room.events.send(ServerMessage::PeerLeft { name });
+        let _ = room
+            .events
+            .send(ServerMessage::PeerLeft { name: outcome.name });
     }
     let _ = room.cursors.send(ServerMessage::CursorHidden {
         client_id: client_id.to_owned(),
     });
-    if let Some(snapshot) = changed_snapshot {
+    if let Some(snapshot) = outcome.snapshot {
         let _ = room.events.send(ServerMessage::Snapshot { snapshot });
     }
-    if let Some((client_id, token, sha256)) = upload_assignment {
+    if let (Some(assignment), Some(token)) = (outcome.upload_assignment, upload_token) {
         let _ = room.events.send(ServerMessage::MediaUploadToken {
-            client_id,
+            client_id: assignment.client_id,
             token,
-            sha256: Some(sha256),
+            sha256: Some(assignment.sha256),
         });
     }
 }
@@ -1802,6 +1761,16 @@ async fn send(socket: &mut WebSocket, packet: &ServerMessage) -> Result<(), axum
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mismatched_app_protocols_are_refused_with_a_reason() {
+        assert_eq!(protocol_mismatch(None), None);
+        assert_eq!(protocol_mismatch(Some(PROTOCOL_VERSION)), None);
+        let older_app = protocol_mismatch(Some(PROTOCOL_VERSION - 1)).unwrap();
+        assert!(older_app.contains("server is newer"), "{older_app}");
+        let newer_app = protocol_mismatch(Some(PROTOCOL_VERSION + 1)).unwrap();
+        assert!(newer_app.contains("app is newer"), "{newer_app}");
+    }
+
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1891,7 +1860,7 @@ mod tests {
             "room-id".into(),
             "LARGE1".into(),
             "Oversized room".into(),
-            format!("{:x}", Sha256::digest(b"large media")),
+            hex(Sha256::digest(b"large media")),
             "png".into(),
             32,
             24,
@@ -1960,7 +1929,7 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-media-recovery-{}", Uuid::new_v4()));
         let media = b"media persisted before the room-ready flag";
-        let hash = format!("{:x}", Sha256::digest(media));
+        let hash = hex(Sha256::digest(media));
         let mut snapshot = RoomSnapshot::create(
             "room-id".into(),
             "REC123".into(),
@@ -1996,7 +1965,7 @@ mod tests {
     async fn rejoining_host_gets_a_new_upload_token_after_restart() {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-incomplete-upload-{}", Uuid::new_v4()));
-        let hash = format!("{:x}", Sha256::digest(b"upload interrupted before restart"));
+        let hash = hex(Sha256::digest(b"upload interrupted before restart"));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "REJOIN1".into(),
@@ -2046,7 +2015,7 @@ mod tests {
             "room-id".into(),
             "HANDOFF".into(),
             "Pending upload".into(),
-            format!("{:x}", Sha256::digest(b"pending upload media")),
+            hex(Sha256::digest(b"pending upload media")),
             "mp4".into(),
             32,
             24,
@@ -2105,7 +2074,7 @@ mod tests {
             ("NEW123", "recent clip"),
         ] {
             let media = label.as_bytes();
-            let hash = format!("{:x}", Sha256::digest(media));
+            let hash = hex(Sha256::digest(media));
             let mut snapshot = RoomSnapshot::create(
                 Uuid::new_v4().to_string(),
                 code.into(),
@@ -2684,7 +2653,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-media-test-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let content = b"portable room media bytes";
-        let hash = format!("{:x}", Sha256::digest(content));
+        let hash = hex(Sha256::digest(content));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "ABC123".into(),
@@ -2726,6 +2695,25 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "a probe for missing media asks for the upload"
+        );
+        assert!(!media_path(&data_dir, &hash, "png").exists());
+
+        let response = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(content.to_vec()),
         )
@@ -2735,6 +2723,22 @@ mod tests {
             fs::read(media_path(&data_dir, &hash, "png")).unwrap(),
             content
         );
+        let probe = upload_media(
+            State(state.clone()),
+            AxumPath(hash.clone()),
+            Query(MediaQuery {
+                code: None,
+                token: Some("upload-secret".into()),
+                probe: Some(1),
+            }),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            probe.status(),
+            StatusCode::CREATED,
+            "held media needs no upload"
+        );
         assert!(connect_room(&state, "guest", guest).await.is_ok());
 
         let response = download_media(
@@ -2743,6 +2747,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("ABC123".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -2759,6 +2764,7 @@ mod tests {
             Query(MediaQuery {
                 code: Some("WRONG1".into()),
                 token: None,
+                probe: None,
             }),
             axum::http::HeaderMap::new(),
         )
@@ -2772,7 +2778,7 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-media-reject-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
-        let expected = format!("{:x}", Sha256::digest(b"expected"));
+        let expected = hex(Sha256::digest(b"expected"));
         let snapshot = RoomSnapshot::create(
             "room-id".into(),
             "ABC123".into(),
@@ -2796,6 +2802,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("wrong-token".into()),
+                probe: None,
             }),
             Body::from(b"expected".to_vec()),
         )
@@ -2808,6 +2815,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("upload-secret".into()),
+                probe: None,
             }),
             Body::from(b"different content".to_vec()),
         )
@@ -2824,8 +2832,8 @@ mod tests {
         state.media_quota_bytes = 10;
         let first_content = b"12345678";
         let second_content = b"abcd";
-        let first_hash = format!("{:x}", Sha256::digest(first_content));
-        let second_hash = format!("{:x}", Sha256::digest(second_content));
+        let first_hash = hex(Sha256::digest(first_content));
+        let second_hash = hex(Sha256::digest(second_content));
         for (code, token, hash) in [
             ("FIRST1", "first-token", first_hash.clone()),
             ("SECOND", "second-token", second_hash.clone()),
@@ -2854,6 +2862,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("first-token".into()),
+                probe: None,
             }),
             Body::from(first_content.to_vec()),
         );
@@ -2863,6 +2872,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("second-token".into()),
+                probe: None,
             }),
             Body::from(second_content.to_vec()),
         );
@@ -2942,6 +2952,40 @@ mod tests {
     type TestSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
     /// Start a server on a free port; returns its address and state.
+    #[tokio::test]
+    async fn an_app_on_another_protocol_is_told_to_update() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-proto-{}", Uuid::new_v4()));
+        let (address, _state) = queue_test_server(&data_dir).await;
+        let (mut old_app, _) = connect_async(format!(
+            "ws://{address}/ws?protocol={}",
+            PROTOCOL_VERSION - 1
+        ))
+        .await
+        .unwrap();
+        let error = read_message(&mut old_app, "error").await;
+        assert!(
+            error["message"].as_str().unwrap().contains("Update"),
+            "{error}"
+        );
+        // The matching version gets through to the room handshake.
+        let (mut app, _) = connect_async(format!("ws://{address}/ws?protocol={PROTOCOL_VERSION}"))
+            .await
+            .unwrap();
+        app.send(Message::Text(
+            serde_json::json!({
+                "type":"join_room", "invite_code":"NOPE00", "name":"A",
+                "media_sha256":"", "media_extension":""
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = read_message(&mut app, "error").await;
+        assert_eq!(reply["message"], ROOM_NOT_FOUND);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     async fn queue_test_server(data_dir: &std::path::Path) -> (std::net::SocketAddr, AppState) {
         let state = AppState::new(data_dir.to_path_buf());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2961,7 +3005,7 @@ mod tests {
         address: std::net::SocketAddr,
         media: &[u8],
     ) -> (TestSocket, String, String) {
-        let hash = format!("{:x}", Sha256::digest(media));
+        let hash = hex(Sha256::digest(media));
         let (mut host, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
         host.send(Message::Text(
             serde_json::json!({
@@ -3193,7 +3237,7 @@ mod tests {
         let (address, _state) = queue_test_server(&data_dir).await;
         let (mut host, code, hash_a) = queue_test_room(address, b"clip A").await;
         let media_b = b"clip B bytes";
-        let hash_b = format!("{:x}", Sha256::digest(media_b));
+        let hash_b = hex(Sha256::digest(media_b));
         host.send(queue_add_message(&hash_b, "B")).await.unwrap();
         let token = read_message(&mut host, "media_upload_token").await;
         assert_eq!(token["sha256"], hash_b);
@@ -3280,7 +3324,7 @@ mod tests {
             .await
             .unwrap();
         read_message(&mut guest, "welcome").await;
-        let hash_b = format!("{:x}", Sha256::digest(b"never uploaded"));
+        let hash_b = hex(Sha256::digest(b"never uploaded"));
         host.send(queue_add_message(&hash_b, "B")).await.unwrap();
         read_message(&mut host, "media_upload_token").await;
         host.close(None).await.unwrap();
@@ -3331,8 +3375,8 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-keepq-{}", Uuid::new_v4()));
         let mut state = AppState::new(data_dir.clone());
         state.room_ttl = Duration::from_secs(60);
-        let hash_a = format!("{:x}", Sha256::digest(b"keep A"));
-        let hash_b = format!("{:x}", Sha256::digest(b"keep B"));
+        let hash_a = hex(Sha256::digest(b"keep A"));
+        let hash_b = hex(Sha256::digest(b"keep B"));
         let mut snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "KEEPQ1".into(),
@@ -3364,7 +3408,7 @@ mod tests {
         fs::write(media_path(&data_dir, &hash_a, "png"), b"keep A").unwrap();
         fs::write(media_path(&data_dir, &hash_b, "png"), b"keep B").unwrap();
         // An expired room makes the cleanup pass collect unreferenced files.
-        let gone_hash = format!("{:x}", Sha256::digest(b"gone"));
+        let gone_hash = hex(Sha256::digest(b"gone"));
         let gone = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "GONEQ1".into(),
@@ -3404,8 +3448,8 @@ mod tests {
         let state = AppState::new(data_dir.clone());
         let slow_content = b"a slow, large upload";
         let quick_content = b"a quick one";
-        let slow_hash = format!("{:x}", Sha256::digest(slow_content));
-        let quick_hash = format!("{:x}", Sha256::digest(quick_content));
+        let slow_hash = hex(Sha256::digest(slow_content));
+        let quick_hash = hex(Sha256::digest(quick_content));
         for (code, token, hash) in [
             ("SLOW01", "slow-token", slow_hash.clone()),
             ("QUICK1", "quick-token", quick_hash.clone()),
@@ -3447,6 +3491,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("slow-token".into()),
+                probe: None,
             }),
             slow_body,
         ));
@@ -3460,6 +3505,7 @@ mod tests {
                 Query(MediaQuery {
                     code: None,
                     token: Some("quick-token".into()),
+                    probe: None,
                 }),
                 Body::from(quick_content.to_vec()),
             ),
@@ -3483,7 +3529,7 @@ mod tests {
         let mut state = AppState::new(data_dir.clone());
         state.max_media_bytes = 8;
         let content = vec![7u8; 100];
-        let hash = format!("{:x}", Sha256::digest(&content));
+        let hash = hex(Sha256::digest(&content));
         let snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "CAP001".into(),
@@ -3506,6 +3552,7 @@ mod tests {
             Query(MediaQuery {
                 code: None,
                 token: Some("cap-token".into()),
+                probe: None,
             }),
             Body::from(content),
         )
@@ -3524,7 +3571,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("pieceoff-range-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let content = b"0123456789abcdefghij";
-        let hash = format!("{:x}", Sha256::digest(content));
+        let hash = hex(Sha256::digest(content));
         let mut snapshot = RoomSnapshot::create(
             Uuid::new_v4().to_string(),
             "RANGE1".into(),
@@ -3560,6 +3607,7 @@ mod tests {
                     Query(MediaQuery {
                         code: Some("RANGE1".into()),
                         token: None,
+                        probe: None,
                     }),
                     headers,
                 )
@@ -3652,8 +3700,8 @@ mod tests {
     #[tokio::test]
     async fn host_queues_swaps_and_locks_over_the_wire() {
         let media_a = b"queue test clip A";
-        let hash_a = format!("{:x}", Sha256::digest(media_a));
-        let hash_b = format!("{:x}", Sha256::digest(b"queue test clip B"));
+        let hash_a = hex(Sha256::digest(media_a));
+        let hash_b = hex(Sha256::digest(b"queue test clip B"));
         let data_dir = std::env::temp_dir().join(format!("pieceoff-queue-test-{}", Uuid::new_v4()));
         let state = AppState::new(data_dir.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3791,7 +3839,7 @@ mod tests {
         );
         let media = fs::read(&video_path).unwrap();
         fs::remove_file(video_path).unwrap();
-        let media_hash = format!("{:x}", Sha256::digest(&media));
+        let media_hash = hex(Sha256::digest(&media));
 
         let data_dir =
             std::env::temp_dir().join(format!("pieceoff-playback-test-{}", Uuid::new_v4()));
@@ -4074,7 +4122,7 @@ mod tests {
         host.send(Message::Text(
             serde_json::json!({
                 "type":"create_room", "name":"Host", "title":"Room test",
-                "media_sha256":format!("{:x}", Sha256::digest(b"looping test clip")),
+                "media_sha256":hex(Sha256::digest(b"looping test clip")),
                 "media_extension":"png",
                 "width":800, "height":600, "rows":3, "columns":4
             })

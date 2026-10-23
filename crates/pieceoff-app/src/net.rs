@@ -64,7 +64,8 @@ impl PieceOffApp {
                         return;
                     }
                 };
-                let Ok((stream, _)) = connect_async(&url).await else { let _ = incoming_tx.send(ServerMessage::Error { message: format!("Could not connect to {url}. Check the address and that the server is running.") }); return; };
+                let versioned = with_protocol(&url);
+                let Ok((stream, _)) = connect_async(&versioned).await else { let _ = incoming_tx.send(ServerMessage::Error { message: format!("Could not connect to {url}. Check the address and that the server is running.") }); return; };
                 let (mut writer, mut reader) = stream.split();
                 let mut outgoing_rx = outgoing_rx;
                 let mut media_transfer_started = false;
@@ -109,7 +110,7 @@ impl PieceOffApp {
                                     }
                                     if incoming_tx.send(packet).is_err() { break }
                                 },
-                                Err(error) => { let _ = incoming_tx.send(ServerMessage::Error { message: format!("Invalid server packet: {error}") }); }
+                                Err(error) => { let _ = incoming_tx.send(ServerMessage::Error { message: format!("Invalid server packet ({error}). The room server may run a different PieceOff version; update both to match.") }); }
                             },
                             Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                             _ => {}
@@ -576,4 +577,14 @@ fn spawn_item_uploads(
 
 pub(crate) fn reconnect_delay(attempt: u8) -> Duration {
     Duration::from_secs((1_u64 << attempt.min(5)).min(30))
+}
+
+/// The room URL with the protocol this app speaks, so a server on another
+/// version can refuse it with a clear reason.
+pub(crate) fn with_protocol(url: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!(
+        "{url}{separator}protocol={}",
+        pieceoff_core::PROTOCOL_VERSION
+    )
 }
