@@ -59,6 +59,7 @@ impl RoomRuntime {
             columns,
             initial_snapshot,
             duration_ms,
+            ..
         } = message
         else {
             return Err("First message must create or join a room".into());
@@ -259,6 +260,7 @@ mod tests {
             columns: 4,
             initial_snapshot: None,
             duration_ms: 5000,
+            player_key: String::new(),
         }
     }
 
@@ -301,6 +303,7 @@ mod tests {
             name: "n".into(),
             media_sha256: sha(),
             media_extension: "mp4".into(),
+            player_key: String::new(),
         };
         let wrong = RoomRuntime::new_room("h", join, "i".into(), "C".into());
         assert_eq!(

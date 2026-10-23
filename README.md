@@ -42,6 +42,9 @@ the recording is silent.
   key that pings a spot on the table for everyone to see. Short synthesised
   sounds mark snaps, joins, the finish, chat, and pings, with their own
   volume under More.
+- **Sort in your own space.** Make up to four piece holders on the open
+  table: anything you put in yours stays yours, visible to everyone but
+  only movable by you, and moves with the holder.
 - **Race the clock.** A shared solve timer runs while anyone is in the room,
   and the finish card shows who placed how many pieces. The library keeps
   each puzzle's best time.
@@ -167,9 +170,11 @@ share codes only with the people you want in the room.
 | Video seek | **← / →** by five seconds; **Home / End** for loop edges |
 | Help and messages | **F1 / ?** and **M** |
 | Chat, ping the spot under the pointer | **Enter**, **P** |
+| New piece holder near the pointer | **H** |
 
 Shortcuts can be rebound in **More → Controls…**. The board also has **All**,
-**Edges**, and **Interior** tray filters, plus **Arrange** for loose pieces.
+**Edges**, and **Interior** tray filters, **Arrange** for loose pieces, and
+**Holders** to make, rename, and remove holders.
 Press **F1** or **?** in the app for the complete shortcut list.
 
 ## Build and develop

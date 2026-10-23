@@ -10,10 +10,21 @@ pub use apply::ApplyOutcome;
 pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
+mod claims;
+pub use claims::{
+    MAX_NAME_CLAIMS, MAX_PLAYER_KEY_BYTES, MAX_ROOM_PLAYERS, NAME_TAKEN, NameClaim,
+    REPLACED_BY_NEW_CONNECTION,
+};
+mod holders;
 mod stats;
+pub use holders::{
+    HOLDER_DEFAULT_CELLS, HOLDER_GRACE_MS, HOLDER_MAX_CELLS, HOLDER_MIN_CELLS,
+    MAX_HOLDER_LABEL_CHARS, MAX_HOLDERS_PER_PLAYER, MAX_HOLDERS_PER_ROOM, PieceHolder,
+    clean_holder_label,
+};
 pub use stats::{MAX_SOLVE_PLAYERS, PlayerSolveStats, SolveStats};
 
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -161,6 +172,10 @@ pub struct RoomSnapshot {
     /// snapshots load with a clock at zero that starts on the next pickup.
     #[serde(default)]
     pub stats: SolveStats,
+    /// Players' private sorting areas (protocol v12). Older snapshots load
+    /// with none.
+    #[serde(default)]
+    pub holders: Vec<PieceHolder>,
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -465,6 +480,7 @@ impl RoomSnapshot {
             repeat: RepeatMode::One,
             video_lock: false,
             stats: SolveStats::default(),
+            holders: Vec::new(),
         })
     }
 
@@ -537,6 +553,8 @@ impl RoomSnapshot {
             return Err("Puzzle snapshot has an invalid playback loop".into());
         }
         self.stats.sanitize();
+        // Holders belong to the players of the room they were made in.
+        self.holders.clear();
         self.id = id;
         self.invite_code = invite_code;
         self.host_id = host_id;
@@ -808,12 +826,18 @@ pub enum ClientMessage {
         /// Length of the first video, so the server can advance the queue.
         #[serde(default)]
         duration_ms: u64,
+        /// This device's private player key; see `NameClaim`.
+        #[serde(default)]
+        player_key: String,
     },
     JoinRoom {
         invite_code: String,
         name: String,
         media_sha256: String,
         media_extension: String,
+        /// This device's private player key; empty from older clients.
+        #[serde(default)]
+        player_key: String,
     },
     DragStart {
         piece_id: u32,
@@ -906,6 +930,36 @@ pub enum ClientMessage {
         x: f32,
         y: f32,
     },
+    /// Make a holder: a private sorting area on the open table, in board
+    /// coordinates. Pieces whose centre lies in it are reserved for its
+    /// owner (protocol v12).
+    CreateHolder {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        #[serde(default)]
+        label: String,
+    },
+    /// The owner moves, resizes or renames a holder. Moving carries the
+    /// loose pieces inside along.
+    UpdateHolder {
+        holder_id: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        label: String,
+    },
+    /// The owner (or the host) removes a holder; its pieces stay put.
+    DeleteHolder {
+        holder_id: u32,
+    },
+    /// The host frees an absent player's name: its claim and holders go, so
+    /// anyone may play under it again.
+    ReleaseName {
+        name: String,
+    },
 }
 
 /// One line of room chat as the server relays it. Kept in the room's memory
@@ -952,6 +1006,9 @@ pub enum ServerMessage {
         /// the clock started or finished, someone scored, or a restart.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stats: Option<SolveStats>,
+        /// Every holder in the room, sent only when this change altered them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holders: Option<Vec<PieceHolder>>,
     },
     PlaybackChanged {
         playback: PlaybackState,
@@ -1033,6 +1090,9 @@ pub struct RoomRuntime {
     pub snapshot: Option<RoomSnapshot>,
     pub names: HashMap<String, String>,
     pub host_id: Option<String>,
+    /// Which player key owns each name in this room (see `claims`). Host
+    /// state only: hosts persist it beside the snapshot, never send it.
+    pub name_claims: Vec<NameClaim>,
     drag_groups: HashMap<String, Vec<u32>>,
 }
 
@@ -1068,6 +1128,13 @@ impl RoomRuntime {
             .collect();
         if members.iter().any(|piece| piece.placed) {
             return Err("Placed pieces cannot be selected".into());
+        }
+        let player = self.names.get(client_id).map(String::as_str);
+        if let Some(holder) = groups
+            .iter()
+            .find_map(|group| snapshot.reserved_from(*group, player))
+        {
+            return Err(format!("That piece is in {}'s holder", holder.owner));
         }
         if members.iter().any(|piece| {
             piece
@@ -1229,6 +1296,7 @@ impl RoomRuntime {
             shuffle_seed | 1,
         );
         snapshot.stats = SolveStats::default();
+        snapshot.holders.clear();
         snapshot.revision += 1;
         self.drag_groups.clear();
         Ok((snapshot.pieces.clone(), snapshot.revision))
@@ -1248,8 +1316,12 @@ impl RoomRuntime {
         for piece in &snapshot.pieces {
             *group_sizes.entry(piece.group_id).or_default() += 1;
         }
+        // Pieces in anyone's holder are sorted already; leave them be.
         let is_loose = |piece: &Piece| {
-            !piece.placed && piece.held_by.is_none() && group_sizes[&piece.group_id] == 1
+            !piece.placed
+                && piece.held_by.is_none()
+                && group_sizes[&piece.group_id] == 1
+                && snapshot.holder_of(piece).is_none()
         };
         let mut movable: Vec<u32> = snapshot
             .pieces
@@ -1315,7 +1387,11 @@ impl RoomRuntime {
                 && y + cell_h <= scene.max_y;
             let covered = staying
                 .iter()
-                .any(|(sx, sy)| (sx - x).abs() < cell_w * 0.9 && (sy - y).abs() < cell_h * 0.9);
+                .any(|(sx, sy)| (sx - x).abs() < cell_w * 0.9 && (sy - y).abs() < cell_h * 0.9)
+                || snapshot
+                    .holders
+                    .iter()
+                    .any(|holder| holder.contains(x + cell_w * 0.5, y + cell_h * 0.5));
             if on_table && !covered {
                 slots.push((x, y));
             }
@@ -1344,6 +1420,10 @@ impl RoomRuntime {
             .collect();
         if members.iter().any(|piece| piece.placed) {
             return Err("That piece group is already placed".into());
+        }
+        let player = self.names.get(client_id).map(String::as_str);
+        if let Some(holder) = snapshot.reserved_from(group_id, player) {
+            return Err(format!("That piece is in {}'s holder", holder.owner));
         }
         if members.iter().any(|piece| {
             piece

@@ -21,6 +21,7 @@ pub(crate) enum Action {
     ToggleMessages,
     FocusChat,
     Ping,
+    NewHolder,
     PlayPause,
     SeekBack,
     SeekForward,
@@ -32,7 +33,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::FitView,
         Self::FocusBoard,
         Self::FocusTray,
@@ -45,6 +46,7 @@ impl Action {
         Self::ToggleMessages,
         Self::FocusChat,
         Self::Ping,
+        Self::NewHolder,
         Self::PlayPause,
         Self::SeekBack,
         Self::SeekForward,
@@ -70,6 +72,7 @@ impl Action {
             Self::ToggleMessages => "toggle_messages",
             Self::FocusChat => "focus_chat",
             Self::Ping => "ping",
+            Self::NewHolder => "new_holder",
             Self::PlayPause => "play_pause",
             Self::SeekBack => "seek_back",
             Self::SeekForward => "seek_forward",
@@ -95,6 +98,7 @@ impl Action {
             Self::ToggleMessages => "Show message history",
             Self::FocusChat => "Type in the room chat",
             Self::Ping => "Ping the table where the pointer is",
+            Self::NewHolder => "Make a piece holder near the pointer",
             Self::PlayPause => "Play or pause",
             Self::SeekBack => "Seek back 5 seconds",
             Self::SeekForward => "Seek forward 5 seconds",
@@ -140,6 +144,7 @@ impl Action {
             // A key rather than a click, so it never competes with the
             // mouse options (select modifier, pan button).
             Self::Ping => plain(&[Key::P]),
+            Self::NewHolder => plain(&[Key::H]),
             Self::PlayPause => plain(&[Key::Space]),
             Self::SeekBack => plain(&[Key::ArrowLeft]),
             Self::SeekForward => plain(&[Key::ArrowRight]),

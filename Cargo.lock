@@ -2182,6 +2182,7 @@ dependencies = [
  "cpal",
  "eframe",
  "futures-util",
+ "getrandom 0.3.4",
  "image",
  "pieceoff-core",
  "pieceoff-server",

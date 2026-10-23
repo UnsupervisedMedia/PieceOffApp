@@ -419,6 +419,8 @@ pub(crate) fn portable_snapshot(snapshot: &RoomSnapshot) -> RoomSnapshot {
     for piece in &mut portable.pieces {
         piece.held_by = None;
     }
+    // Holders belong to the players of one room; a package starts without.
+    portable.holders.clear();
     portable
 }
 

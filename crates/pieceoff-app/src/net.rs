@@ -244,6 +244,7 @@ impl PieceOffApp {
                     self.reconnect_at = None;
                     self.reconnect_attempt = 0;
                     self.room_gone = false;
+                    self.replaced_elsewhere = false;
                     self.invite_code = snapshot.invite_code.clone();
                     self.title = snapshot.title.clone();
                     self.media_ready =
@@ -359,6 +360,7 @@ impl PieceOffApp {
                     pieces,
                     revision,
                     stats,
+                    holders,
                 } => {
                     let is_host = self.is_host();
                     let mut restarted = false;
@@ -371,6 +373,9 @@ impl PieceOffApp {
                             snapshot.revision = revision;
                             if let Some(stats) = stats {
                                 snapshot.stats = stats;
+                            }
+                            if let Some(holders) = holders {
+                                snapshot.holders = holders;
                             }
                             let everything = pieces.len() == snapshot.pieces.len();
                             for piece in pieces {
@@ -471,6 +476,9 @@ impl PieceOffApp {
                     if message == "Room code not found" && self.snapshot.is_some() {
                         self.room_gone = true;
                     }
+                    if message == REPLACED_BY_NEW_CONNECTION {
+                        self.replaced_elsewhere = true;
+                    }
                     self.status = message;
                     // Only a room we are already in can be rejoined; a failed
                     // first connection keeps its own explanation.
@@ -488,6 +496,9 @@ impl PieceOffApp {
                                 "Room {} is no longer on this server. Use More → Save package… to keep your progress, then Leave.",
                                 self.invite_code
                             );
+                        } else if self.replaced_elsewhere {
+                            self.reconnect_at = None;
+                            self.status = REPLACED_BY_NEW_CONNECTION.into();
                         } else {
                             let delay = reconnect_delay(self.reconnect_attempt);
                             self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);

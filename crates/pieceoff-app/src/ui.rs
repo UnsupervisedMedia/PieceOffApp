@@ -264,6 +264,9 @@ impl PieceOffApp {
         if self.controls.pressed(ctx, Action::Ping) {
             self.chat.ping_requested = true;
         }
+        if self.controls.pressed(ctx, Action::NewHolder) {
+            self.holders.create_requested = true;
+        }
     }
 
     /// Files dropped on the window become the puzzle media (or package).
@@ -336,6 +339,24 @@ impl PieceOffApp {
                 }
                 if self.peers.is_empty() {
                     ui.weak("Share the invite code to play together.");
+                }
+                if is_host {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.holders.release_input)
+                                .hint_text("Name")
+                                .desired_width(110.0),
+                        );
+                        if ui
+                            .button("Release name")
+                            .on_hover_text("Free an absent player's name so they can rejoin from another device. Names also free up 10 minutes after their player leaves.")
+                            .clicked()
+                        {
+                            let name = std::mem::take(&mut self.holders.release_input);
+                            self.release_name(&name);
+                        }
+                    });
                 }
             });
         } else if self.network.is_some() {
@@ -443,10 +464,13 @@ impl PieceOffApp {
                 ui.close();
                 self.arrange_tray(TrayArrangement::Shuffle);
             }
-            ui.weak("Assembled and held pieces stay put.");
+            ui.weak("Assembled and held pieces, and pieces in holders, stay put.");
         })
         .response
         .on_hover_text("Tidy the loose pieces in the tray");
+        ui.menu_button("Holders", |ui| self.holders_menu(ui, is_host))
+            .response
+            .on_hover_text("Your own sorting areas on the table");
         ui.menu_button("More", |ui| {
             let mut ghost = self.settings.show_ghost;
             if ui
@@ -1031,6 +1055,7 @@ impl PieceOffApp {
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),
                     media_extension: self.media_extension.clone(),
+                    player_key: self.settings.player_key.clone(),
                 };
                 self.connect(message);
             } else if let Some(remaining) = reconnect_at.checked_duration_since(Instant::now()) {
