@@ -93,16 +93,16 @@ jobs:
               exit 1
             }
           }
-      - name: Assemble Linux test bundle (FFmpeg installed separately)
+      - name: Assemble Linux test bundle (without FFmpeg)
         if: runner.os == 'Linux'
-        run: scripts/bundle.sh --skip-build
+        run: scripts/bundle.sh --skip-build --no-ffmpeg
       - name: Assemble bundle (macOS, without FFmpeg)
         if: runner.os == 'macOS'
-        run: scripts/bundle.sh --skip-build
-      - name: Assemble Windows test bundle (FFmpeg installed separately)
+        run: scripts/bundle.sh --skip-build --no-ffmpeg
+      - name: Assemble Windows test bundle (without FFmpeg)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/bundle.ps1 -SkipBuild
+        run: ./scripts/bundle.ps1 -SkipBuild -NoFfmpeg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: PieceOff-${{ runner.os }}-${{ runner.arch }}

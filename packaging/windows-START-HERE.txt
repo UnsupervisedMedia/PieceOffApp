@@ -6,10 +6,10 @@ To run:
 3. Run: .\pieceoff.ps1 start
 4. To stop PieceOff, run: .\pieceoff.ps1 stop
 
-This package includes the PieceOff app and room server. FFmpeg is not
-included. To use video or animated PNG/GIF puzzles, install FFmpeg and
-ffprobe separately, then select their folder under **You → Media tools**.
-Animated WebP and still-image puzzles use native decoders.
+This package includes the PieceOff app, the room server, and FFmpeg (in the
+ffmpeg folder, with its source in the source folder) for video and animated
+PNG/GIF puzzles. PieceOff finds it automatically. To use a different FFmpeg,
+select its folder under **You → Media tools**.
 
 To play with someone else, one machine runs the server (pieceoff-server.exe,
 TCP port 28878) and everyone types its address into the "Room server" box.

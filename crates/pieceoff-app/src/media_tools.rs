@@ -226,9 +226,9 @@ pub(crate) fn report(tool: Tool) -> ToolReport {
     }
 }
 
-/// How a clip's video is encoded. Builds that include libx264 are GPL;
-/// the bundled LGPL build has OpenH264 and the native MPEG-4 encoder, so
-/// clip cutting works with whatever FFmpeg is present.
+/// How a clip's video is encoded. Builds that include libx264 are GPL; the
+/// bundled LGPL build has only the native MPEG-4 encoder, which every build
+/// has, so clip cutting works with whatever FFmpeg is present.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VideoEncoder {
     X264,

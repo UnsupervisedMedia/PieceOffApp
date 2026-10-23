@@ -1,0 +1,13 @@
+# The sources that scripts/build-ffmpeg.sh builds for the bundles: FFmpeg, and
+# zlib (statically linked, for PNG/APNG and compressed MP4 headers). Each line
+# is "<key> <value>". Each SHA-256 is of the upstream tarball, which was also
+# checked against its detached signature when the pin was set (FFmpeg release
+# signing key FCF986EA15E6E293A5644F10B4322F04D67658D8; zlib: Mark Adler,
+# 5ED46A6721D365587791E2AA783FCD8E58BCAFBA). To update, download the release
+# and its .asc, verify with gpg, then change the lines.
+version 8.1.3
+sha256 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+url https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+zlib-version 1.3.2
+zlib-sha256 bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+zlib-url https://zlib.net/zlib-1.3.2.tar.gz

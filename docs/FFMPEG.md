@@ -6,10 +6,29 @@ animated WebP use native Rust decoders and do not need FFmpeg.
 
 ## Release policy
 
-Official release bundles exclude FFmpeg. Users install their own FFmpeg build
-and select its folder under **You → Media tools → Choose folder…** (or put
-`ffmpeg` and `ffprobe` on `PATH`). PieceOff does not distribute codec
-implementations in its standard bundles.
+Official release bundles include FFmpeg: `ffmpeg` and `ffprobe` in `ffmpeg/`,
+and the corresponding source in `source/`. The programs are built by
+`scripts/build-ffmpeg.sh` from the unmodified upstream release pinned in
+[`packaging/ffmpeg-source.txt`](../packaging/ffmpeg-source.txt):
+
+- **License: LGPL 2.1 or later.** The build uses `--disable-gpl
+  --disable-nonfree --disable-autodetect`, so it contains no GPL or nonfree
+  code and links no system libraries, hardware APIs, or external codec
+  libraries. The script fails the build if the result reports a GPL or nonfree
+  option.
+- **One statically linked dependency: zlib** (zlib license), built by the same
+  script from the pinned release. FFmpeg needs it for PNG/APNG and compressed
+  MP4 headers. Its license text ships beside the programs.
+- **Corresponding source:** `source/` holds the pristine FFmpeg and zlib
+  tarballs, their detached signatures, a `SHA256SUMS.txt`, the exact
+  `build-ffmpeg.sh` that produced the programs, and the pin file. No patches
+  are applied. `ffmpeg/FFMPEG-BUILD.txt` records the configure options.
+- **Replaceable:** PieceOff runs FFmpeg as a separate program, so anyone can
+  drop in their own `ffmpeg` and `ffprobe`, or choose a folder under **You →
+  Media tools → Choose folder…**.
+
+Source builds of PieceOff do not include FFmpeg. Install it and put `ffmpeg`
+and `ffprobe` on `PATH`, or choose its folder in the app.
 
 The app can discover tools in this order, separately for each executable:
 
@@ -20,57 +39,54 @@ The app can discover tools in this order, separately for each executable:
    application bundle's `Contents/Resources` or `Contents/Resources/ffmpeg`.
 4. `PATH`.
 
-## Optional downstream FFmpeg bundle
+## What the build can decode and encode
 
-The Linux and Windows scripts retain an explicit `--with-ffmpeg` /
-`-WithFfmpeg` option for downstream maintainers who independently review the
-exact build. The scripts check that
-`PIECEOFF_FFMPEG_SOURCE_ARCHIVE` points to a `.tar.xz`, `.tar.gz`, or `.zip`,
-then copy it beside the executable with a checksum. This is only a mechanical
-presence check; it does not verify that the archive is complete or compliant.
-The archive must include the exact FFmpeg source, build scripts and
-configuration, patches, source and notices for statically included
-dependencies, and all other corresponding materials required by the
-applicable licenses. Do not opt in to bundling until that archive is validated
-for the exact binary.
+FFmpeg's native decoders cover H.264, HEVC, VP8, VP9, ProRes, MPEG-1/2/4,
+GIF, WebP, APNG/PNG, AAC, MP3, Opus, Vorbis, FLAC, and the common containers.
+Not included, because they need external libraries: software AV1 decoding
+(FFmpeg's native AV1 decoder needs hardware), and the x264/x265/OpenH264/libvpx
+encoders. Clip cutting uses the native MPEG-4 and AAC encoders, which every
+FFmpeg build has. Adding dav1d (BSD-2-Clause) for AV1 is the obvious next
+step: pin its source in `packaging/ffmpeg-source.txt`, build it in
+`scripts/build-ffmpeg.sh` like zlib, and ship its source and license.
 
-FFmpeg's license depends on the configure flags and optional libraries. Its
-[official licensing guidance](https://ffmpeg.org/legal.html) says GPL-only
-components make the FFmpeg build GPL, and advises checking `--enable-gpl` and
-`--enable-nonfree`. An LGPL label or an upstream archive name is not by itself
-proof that all binary obligations have been met. The project-pinned builds in
-[`packaging/ffmpeg-pins.txt`](../packaging/ffmpeg-pins.txt) are static BtbN
-builds. Their source/build archive has not been staged or reviewed, so the
-opt-in path is not cleared for official PieceOff releases.
+## Building
 
-For a custom macOS build, set `FFMPEG_DIR` to a folder containing `ffmpeg`,
-`ffprobe`, its license file (`LICENSE`, `LICENSE.txt`, or
-`LICENSE-FFmpeg.txt`), and `FFMPEG-BUILD.txt`. The same corresponding-source
-archive gate applies. An FFmpeg executable inside a macOS app bundle also
-needs to meet Apple's signing and notarization requirements for that package.
+```sh
+scripts/build-ffmpeg.sh <linux64|linuxarm64|macos|win64> <dest>
+```
+
+Needs a C toolchain, `make`, `curl`, `xz`, and `nasm` on x86 (macOS Apple
+silicon and Linux arm64 do not need it). `win64` builds under MSYS2 MINGW64
+(as the release workflow does), or cross-builds on Linux with mingw-w64.
+`scripts/bundle.sh`, `scripts/bundle.ps1 -FfmpegStage`, and
+`scripts/bundle-windows-cross.sh` call it. `--no-ffmpeg` (`-NoFfmpeg`) leaves
+FFmpeg out, for example in the CI test bundles. `PIECEOFF_FFMPEG_NO_ASM=1`
+skips the x86 assembly and the `nasm` requirement for a slower local build;
+do not use it for a release.
+
+## Updating the pins
+
+Download the new release and its `.asc` from <https://ffmpeg.org/releases/>
+(zlib: <https://zlib.net/>), verify the signature with `gpg` against the keys
+named in `packaging/ffmpeg-source.txt`, then change the version, SHA-256, and
+URL lines. Run the app's e2e suite against the new build
+(`PATH=<dest>/ffmpeg:$PATH cargo test -p pieceoff-app`) before releasing.
 
 ## Codec patent review
 
-PieceOff does not ship codecs in official bundles, but FFmpeg builds users
-choose may include codecs with separate patent considerations. This project
-has not determined patent coverage for any codec, jurisdiction, product, or
-business model. For example, Access Advance describes its HEVC Advance pool
-as covering essential HEVC patents and says product implementations with
-HEVC encoding or decoding may need a license ([program overview](https://accessadvance.com/licensing-programs/hevc-advance/)); the Alliance for Open
-Media describes AV1 as available under its Open Media Patent License 1.0
-([AOMedia overview](https://aomedia.org/about/story/)). These are program
-descriptions, not a legal determination for PieceOff. A commercial or
-preinstalled-codec distribution needs review by counsel in its target markets.
-
-## Updating pins
-
-Pins are used only for the optional downstream path. To update them, use the
-upstream release checksums and rerun the bundle review:
-
-```sh
-scripts/update-ffmpeg-pins.py autobuild-YYYY-MM-DD-HH-MM --branch 8.1
-```
-
-The optional binary/source pair must be tested together. Linux and Windows
-GNU test bundles currently exclude FFmpeg; native Windows and macOS bundles
-have not been launched on those systems.
+FFmpeg is licensed under the LGPL, but copyright licensing is separate from
+patents. The bundled build includes decoders for formats such as H.264, HEVC,
+and AAC, so PieceOff releases do distribute codec implementations. This
+project has not determined patent coverage for any codec, jurisdiction,
+product, or business model. For example, Access Advance describes its HEVC
+Advance pool as covering essential HEVC patents and says product
+implementations with HEVC encoding or decoding may need a license ([program
+overview](https://accessadvance.com/licensing-programs/hevc-advance/)); the
+Alliance for Open Media describes AV1 as available under its Open Media Patent
+License 1.0 ([AOMedia overview](https://aomedia.org/about/story/)). These are
+program descriptions, not a legal determination for PieceOff. A commercial or
+preinstalled-codec distribution, or a hosted service that transcodes, needs
+review by counsel in its target markets. If that review says a codec must go,
+add `--disable-decoder=<name>` to the configure options in
+`scripts/build-ffmpeg.sh`.

@@ -1,13 +1,15 @@
-# Assemble a Windows release bundle: the app and server, license notices,
-# and docs, packed into dist\<name>.zip. FFmpeg is excluded by default.
+# Assemble a Windows release bundle: the app and server, FFmpeg with its
+# corresponding source, license notices, and docs, packed into dist\<name>.zip.
 #
-#   .\scripts\bundle.ps1 [-Target win64|winarm64] [-WithFfmpeg] [-SkipBuild] [-SkipVerify]
+#   .\scripts\bundle.ps1 [-FfmpegStage <dir>] [-NoFfmpeg] [-SkipBuild] [-SkipVerify]
 #
-# Not yet exercised on a Windows machine: run it on one before relying on it.
+# FFmpeg is built by scripts/build-ffmpeg.sh, which needs MSYS2 (MINGW64 shell,
+# with gcc, make, nasm, diffutils). Run it there first:
+#   scripts/build-ffmpeg.sh win64 dist/ffmpeg-stage
+# and pass that folder as -FfmpegStage (or set PIECEOFF_FFMPEG_STAGE).
 param(
-    [ValidateSet("win64", "winarm64")]
-    [string]$Target = "win64",
-    [switch]$WithFfmpeg,
+    [string]$FfmpegStage = $env:PIECEOFF_FFMPEG_STAGE,
+    [switch]$NoFfmpeg,
     [switch]$SkipBuild,
     [switch]$SkipVerify
 )
@@ -18,6 +20,7 @@ Set-Location $Root
 
 $Version = (Select-String -Path "crates/pieceoff-app/Cargo.toml" -Pattern '^version = "(.*)"' |
     Select-Object -First 1).Matches[0].Groups[1].Value
+$Target = "win64"
 $Name = "PieceOff-$Version-$Target"
 $Dist = Join-Path $Root "dist"
 $Out = Join-Path $Dist $Name
@@ -40,69 +43,12 @@ foreach ($doc in @("PACKAGING.md", "FFMPEG.md", "TESTING.md", "DEPLOYMENT.md", "
     if (Test-Path $path) { Copy-Item $path (Join-Path $Out "docs") }
 }
 
-if ($WithFfmpeg) {
-    if (-not $env:PIECEOFF_FFMPEG_SOURCE_ARCHIVE -or -not (Test-Path $env:PIECEOFF_FFMPEG_SOURCE_ARCHIVE)) {
-        throw "FFmpeg redistribution requires PIECEOFF_FFMPEG_SOURCE_ARCHIVE containing the complete corresponding source and build materials for this exact pin. See docs/FFMPEG.md; omit -WithFfmpeg to require users to install FFmpeg separately."
+if (-not $NoFfmpeg) {
+    if (-not $FfmpegStage -or -not (Test-Path (Join-Path $FfmpegStage "ffmpeg\ffmpeg.exe"))) {
+        throw "No FFmpeg build to bundle. Build it in an MSYS2 MINGW64 shell with scripts/build-ffmpeg.sh win64 <dir>, then pass -FfmpegStage <dir> (see docs/FFMPEG.md), or pass -NoFfmpeg."
     }
-    $sourceOut = Join-Path $Out "source"
-    New-Item -ItemType Directory -Force -Path $sourceOut | Out-Null
-    $sourceExtension = if ($env:PIECEOFF_FFMPEG_SOURCE_ARCHIVE -match '\.tar\.xz$') { ".tar.xz" } elseif ($env:PIECEOFF_FFMPEG_SOURCE_ARCHIVE -match '\.tar\.gz$') { ".tar.gz" } else { ".zip" }
-    $sourceName = "FFmpeg-corresponding-source" + $sourceExtension
-    Copy-Item $env:PIECEOFF_FFMPEG_SOURCE_ARCHIVE (Join-Path $sourceOut $sourceName)
-    $sourceHash = (Get-FileHash (Join-Path $sourceOut $sourceName) -Algorithm SHA256).Hash.ToLower()
-    "$sourceHash  $sourceName" | Set-Content (Join-Path $sourceOut "FFmpeg-corresponding-source.sha256")
-    $pin = Get-Content "packaging/ffmpeg-pins.txt" |
-        Where-Object { $_ -match "^$Target " } | Select-Object -First 1
-    if (-not $pin) { throw "No pinned FFmpeg build for $Target (see docs/FFMPEG.md)." }
-    $parts = $pin -split " "
-    $expected = $parts[1]
-    $url = $parts[2]
-    $archiveName = Split-Path -Leaf $url
-    $cache = if ($env:PIECEOFF_DOWNLOAD_CACHE) { $env:PIECEOFF_DOWNLOAD_CACHE } else { Join-Path $Dist ".cache" }
-    New-Item -ItemType Directory -Force -Path $cache | Out-Null
-    $archive = Join-Path $cache $archiveName
-    $needsDownload = $true
-    if (Test-Path $archive) {
-        $needsDownload = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $expected
-    }
-    if ($needsDownload) {
-        Write-Host "Downloading $archiveName"
-        Invoke-WebRequest -Uri $url -OutFile "$archive.part"
-        Move-Item -Force "$archive.part" $archive
-    }
-    $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
-    if ($actual -ne $expected) {
-        Remove-Item $archive
-        throw "SHA-256 mismatch for $archiveName`n  expected $expected`n  actual   $actual"
-    }
-    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("pieceoff-ffmpeg-" + [guid]::NewGuid())
-    Expand-Archive -Path $archive -DestinationPath $work
-    $src = Get-ChildItem $work -Directory | Select-Object -First 1
-    $ffmpegOut = Join-Path $Out "ffmpeg"
-    New-Item -ItemType Directory -Force -Path $ffmpegOut | Out-Null
-    Copy-Item (Join-Path $src.FullName "bin\ffmpeg.exe"), (Join-Path $src.FullName "bin\ffprobe.exe") $ffmpegOut
-    Copy-Item (Join-Path $src.FullName "LICENSE.txt") (Join-Path $ffmpegOut "LICENSE-FFmpeg.txt")
-    Remove-Item -Recurse $work
-    @"
-This folder holds an unmodified FFmpeg build, run by PieceOff as a separate
-program (it is not linked into PieceOff).
-
-Build:    $archiveName
-Archive:  $url
-SHA-256:  $expected
-License:  GNU LGPL version 3 (see LICENSE-FFmpeg.txt)
-Built by: https://github.com/BtbN/FFmpeg-Builds (its build scripts and the
-          exact configuration are public in that repository)
-Source:   FFmpeg is free software; its source code is available from
-          https://ffmpeg.org/download.html and https://git.ffmpeg.org/ffmpeg.git
-          (this build is the commit named in the archive file name).
-          See ../source/FFmpeg-corresponding-source.* in this bundle for the
-          exact corresponding source and build materials.
-
-You can replace these programs with any other FFmpeg build: put your own
-ffmpeg.exe and ffprobe.exe in this folder, or choose a folder in PieceOff
-under Media tools.
-"@ | Set-Content (Join-Path $ffmpegOut "FFMPEG-BUILD.txt")
+    Copy-Item -Recurse (Join-Path $FfmpegStage "ffmpeg") (Join-Path $Out "ffmpeg")
+    Copy-Item -Recurse (Join-Path $FfmpegStage "source") (Join-Path $Out "source")
 }
 
 & python scripts/license-report.py (Join-Path $Out "THIRD_PARTY_LICENSES.txt")
@@ -112,7 +58,7 @@ if ($LASTEXITCODE -ne 0) { throw "The third-party notices generation failed." }
 
 if (-not $SkipVerify) {
     Write-Host "Verifying the bundle..."
-    if ($WithFfmpeg) {
+    if (-not $NoFfmpeg) {
         & (Join-Path $Out "ffmpeg\ffmpeg.exe") -version | Select-Object -First 1
         & (Join-Path $Out "ffmpeg\ffprobe.exe") -version | Select-Object -First 1
     }

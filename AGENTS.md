@@ -27,7 +27,8 @@ output, native animated WebP decoding, deterministic jigsaw, hexagon and triangl
 piece groups, per-player piece holders, resumable invite-gated media transfer,
 `.pieceoff` packages, a local puzzle library, rebindable controls, and durable
 room snapshots. Release
-bundles exclude FFmpeg by default; see `docs/FFMPEG.md` before changing that.
+bundles include an LGPL FFmpeg built from source by `scripts/build-ffmpeg.sh`, with
+its corresponding source; see `docs/FFMPEG.md` before changing that.
 
 ## Build and verification
 

@@ -133,8 +133,9 @@ Still images and animated WebP use the native Rust image decoder. Video and
 animated APNG/GIF use FFmpeg. Common video formats include MP4, MOV, MKV,
 WebM, AVI, MPEG, OGV, FLV, 3GP, WMV, TS, MTS, and M2TS.
 
-FFmpeg is an external tool and is not included in the default release bundles.
-Install `ffmpeg` and `ffprobe`, place them beside the app, or select their
+Release bundles include FFmpeg (an LGPL build with no GPL or nonfree parts) in
+`ffmpeg/`, with its corresponding source in `source/`. Source builds do not:
+install `ffmpeg` and `ffprobe`, place them beside the app, or select their
 location under **Media tools**. See [FFmpeg distribution notes](docs/FFMPEG.md)
 before changing bundle behavior.
 
