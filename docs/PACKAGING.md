@@ -42,7 +42,9 @@ replace a native Windows build or runtime test.
 Windows x86_64, macOS Apple silicon, and macOS Intel when a `v*` tag is pushed.
 The tag must equal `v` plus the version in `crates/pieceoff-app/Cargo.toml`. The
 workflow uploads the archives, a `SHA256SUMS.txt`, a build-provenance
-attestation, and a **draft** release for a maintainer to review and publish.
+attestation, and a published release (marked latest, so `install.sh` picks it
+up). A pushed tag is therefore a release: run the checks and the native launch
+list in [TESTING.md](TESTING.md) before tagging.
 Bundles include a basic FFmpeg and its corresponding source; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
 (`workflow_dispatch`) to build bundles without publishing.
 
