@@ -9,7 +9,7 @@ license.workspace = true
 pieceoff-core = { path = "../pieceoff-core" }
 eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 futures-util = "0.3.32"
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 rfd = "0.17.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
