@@ -91,11 +91,14 @@ fi
 mkdir -p "$CACHE"
 # fetch <url> <sha256>: download into the cache, check the checksum, and
 # fetch the detached signature beside it.
+# ffmpeg.org is intermittently unreachable from CI runners.
+CURL_RETRY="--retry 6 --retry-all-errors --retry-delay 15 --connect-timeout 30"
+
 fetch() {
   archive=$CACHE/${1##*/}
   if [ ! -f "$archive" ] || [ "$(sha256_of "$archive")" != "$2" ]; then
     echo "Downloading ${1##*/}"
-    curl --fail --location --silent --show-error --output "$archive.part" "$1"
+    curl --fail --location --silent --show-error $CURL_RETRY --output "$archive.part" "$1"
     mv "$archive.part" "$archive"
   fi
   actual=$(sha256_of "$archive")
@@ -107,7 +110,7 @@ fetch() {
     exit 1
   fi
   if [ ! -f "$archive.asc" ]; then
-    curl --fail --location --silent --show-error --output "$archive.asc" "$1.asc"
+    curl --fail --location --silent --show-error $CURL_RETRY --output "$archive.asc" "$1.asc"
   fi
 }
 fetch "$URL" "$SHA"
