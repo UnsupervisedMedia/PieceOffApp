@@ -8,6 +8,11 @@ const DAY_MS = 86_400_000;
 const DEFAULT_LINK_TTL_MS = 600_000;
 const DEFAULT_ROOMS_PER_DAY = 30;
 const DEFAULT_DEVICE_BYTES_PER_DAY = 2 * GIB;
+/** Rooms the whole service may create per UTC day (device keys and browsers together). */
+const DEFAULT_GLOBAL_ROOMS_PER_DAY = 2_000;
+/** Device link requests the whole service may accept per UTC day. */
+const DEFAULT_GLOBAL_LINKS_PER_DAY = 500;
+export const DAILY_LIMIT_ERROR = "PieceOff Online has reached today's limit. Please try again tomorrow.";
 /** Under R2's 10 GB free tier, leaving room for parts R2 holds briefly. */
 export const DEFAULT_GLOBAL_MEDIA_BYTES = 8 * GIB;
 /** Pending links held at once; far above honest use, bounds a flood. */
@@ -30,6 +35,9 @@ export type Polled =
 
 const today = (now: number): number => Math.floor(now / DAY_MS);
 
+export type Usage = { day: string; rooms: number; rooms_cap: number; links: number; links_cap: number };
+type GlobalKind = "rooms" | "links";
+
 /**
  * The service-wide registry: one instance (`idFromName("registry")`).
  *
@@ -38,6 +46,9 @@ const today = (now: number): number => Math.floor(now / DAY_MS);
  *   hashes of the poll secret and of device keys are stored. The key is
  *   minted when the app collects it, so its plain value is never stored.
  * - Device keys: daily room and media-byte counters, a revoked flag.
+ * - Global daily ceilings on room creations and link requests, one row per
+ *   kind (`global_daily`) holding the UTC day and its count; a new day
+ *   restarts the count on its first write.
  * - The global media budget, kept per room (`room_media`) rather than as one
  *   sum so a room can report its true total and correct any drift a crash
  *   left behind (`reconcileRoom`). Rows of rooms that vanished without
@@ -60,6 +71,8 @@ export class RegistryDO extends DurableObject<Env> {
       sql.exec("CREATE INDEX IF NOT EXISTS devices_prefix ON devices (prefix)");
       sql.exec(`CREATE TABLE IF NOT EXISTS room_media (
         room TEXT PRIMARY KEY, device TEXT NOT NULL, bytes INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+      sql.exec(`CREATE TABLE IF NOT EXISTS global_daily (
+        kind TEXT PRIMARY KEY, day INTEGER NOT NULL, count INTEGER NOT NULL)`);
     });
   }
 
@@ -71,12 +84,76 @@ export class RegistryDO extends DurableObject<Env> {
     return numVar(this.env.LINK_TTL_MS, DEFAULT_LINK_TTL_MS);
   }
 
+  // ---- Global daily caps ---------------------------------------------------
+
+  /**
+   * The clock the daily caps count by. Test hook: `TEST_CLOCK_OFFSET_MS`
+   * moves it (needs the dev bypass on), so a test can step into the next UTC day.
+   */
+  private usageNow(): number {
+    const offset = this.env.DEV_ALLOW_UNVERIFIED_CREATE === "1" ? Number(this.env.TEST_CLOCK_OFFSET_MS ?? "0") : 0;
+    return Date.now() + (Number.isFinite(offset) ? offset : 0);
+  }
+
+  private globalCap(kind: GlobalKind): number {
+    return kind === "rooms"
+      ? numVar(this.env.GLOBAL_ROOMS_PER_DAY, DEFAULT_GLOBAL_ROOMS_PER_DAY)
+      : numVar(this.env.GLOBAL_LINKS_PER_DAY, DEFAULT_GLOBAL_LINKS_PER_DAY);
+  }
+
+  /** Today's count for `kind` (0 when the stored row is from an earlier day). */
+  private globalUsed(kind: GlobalKind, day: number): number {
+    const rows = this.sql.exec("SELECT day, count FROM global_daily WHERE kind = ?", kind).toArray();
+    return rows.length > 0 && rows[0]!.day === day ? Number(rows[0]!.count) : 0;
+  }
+
+  /** One row write: count one more for `day`, restarting the count on a new day. */
+  private globalAdd(kind: GlobalKind, day: number): void {
+    this.sql.exec(
+      `INSERT INTO global_daily (kind, day, count) VALUES (?, ?, 1)
+       ON CONFLICT (kind) DO UPDATE SET count = CASE WHEN day = excluded.day THEN count + 1 ELSE 1 END, day = excluded.day`,
+      kind, day,
+    );
+  }
+
+  /** Give back one of today's `kind` (no-op once the day has turned). */
+  private globalRefund(kind: GlobalKind): void {
+    this.sql.exec(
+      "UPDATE global_daily SET count = MAX(count - 1, 0) WHERE kind = ? AND day = ?",
+      kind, today(this.usageNow()),
+    );
+  }
+
+  /** Count one browser (Turnstile) room against the service's day. */
+  async chargeGlobalRoom(): Promise<Reserved> {
+    const day = today(this.usageNow());
+    if (this.globalUsed("rooms", day) >= this.globalCap("rooms")) {
+      return { ok: false, status: 503, error: DAILY_LIMIT_ERROR };
+    }
+    this.globalAdd("rooms", day);
+    return { ok: true };
+  }
+
+  /** Today's counts and caps, for `GET /api/admin/usage`. */
+  async usage(): Promise<Usage> {
+    const day = today(this.usageNow());
+    return {
+      day: new Date(day * DAY_MS).toISOString().slice(0, 10),
+      rooms: this.globalUsed("rooms", day),
+      rooms_cap: this.globalCap("rooms"),
+      links: this.globalUsed("links", day),
+      links_cap: this.globalCap("links"),
+    };
+  }
+
   // ---- Device links --------------------------------------------------------
 
   async createLink(deviceName: string): Promise<
     { ok: true; code: string; pollSecret: string; expiresIn: number } | { ok: false; error: string }
   > {
     const now = Date.now();
+    const day = today(this.usageNow());
+    if (this.globalUsed("links", day) >= this.globalCap("links")) return { ok: false, error: DAILY_LIMIT_ERROR };
     const pending = Number(this.sql.exec("SELECT COUNT(*) AS n FROM links WHERE expires_at > ?", now).one().n);
     if (pending >= MAX_PENDING_LINKS) return { ok: false, error: "Too many computers are linking right now. Try again soon." };
     const pollSecret = randomB64url(32);
@@ -89,6 +166,7 @@ export class RegistryDO extends DurableObject<Env> {
         "INSERT INTO links (code, poll_hash, device_name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
         code, pollHash, deviceName, now, now + ttl,
       );
+      this.globalAdd("links", day);
       await this.arm(now + ttl);
       return { ok: true, code, pollSecret, expiresIn: Math.round(ttl / 1000) };
     }
@@ -142,7 +220,10 @@ export class RegistryDO extends DurableObject<Env> {
       : { rooms: 0, bytes: 0 };
   }
 
-  /** Check a device key and count one room against its daily allowance. */
+  /**
+   * Check a device key and count one room against its daily allowance and
+   * the service's. A refusal charges neither.
+   */
   async chargeRoom(keyHash: string): Promise<Charged> {
     const now = Date.now();
     const row = this.device("hash", keyHash);
@@ -152,6 +233,11 @@ export class RegistryDO extends DurableObject<Env> {
     if (used.rooms >= cap) {
       return { ok: false, status: 429, error: "This computer has created as many rooms as it may today. Try again tomorrow." };
     }
+    const globalDay = today(this.usageNow());
+    if (this.globalUsed("rooms", globalDay) >= this.globalCap("rooms")) {
+      return { ok: false, status: 503, error: DAILY_LIMIT_ERROR };
+    }
+    this.globalAdd("rooms", globalDay);
     this.sql.exec(
       "UPDATE devices SET day = ?, rooms_today = ?, media_bytes_today = ?, rooms_total = rooms_total + 1, last_used_at = ? WHERE hash = ?",
       today(now), used.rooms + 1, used.bytes, now, keyHash,
@@ -159,9 +245,10 @@ export class RegistryDO extends DurableObject<Env> {
     return { ok: true, device: keyHash.slice(0, DEVICE_PREFIX_LENGTH) };
   }
 
-  /** Give back a room charge whose room could not be made. */
+  /** Give back a room charge whose room could not be made ("" for a browser room). */
   async refundRoom(device: string): Promise<void> {
-    const row = this.device("prefix", device);
+    this.globalRefund("rooms");
+    const row = device ? this.device("prefix", device) : null;
     if (row === null || row.day !== today(Date.now())) return;
     this.sql.exec(
       "UPDATE devices SET rooms_today = MAX(rooms_today - 1, 0), rooms_total = MAX(rooms_total - 1, 0) WHERE prefix = ?",

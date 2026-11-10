@@ -1,6 +1,6 @@
 /**
  * Routes for PieceOff Online: service info, device linking, the lobby, and
- * the admin revoke call. Room creation with a device key lives in index.ts.
+ * the admin revoke and usage calls. Room creation with a device key lives in index.ts.
  */
 import { PROTOCOL_VERSION, uploadsEnabled } from "./core.ts";
 import type { Env } from "./env";
@@ -139,16 +139,32 @@ export async function getLobby(request: Request, env: Env): Promise<Response> {
   return new Response(body, { headers: headers(5) });
 }
 
+/** Admin gate shared by `/api/admin/*`: 404 without the secret, rate limited, constant-time token check. */
+async function adminDenied(request: Request, env: Env): Promise<Response | null> {
+  if (!env.ADMIN_TOKEN) return new Response("Not found", { status: 404 });
+  const { success } = await env.LINK_LIMITER.limit({ key: `admin:${clientIp(request)}` });
+  if (!success) return json({ error: "Too many requests" }, 429);
+  if (!(await secretsEqual(bearer(request), env.ADMIN_TOKEN))) return json({ error: "Not allowed" }, 403);
+  return null;
+}
+
+/**
+ * `GET /api/admin/usage` → `{day, rooms, rooms_cap, links, links_cap}`: the
+ * service's counts for the current UTC day against its daily ceilings.
+ * `Authorization: Bearer <ADMIN_TOKEN>`. Not found without the secret set.
+ */
+export async function adminUsage(request: Request, env: Env): Promise<Response> {
+  return (await adminDenied(request, env)) ?? json(await registry(env).usage());
+}
+
 /**
  * `POST /api/admin/devices/revoke` `{"device_prefix": "<16 hex>"}` or
  * `{"device_key": "pok_..."}`, optional `"revoked": false` to restore.
  * `Authorization: Bearer <ADMIN_TOKEN>`. Not found without the secret set.
  */
 export async function adminRevoke(request: Request, env: Env): Promise<Response> {
-  if (!env.ADMIN_TOKEN) return new Response("Not found", { status: 404 });
-  const { success } = await env.LINK_LIMITER.limit({ key: `admin:${clientIp(request)}` });
-  if (!success) return json({ error: "Too many requests" }, 429);
-  if (!(await secretsEqual(bearer(request), env.ADMIN_TOKEN))) return json({ error: "Not allowed" }, 403);
+  const denied = await adminDenied(request, env);
+  if (denied) return denied;
   const body = await smallJson(request);
   if (body === null) return json({ error: "Bad message" }, 400);
   const revoked = body.revoked !== false;

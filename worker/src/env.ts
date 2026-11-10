@@ -20,10 +20,16 @@ export interface Env {
   SHARE_URL?: string;
   /** The site's origin: the only browser origin that may approve links or read the lobby cross-origin. */
   SITE_ORIGIN?: string;
-  /** Secret for `POST /api/admin/devices/revoke`; the route is off without it. */
+  /** Secret for the `/api/admin/*` routes; they are off without it. */
   ADMIN_TOKEN?: string;
   /** Media all rooms may hold together, stored plus in flight (default 8 GiB). */
   MEDIA_GLOBAL_QUOTA_BYTES?: string;
+  /** Rooms the whole service may create per UTC day, device keys and browsers together (default 2000). */
+  GLOBAL_ROOMS_PER_DAY?: string;
+  /** Device link requests the whole service may accept per UTC day (default 500). */
+  GLOBAL_LINKS_PER_DAY?: string;
+  /** Test hook: milliseconds added to the daily caps' clock (needs the dev bypass on). */
+  TEST_CLOCK_OFFSET_MS?: string;
   /** Rooms one device key may create per UTC day (default 30). */
   DEVICE_ROOMS_PER_DAY?: string;
   /** Media bytes one device key's rooms may upload per UTC day (default 2 GiB). */
