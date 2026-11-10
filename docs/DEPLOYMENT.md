@@ -192,6 +192,27 @@ waking a Durable Object. `/health`, `/api/info` and `/api/admin/*` keep
 working. A secret, unlike a `vars` entry, survives the next Git deploy. Delete
 the secret (or set it to `1`) to resume.
 
+### Daily ceilings
+
+The account is a Workers Paid plan with no provider spend cap, shared with
+other sites, so the Worker stops itself before many devices and addresses
+together can run up the bill. On top of the per-address rate limits and the
+per-device caps, the registry keeps two service-wide counters per UTC day:
+
+- `GLOBAL_ROOMS_PER_DAY` (default 2000): every room creation, device-key and
+  browser (Turnstile) alike. A creation that is admitted but then fails (bad
+  `create_room`, no free code) gives its slot back, as it does the device's.
+- `GLOBAL_LINKS_PER_DAY` (default 500): `POST /api/links`.
+
+Past either ceiling the call answers
+`503 {"error":"PieceOff Online has reached today's limit. Please try again tomorrow."}`
+until midnight UTC. Refused requests (rate limited, failed Turnstile, bad or
+capped device key) never take a slot. Joining existing rooms, media, the lobby,
+link approvals and polls keep working. Each counted action costs one SQLite row
+write in the registry and nothing more. `GET /api/admin/usage` (below) reports
+today's counts so the fleet can poll them; the emergency pause above is the
+switch for stopping everything at once.
+
 ### Settings
 
 Plain variables live in `worker/wrangler.jsonc` (`vars`), so a deploy from Git
@@ -204,6 +225,8 @@ always carries them; change them there, not in the dashboard.
 | `TURNSTILE_HOSTNAME` | `pieceoff.app` | Hostname the Turnstile widget runs on (link approvals, browser room creation). |
 | `LINK_URL` / `SHARE_URL` | `https://pieceoff.app/link` / `https://pieceoff.app/join` | Reported by `/api/info`; the link URL gets `?c=CODE`. |
 | `MEDIA_GLOBAL_QUOTA_BYTES` | 8 GiB | Media all rooms together may hold, stored plus in flight. A hard stop under R2's 10 GB free tier. |
+| `GLOBAL_ROOMS_PER_DAY` | 2000 | Rooms the whole service may create per UTC day (see [Daily ceilings](#daily-ceilings)). |
+| `GLOBAL_LINKS_PER_DAY` | 500 | Device link requests the whole service may accept per UTC day. |
 | `DEVICE_ROOMS_PER_DAY` | 30 | Rooms one device key may create per UTC day. |
 | `DEVICE_MEDIA_BYTES_PER_DAY` | 2 GiB | Media bytes one device's rooms may start uploading per UTC day. |
 | `ROOM_MEDIA_QUOTA_BYTES` | 1 GiB | Per room, stored plus in flight. `MAX_MEDIA_BYTES`, `MEDIA_MIN_PART_BYTES`, `MEDIA_MAX_PART_BYTES` bound files and parts. |
@@ -217,11 +240,12 @@ Secrets (dashboard → Worker → Settings → Variables and Secrets, type
 | Secret | Needed for |
 | --- | --- |
 | `TURNSTILE_SECRET` | Link approvals and browser room creation. Without it both are refused, so no device can be linked. The live Worker has none yet. |
-| `ADMIN_TOKEN` | `POST /api/admin/devices/revoke`. Without it the route answers 404. Use a long random value. |
+| `ADMIN_TOKEN` | `POST /api/admin/devices/revoke` and `GET /api/admin/usage`. Without it both answer 404. Use a long random value. |
 
 Test-only, never set in production: `DEV_ALLOW_UNVERIFIED_CREATE=1` (skips
 Turnstile), `TURNSTILE_VERIFY_URL` (honoured only for loopback),
-`FAIL_R2_DELETE_ONCE`, `FAIL_BUDGET_RELEASE_ONCE`.
+`FAIL_R2_DELETE_ONCE`, `FAIL_BUDGET_RELEASE_ONCE`, `TEST_CLOCK_OFFSET_MS`
+(moves the daily ceilings' clock; honoured only with the dev bypass on).
 
 Bindings: Durable Objects `ROOMS` (`RoomDO`, one per room), `REGISTRY`
 (`RegistryDO`, one instance named `registry`), `LOBBY` (`LobbyDO`, one
@@ -254,13 +278,14 @@ refused (403) unless their `Origin` is the Worker's own host or listed in
 | --- | --- |
 | `GET /health` | Plain-text liveness line. |
 | `GET /api/info` | `{"service":"pieceoff-rooms","protocol":15,"hosted":true,"link_url":…,"share_url":…,"features":["device_keys","lobby"],"uploads":false}`. The axum server answers 404, which is how the app tells them apart. |
-| `POST /api/links` | Body optional `{"device_name": "…"}` (tidied, at most 40 characters). → `{"link_code":"ABCD2345","poll_secret":"<43 b64url>","url":"<link_url>?c=ABCD2345","expires_in":600}`. 429 over `LINK_LIMITER`. |
+| `POST /api/links` | Body optional `{"device_name": "…"}` (tidied, at most 40 characters). → `{"link_code":"ABCD2345","poll_secret":"<43 b64url>","url":"<link_url>?c=ABCD2345","expires_in":600}`. 429 over `LINK_LIMITER`; 503 past `GLOBAL_LINKS_PER_DAY`. |
 | `OPTIONS /api/links/<code>/approve` | Preflight: 204, `Access-Control-Allow-Origin: <SITE_ORIGIN>`, `-Methods: POST`, `-Headers: x-turnstile-token, content-type`. |
 | `POST /api/links/<code>/approve` | Browser only: `Origin` must be `SITE_ORIGIN`, header `x-turnstile-token` (action `link_device`, hostname `TURNSTILE_HOSTNAME`). → `{"ok":true}`; 404 unknown or expired; 409 already approved; 403 bad origin or token. Every answer carries `Access-Control-Allow-Origin`. |
 | `GET /api/links/<code>` | `Authorization: Bearer <poll_secret>`. → `202 {"status":"pending"}`, or `200 {"status":"approved","device_key":"pok_<43 b64url>"}` exactly once (the link is then deleted), or 404 (unknown, expired, wrong secret). Poll every 2 s. |
-| `POST /api/rooms` | A `create_room` body. Either `Authorization: Bearer pok_…` (device key, no Turnstile) or `x-turnstile-token` (browser, action `create_room`). → `{code, client_id, resume_token}`. Bad or revoked key → `401 {"error":…,"relink":true}`; over the device's daily rooms → 429. |
+| `POST /api/rooms` | A `create_room` body. Either `Authorization: Bearer pok_…` (device key, no Turnstile) or `x-turnstile-token` (browser, action `create_room`). → `{code, client_id, resume_token}`. Bad or revoked key → `401 {"error":…,"relink":true}`; over the device's daily rooms → 429; past `GLOBAL_ROOMS_PER_DAY` → 503. |
 | `GET /api/lobby` | `{"rooms":[{code,title,host_name,players,max_players,spectators,pieces,placed,cut_style,created_at,updated_at}]}`, at most 100, rooms with a free player slot first, then more players, then newest. `cache-control: public, max-age=5`, `Access-Control-Allow-Origin: <SITE_ORIGIN>`, and cached for 5 s at the edge. 429 over `LOBBY_LIMITER`. |
 | `POST /api/admin/devices/revoke` | `Authorization: Bearer <ADMIN_TOKEN>` (constant-time compare). Body `{"device_key":"pok_…"}` or `{"device_prefix":"<16 hex>"}`, optional `"revoked": false` to restore. → `{"ok":true,"revoked":true,"devices":1}`; 404 no such device. |
+| `GET /api/admin/usage` | `Authorization: Bearer <ADMIN_TOKEN>` (constant-time compare; rate limited with the other admin calls). → `{"day":"2026-11-10","rooms":12,"rooms_cap":2000,"links":3,"links_cap":500}`, today's UTC counts against the daily ceilings. 403 wrong token; 404 without `ADMIN_TOKEN` set. Works while paused. |
 
 Rooms: clients then open `/ws?code=<CODE>` and send `join_room` first. A
 player's `client_id` is public (everyone sees the host's id), so it proves
@@ -394,7 +419,9 @@ link create/approve/poll and one-time key delivery, CORS, device-key rooms
 with the daily cap and 401 relink for unknown and revoked keys, the global
 budget's 507, release on abort and expiry and reconcile after a lost release,
 lobby listing, updates, removal and expiry with built-in titles, the
-listed-room built-in rule, the uploads-off refusals, and moderation: a kick
+listed-room built-in rule, the uploads-off refusals, the daily ceilings (503 for links and for
+device-key and browser rooms, refund on a failed create, joins and the lobby
+past the cap, rollover on the next UTC day, `/api/admin/usage` auth), and moderation: a kick
 closes the socket and the player cannot rejoin by token, key, name or as a
 spectator, also after a restart; listed rooms start with chat off and refuse
 chat until the host turns it on; blocked names are refused in listed rooms

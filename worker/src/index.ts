@@ -5,6 +5,7 @@ import { LobbyDO } from "./lobby";
 import { handleMedia } from "./media";
 import {
   adminRevoke,
+  adminUsage,
   approveLink,
   approvePreflight,
   clientIp,
@@ -37,6 +38,8 @@ function checkOrigin(request: Request, env: Env): Response | null {
  * cost a Turnstile or registry call), then either a device key (desktop
  * apps) or Turnstile (browsers). With neither a key nor a Turnstile secret
  * configured, creation is refused unless the local-development bypass is on.
+ * Every admitted room also counts against the service's daily ceiling
+ * (503 once it is reached); the device-key path does both in one registry call.
  * Returns the creator device's hash prefix ("" for browser rooms).
  */
 async function checkCreateAllowed(
@@ -65,11 +68,12 @@ async function checkCreateAllowed(
       expectedAction: "create_room",
       url: trustedVerifyUrl(env.TURNSTILE_VERIFY_URL),
     });
-    return ok ? { device: "" } : { denied: json({ error: "Verification failed" }, 403) };
+    if (!ok) return { denied: json({ error: "Verification failed" }, 403) };
+  } else if (env.DEV_ALLOW_UNVERIFIED_CREATE !== "1") {
+    return { denied: json({ error: "Not allowed" }, 403) };
   }
-  return env.DEV_ALLOW_UNVERIFIED_CREATE === "1"
-    ? { device: "" }
-    : { denied: json({ error: "Not allowed" }, 403) };
+  const charged = await registry(env).chargeGlobalRoom();
+  return charged.ok ? { device: "" } : { denied: json({ error: charged.error }, charged.status) };
 }
 
 async function createRoom(request: Request, env: Env): Promise<Response> {
@@ -103,8 +107,9 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   // proves it is the creator's is a secret, returned only here.
   const clientId = crypto.randomUUID();
   const roomId = crypto.randomUUID();
+  // Gives back the service's daily slot, and the device's when there is one.
   const refund = async () => {
-    if (allowed.device) await registry(env).refundRoom(allowed.device).catch(() => undefined);
+    await registry(env).refundRoom(allowed.device).catch(() => undefined);
   };
   for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt++) {
     const code = newCode();
@@ -153,6 +158,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (path === "/api/admin/devices/revoke" && request.method === "POST") {
     return checkOrigin(request, env) ?? adminRevoke(request, env);
+  }
+  if (path === "/api/admin/usage" && request.method === "GET") {
+    return checkOrigin(request, env) ?? adminUsage(request, env);
   }
 
   const media = path.match(/^\/api\/rooms\/([^/]+)\/media(\/.*)?$/);

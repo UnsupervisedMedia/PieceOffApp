@@ -27,6 +27,13 @@
     "SHARE_URL": "https://pieceoff.app/join",
     "MEDIA_GLOBAL_QUOTA_BYTES": "8589934592",
     "DEVICE_ROOMS_PER_DAY": "30",
+    // Hard daily ceilings for the whole service (UTC day), so many devices and
+    // addresses together cannot run up the account's bill. Past them, room
+    // creation and link requests answer 503 until midnight UTC; joining
+    // existing rooms and the lobby keep working. Today's counts:
+    // GET /api/admin/usage (ADMIN_TOKEN).
+    "GLOBAL_ROOMS_PER_DAY": "2000",
+    "GLOBAL_LINKS_PER_DAY": "500",
     "DEVICE_MEDIA_BYTES_PER_DAY": "2147483648"
   },
   "migrations": [
