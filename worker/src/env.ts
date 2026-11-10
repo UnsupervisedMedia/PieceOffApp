@@ -3,6 +3,8 @@ import type { RegistryDO } from "./registry";
 import type { RoomDO } from "./room";
 
 export interface Env {
+  /** "0" pauses all hosted play (see index.ts); anything else, or unset, is on. */
+  ONLINE_PLAY_ENABLED?: string;
   ROOMS: DurableObjectNamespace<RoomDO>;
   /** Device links, device keys and the global media budget; one instance, "registry". */
   REGISTRY: DurableObjectNamespace<RegistryDO>;

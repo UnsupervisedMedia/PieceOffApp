@@ -11,7 +11,7 @@ use crate::online::{
 use eframe::egui::RichText;
 
 /// How often the open lobby list refreshes itself.
-const LOBBY_REFRESH: Duration = Duration::from_secs(10);
+const LOBBY_REFRESH: Duration = Duration::from_secs(30);
 /// How often a link code is checked for approval.
 const LINK_POLL: Duration = Duration::from_secs(2);
 /// An unreachable server is asked again after this long.
@@ -961,7 +961,10 @@ impl PieceOffApp {
                 .lobby
                 .fetched_at
                 .is_none_or(|at| at.elapsed() >= LOBBY_REFRESH);
-        if stale && !self.online.lobby.loading {
+        // Only poll while someone can see the list: a backgrounded window
+        // costs the hosted service nothing.
+        let focused = ui.ctx().input(|i| i.focused);
+        if stale && focused && !self.online.lobby.loading {
             self.request_lobby(false);
         }
         ui.ctx().request_repaint_after(LOBBY_REFRESH);

@@ -160,8 +160,8 @@ of it.
 
 | Setting | Value |
 | --- | --- |
-| Repository | `UnsupervisedMedia/PieceOffApp`, production branch `main` |
-| Root directory | `worker` |
+| Repository | `bourneash/PieceOff` (private deploy mirror), production branch `deploy` |
+| Root directory | `/worker` |
 | Build command | `./ci-build.sh` |
 | Deploy command | `npx wrangler deploy` (Workers Builds runs it; nobody else does) |
 | Non-production branch deploys | off |
@@ -173,6 +173,24 @@ its published sha256, the `wasm32-unknown-unknown` target, and the prebuilt
 runs `worker/build.sh`. Workers Builds installs the npm dependencies from
 `worker/package-lock.json` itself. A cold build spends about a minute
 installing Rust; the wasm build is under a minute.
+
+The Cloudflare GitHub app is connected to the `bourneash` account, which cannot
+see repositories owned by `UnsupervisedMedia`, so Workers Builds reads a
+private mirror. `.github/workflows/mirror.yml` pushes every commit on `main` to
+`bourneash/PieceOff` branch `deploy` (a fast-forward; `main` is linear) using
+the `MIRROR_DEPLOY_KEY` secret, an SSH deploy key with write access to that
+mirror only. Without the secret the workflow warns and does nothing, and the
+Worker stays on its last build. The mirror's own `main` is an unrelated older
+copy; leave it alone.
+
+### Emergency pause
+
+Set the Worker **secret** `ONLINE_PLAY_ENABLED` to `0` (dashboard, or the
+secrets API) to stop all new hosted play at once: `/api/lobby` answers an empty
+list and linking, creating, joining and media answer 503 "paused", all without
+waking a Durable Object. `/health`, `/api/info` and `/api/admin/*` keep
+working. A secret, unlike a `vars` entry, survives the next Git deploy. Delete
+the secret (or set it to `1`) to resume.
 
 ### Settings
 

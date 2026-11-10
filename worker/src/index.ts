@@ -125,6 +125,16 @@ async function route(request: Request, env: Env): Promise<Response> {
   const path = url.pathname;
   if (path === "/health") return new Response("PieceOff rooms are running");
   if (path === "/api/info" && request.method === "GET") return info(env);
+  // Emergency switch: set the secret ONLINE_PLAY_ENABLED to "0" to stop
+  // all new hosted play (lobby reads, linking, creating and joining) without a
+  // deploy (a secret, unlike a var, survives Git deploys). Nothing below
+  // wakes a Durable Object while it is off.
+  if (env.ONLINE_PLAY_ENABLED === "0") {
+    if (path === "/api/lobby" && request.method === "GET") return json({ rooms: [] });
+    if ((path.startsWith("/api/") && !path.startsWith("/api/admin/")) || path === "/ws") {
+      return json({ error: "PieceOff Online is paused right now. Please try again later." }, 503);
+    }
+  }
   if (path === "/api/lobby" && request.method === "GET") return getLobby(request, env);
   if (path === "/api/rooms" && request.method === "POST") return createRoom(request, env);
 

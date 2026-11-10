@@ -1,0 +1,47 @@
+name: Deploy mirror
+
+# Cloudflare Workers Builds deploys the rooms Worker (worker/) from the
+# `deploy` branch of the private bourneash/PieceOff mirror, because the
+# Cloudflare GitHub app is connected to that account. Every push to main is
+# copied there as a fast-forward. Needs the MIRROR_DEPLOY_KEY secret (an SSH
+# deploy key with write access to that repository only); without it the job
+# does nothing. See docs/DEPLOYMENT.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Push main to the deploy mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Push to bourneash/PieceOff deploy
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        run: |
+          if [ -z "$MIRROR_DEPLOY_KEY" ]; then
+            echo "::warning::MIRROR_DEPLOY_KEY is not set; the Worker will not deploy."
+            exit 0
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$MIRROR_DEPLOY_KEY" > ~/.ssh/mirror
+          chmod 600 ~/.ssh/mirror
+          # GitHub's published ed25519 host key.
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          # A plain push: main is linear, so this only ever fast-forwards.
+          git push git@github.com:bourneash/PieceOff.git "${GITHUB_SHA}:refs/heads/deploy"
