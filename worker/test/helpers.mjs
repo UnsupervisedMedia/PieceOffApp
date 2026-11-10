@@ -25,7 +25,7 @@ export function freePort() {
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function startServer(port, persistDir, vars = {}) {
-  const varArgs = Object.entries({ FLUSH_MS: 500, DEV_ALLOW_UNVERIFIED_CREATE: 1, ...vars }).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
+  const varArgs = Object.entries({ FLUSH_MS: 500, DEV_ALLOW_UNVERIFIED_CREATE: 1, MEDIA_UPLOADS_ENABLED: 1, LOBBY_CACHE_SECONDS: 0, ...vars }).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
   const child = spawn(
     "npx",
     ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", "0", "--persist-to", persistDir, ...varArgs],
@@ -153,7 +153,7 @@ export function rawRequest(port, method, urlPath, headers = {}, body = null) {
         const chunks = [];
         response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () =>
-          resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString("utf8") }),
+          resolve({ status: response.statusCode, headers: response.headers, text: Buffer.concat(chunks).toString("utf8") }),
         );
       },
     );

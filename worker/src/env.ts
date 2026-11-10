@@ -1,7 +1,47 @@
+import type { LobbyDO } from "./lobby";
+import type { RegistryDO } from "./registry";
 import type { RoomDO } from "./room";
 
 export interface Env {
   ROOMS: DurableObjectNamespace<RoomDO>;
+  /** Device links, device keys and the global media budget; one instance, "registry". */
+  REGISTRY: DurableObjectNamespace<RegistryDO>;
+  /** The public lobby; one instance, "lobby". */
+  LOBBY: DurableObjectNamespace<LobbyDO>;
+  /** Device link requests per address per minute (also approvals and admin calls, keyed apart). */
+  LINK_LIMITER: RateLimit;
+  /** Lobby reads per address per minute (also link polls, keyed apart). */
+  LOBBY_LIMITER: RateLimit;
+  /** Where players approve a device link (`?c=CODE` is appended). */
+  LINK_URL?: string;
+  /** Invite link base the apps share (`?c=CODE`). */
+  SHARE_URL?: string;
+  /** The site's origin: the only browser origin that may approve links or read the lobby cross-origin. */
+  SITE_ORIGIN?: string;
+  /** Secret for `POST /api/admin/devices/revoke`; the route is off without it. */
+  ADMIN_TOKEN?: string;
+  /** Media all rooms may hold together, stored plus in flight (default 8 GiB). */
+  MEDIA_GLOBAL_QUOTA_BYTES?: string;
+  /** Rooms one device key may create per UTC day (default 30). */
+  DEVICE_ROOMS_PER_DAY?: string;
+  /** Media bytes one device key's rooms may upload per UTC day (default 2 GiB). */
+  DEVICE_MEDIA_BYTES_PER_DAY?: string;
+  /** How long a device link waits for approval and collection (default 600000). */
+  LINK_TTL_MS?: string;
+  /** A lobby entry with no heartbeat for this long is dropped (default 150000). */
+  LOBBY_EXPIRY_MS?: string;
+  /** Least time between a room's lobby updates (default 10000). */
+  LOBBY_THROTTLE_MS?: string;
+  /** How often a listed room with players re-announces itself (default 60000). */
+  LOBBY_HEARTBEAT_MS?: string;
+  /** Seconds the edge may reuse a lobby answer (default 5; 0 turns the cache off). */
+  LOBBY_CACHE_SECONDS?: string;
+  /** How often a room with media reports its true total to the registry (default 30 min). */
+  BUDGET_RECONCILE_MS?: string;
+  /** "1" allows media that is not a built-in loop (uploads to R2). Off by default. */
+  MEDIA_UPLOADS_ENABLED?: string;
+  /** Test hook: "1" makes the first upload abort skip its budget release (needs the dev bypass on). */
+  FAIL_BUDGET_RELEASE_ONCE?: string;
   /** Rooms one address may create per minute. */
   CREATE_LIMITER: RateLimit;
   /** Lookups of room codes that do not exist, per address per minute. */

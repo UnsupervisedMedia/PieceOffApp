@@ -48,10 +48,20 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   `/api/info`), so online rooms use built-in puzzles. Waiting on the Worker
   side (registry, device keys, lobby) and moderation before the lobby is
   turned on publicly.
-- **On hold: go-live.** Needs the owner: create the R2 bucket `pieceoff-media`,
-  the Turnstile widget and secret, and wire the rooms Worker into the connected
-  GitHub to Cloudflare Workers Builds path (no direct `wrangler deploy`).
-  Nothing has been deployed.
+- **Done (branch `feature/online-worker`): PieceOff Online Worker
+  additions** (spec `2026-11-10-online-play-design.md`, section 2):
+  `/api/info`, device linking with revocable per-device keys (`RegistryDO`),
+  device-key room creation with daily caps, a crash-safe global R2 budget,
+  the public lobby (`LobbyDO`, `GET /api/lobby`) with CORS for the site, and
+  `worker/ci-build.sh` so Workers Builds can build the Rust core. Hosted
+  uploads are off at launch (`MEDIA_UPLOADS_ENABLED=0`, built-in loops only).
+- **Go-live status.** `pieceoff-rooms` exists on `rooms.pieceoff.app` from
+  the one-time initial create; later deploys come only from Workers Builds
+  (settings in [DEPLOYMENT.md](DEPLOYMENT.md)). Still needs the owner: the
+  Turnstile widget and `TURNSTILE_SECRET` (until then linking and creation
+  are refused), `ADMIN_TOKEN`, and the Workers Builds connection. The lobby
+  stays unannounced until moderation exists; uploads stay off until abuse
+  contact, takedown and a hash blocklist exist.
 - **Next: Plan 1C media lifecycle.** The earlier protocol v9 sketch is stale;
   the current wire protocol is v15. Decide the schema change for `seed_sha256`,
   `still_sha256`, owner and source fields; completion still and release of the
