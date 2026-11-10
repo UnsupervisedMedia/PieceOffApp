@@ -235,6 +235,11 @@ pub(crate) fn describe_http_failure(status: u16, body: &str) -> String {
         507 => json_error(body).unwrap_or_else(|| STORAGE_FULL_MESSAGE.into()),
         413 => "That file is too large for PieceOff Online.".into(),
         426 => "PieceOff Online needs a newer app. Update PieceOff to play online.".into(),
+        // 503 is how the service says it is paused or at today's limit, with
+        // its own sentence; show that instead of a generic failure.
+        503 => json_error(body).unwrap_or_else(|| {
+            "PieceOff Online had a problem (HTTP 503). Try again in a moment.".into()
+        }),
         500..=599 => {
             format!("PieceOff Online had a problem (HTTP {status}). Try again in a moment.")
         }
@@ -950,6 +955,17 @@ impl HostedSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_503_shows_the_services_own_sentence() {
+        let paused = r#"{"error":"PieceOff Online is paused right now. Please try again later."}"#;
+        assert_eq!(
+            describe_http_failure(503, paused),
+            "PieceOff Online is paused right now. Please try again later."
+        );
+        assert!(describe_http_failure(503, "not json").contains("HTTP 503"));
+        assert!(describe_http_failure(502, paused).contains("HTTP 502"));
+    }
 
     #[test]
     fn invite_links_and_bare_codes_are_read() {
