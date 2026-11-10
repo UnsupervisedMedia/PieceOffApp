@@ -29,3 +29,9 @@ All eight assets are bundled in the app binary and copied into the user's
 library data directory when selected. To preserve the base game's
 self-contained media set, future additions should be original procedural work
 or have reviewed redistribution terms recorded here.
+
+Rooms identify built-in loops by SHA-256 (`BUILTIN_MEDIA_SHA256` in
+`crates/pieceoff-core/src/listing.rs`): they are never uploaded, and only they
+may appear in public rooms. Changing, adding or removing an asset means
+updating that list (a test compares it with the files) and bumping the
+protocol, since older apps would not have the new bytes.

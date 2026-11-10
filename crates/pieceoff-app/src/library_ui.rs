@@ -57,6 +57,16 @@ const BUILT_INS: [(&str, &str, &str, &[u8]); 8] = [
     ),
 ];
 
+/// The bundled bytes of a built-in loop, by fingerprint. Rooms never upload
+/// built-in media (protocol v15), so every client loads it from here.
+pub(crate) fn builtin_media_bytes(sha256: &str) -> Option<&'static [u8]> {
+    let title = pieceoff_core::builtin_media_title(sha256)?;
+    BUILT_INS
+        .iter()
+        .find(|(name, ..)| *name == title)
+        .map(|(.., bytes)| *bytes)
+}
+
 fn format_size(bytes: u64) -> String {
     const MIB: f64 = 1024.0 * 1024.0;
     let size = bytes as f64;

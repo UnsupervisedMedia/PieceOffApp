@@ -619,8 +619,12 @@ export class RoomDO extends DurableObject<Env> {
     if ("err" in reply) return this.sendError(ws, reply.err);
     this.broadcast(JSON.stringify(reply.ok.event));
     if (reply.ok.persist) this.markDirty();
-    if (parsed.type === "queue_add" && typeof (parsed as { sha256?: unknown }).sha256 === "string") {
-      const sha256 = (parsed as { sha256: string }).sha256.toLowerCase();
+    // Built-in media is available at once and is never uploaded.
+    const queuedSha = parsed.type === "queue_add" && typeof (parsed as { sha256?: unknown }).sha256 === "string"
+      ? (parsed as { sha256: string }).sha256.toLowerCase()
+      : null;
+    if (queuedSha !== null && this.waitingInQueue(queuedSha)) {
+      const sha256 = queuedSha;
       const alreadyStored = await this.env.MEDIA.head(this.mediaKey(sha256));
       if (alreadyStored !== null) {
         const event = this.wasm(() => this.room.mark_item_available(sha256));

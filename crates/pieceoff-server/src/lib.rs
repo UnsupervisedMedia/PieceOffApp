@@ -523,6 +523,9 @@ fn application(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The refusal for listing a room: a self-hosted server has no public lobby.
+const NO_PUBLIC_LOBBY: &str = "This server has no public lobby";
+
 #[derive(Deserialize)]
 struct SocketQuery {
     /// The protocol version the client speaks. Clients older than this check
@@ -1354,6 +1357,9 @@ async fn connect_room(
     match first {
         create @ ClientMessage::CreateRoom { .. } => {
             let create_key = match &create {
+                ClientMessage::CreateRoom { listed: true, .. } => {
+                    return Err(NO_PUBLIC_LOBBY.into());
+                }
                 ClientMessage::CreateRoom { player_key, .. } => player_key.clone(),
                 _ => String::new(),
             };
@@ -1475,6 +1481,10 @@ async fn after_queue_add(state: &AppState, room: &Arc<RoomRecord>, client_id: &s
         else {
             return;
         };
+        // Built-in media is available at once and is never uploaded.
+        if item.available {
+            return;
+        }
         item.extension.clone()
     };
     if media_path(&state.data_dir, sha256, &extension).is_file() {
@@ -1503,6 +1513,10 @@ async fn dispatch(
     // what they have, so events must leave in revision order: sending after
     // the lock was released let two players' moves overtake each other, and a
     // client then dropped the older one.
+    // Public rooms need a lobby, which only the hosted service runs.
+    if matches!(message, ClientMessage::SetListed { listed: true }) {
+        return Err(NO_PUBLIC_LOBBY.into());
+    }
     let mut runtime = room.runtime.lock().await;
     let outcome = runtime.apply(client_id, message, now_ms())?;
     let _ = room.events.send(outcome.event);
@@ -1897,6 +1911,7 @@ mod tests {
             duration_ms: 0,
             player_key: String::new(),
             cut_style: Default::default(),
+            listed: false,
         };
         let wire_message = serde_json::to_string(&request).unwrap();
         let decoded_message: ClientMessage = serde_json::from_str(&wire_message).unwrap();
@@ -1934,6 +1949,7 @@ mod tests {
                 duration_ms: 0,
                 player_key: String::new(),
                 cut_style,
+                listed: false,
             };
         let (_, invite_code, _, _, _) = connect_room(
             &state,
@@ -4703,6 +4719,7 @@ mod hardening_tests {
             duration_ms: 0,
             player_key: String::new(),
             cut_style: Default::default(),
+            listed: false,
         };
         let (_, first_code, _, _, _) = connect_room(&state, "host-1", create("First"))
             .await
@@ -4715,6 +4732,45 @@ mod hardening_tests {
         let rooms = state.rooms.read().await;
         assert_eq!(rooms.len(), 1);
         assert!(rooms.contains_key(&first_code), "the first room survives");
+    }
+
+    #[tokio::test]
+    async fn this_server_refuses_public_rooms_and_needs_no_builtin_upload() {
+        let state = AppState::from_config(&test_config());
+        let (builtin, _) = pieceoff_core::BUILTIN_MEDIA_SHA256[0];
+        let create = |listed: bool| ClientMessage::CreateRoom {
+            name: "Host".into(),
+            title: "Loop".into(),
+            media_sha256: builtin.into(),
+            media_extension: "webp".into(),
+            width: 480,
+            height: 320,
+            rows: 2,
+            columns: 2,
+            initial_snapshot: None,
+            duration_ms: 0,
+            player_key: String::new(),
+            cut_style: Default::default(),
+            listed,
+        };
+        let error = connect_room(&state, "host", create(true))
+            .await
+            .err()
+            .expect("a listed room is refused");
+        assert_eq!(error, NO_PUBLIC_LOBBY);
+        let (room, _, _, _, _) = connect_room(&state, "host", create(false)).await.unwrap();
+        let error = dispatch(&room, "host", ClientMessage::SetListed { listed: true })
+            .await
+            .unwrap_err();
+        assert_eq!(error, NO_PUBLIC_LOBBY);
+        // Unlisting is a harmless no-op.
+        dispatch(&room, "host", ClientMessage::SetListed { listed: false })
+            .await
+            .unwrap();
+        let runtime = room.runtime.lock().await;
+        let snapshot = runtime.snapshot.as_ref().unwrap();
+        assert!(!snapshot.listed);
+        assert!(snapshot.media_available, "built-in media is never uploaded");
     }
 
     #[tokio::test]
@@ -4843,6 +4899,7 @@ mod hardening_tests {
                 duration_ms: 0,
                 player_key: String::new(),
                 cut_style: Default::default(),
+                listed: false,
             },
         )
         .await
@@ -4895,6 +4952,7 @@ mod hardening_tests {
                 duration_ms: 0,
                 player_key: String::new(),
                 cut_style: Default::default(),
+                listed: false,
             },
         )
         .await
@@ -4982,6 +5040,7 @@ mod hardening_tests {
                 duration_ms: 0,
                 player_key: String::new(),
                 cut_style: Default::default(),
+                listed: false,
             },
         )
         .await
@@ -5128,6 +5187,7 @@ mod hardening_tests {
                 duration_ms: 0,
                 player_key: "host-key".into(),
                 cut_style: Default::default(),
+                listed: false,
             },
         )
         .await
@@ -5195,6 +5255,7 @@ mod hardening_tests {
                 duration_ms: 0,
                 player_key: "host-key".into(),
                 cut_style: Default::default(),
+                listed: false,
             },
         )
         .await
@@ -5341,6 +5402,7 @@ mod hardening_tests {
             duration_ms: 0,
             player_key: String::new(),
             cut_style: Default::default(),
+            listed: false,
         }
     }
 

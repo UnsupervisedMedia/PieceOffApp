@@ -81,6 +81,19 @@ fn reply(reply: Reply) -> String {
     serde_json::to_string(&reply).unwrap_or_else(|_| r#"{"err":"encode failed"}"#.into())
 }
 
+/// The protocol version this core speaks.
+#[wasm_bindgen]
+pub fn protocol_version() -> u16 {
+    pieceoff_core::PROTOCOL_VERSION
+}
+
+/// The bundled title of a built-in loop, or `undefined` for any other
+/// fingerprint. Public listings show this, never a client-supplied title.
+#[wasm_bindgen]
+pub fn builtin_media_title(sha256: &str) -> Option<String> {
+    pieceoff_core::builtin_media_title(sha256).map(str::to_owned)
+}
+
 /// One room's rules, driven by JSON strings so a JavaScript Durable Object
 /// can host it. Methods never throw except `from_snapshot` on unreadable JSON.
 #[wasm_bindgen]
@@ -443,6 +456,28 @@ mod tests {
         )
         .unwrap();
         Room::from_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn builtin_titles_and_protocol_are_exported() {
+        let (sha256, title) = pieceoff_core::BUILTIN_MEDIA_SHA256[0];
+        assert_eq!(builtin_media_title(sha256).as_deref(), Some(title));
+        assert_eq!(builtin_media_title("nope"), None);
+        assert_eq!(protocol_version(), pieceoff_core::PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn a_listed_create_with_uploaded_media_is_refused() {
+        let mut room = Room::new();
+        let create = create_json().replace(
+            r#""duration_ms":5000"#,
+            r#""duration_ms":5000,"listed":true"#,
+        );
+        let reply = room.create("host", &create, "room-id", "ABCDEFGH");
+        assert!(
+            reply.contains(pieceoff_core::PUBLIC_ROOMS_BUILTIN_ONLY),
+            "{reply}"
+        );
     }
 
     #[test]

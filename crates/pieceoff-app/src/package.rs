@@ -256,6 +256,11 @@ pub(crate) fn download_room_media_with(
     if path.is_file() && sha256_file(&path).as_deref() == Ok(sha256) {
         return Ok(path);
     }
+    // Built-in loops ship with the app and are never uploaded to a room.
+    if let Some(bytes) = crate::library_ui::builtin_media_bytes(sha256) {
+        std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        return Ok(path);
+    }
     if invite_code.is_empty() || !invite_code.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err("Room sent an invalid invite code".into());
     }

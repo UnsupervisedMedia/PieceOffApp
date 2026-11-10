@@ -161,8 +161,10 @@ public (everyone sees the host's id), so it proves nothing; to come back as the
 same player, including the creator claiming the host role, put the
 `resume_token` in the `join_room` frame. Every `welcome` carries the joiner's
 own token; the server stores only its hash, and keeps the newest 64 for players
-who have left. Protocol v14 spectators, name claims, room cursors, chat, board
-pings, and timelapse requests use the shared Rust room rules. Name claims and
+who have left. Protocol v15 spectators, name claims, room cursors, chat, board
+pings, timelapse requests, and the public-listing rule (`listed` rooms use
+built-in media only; built-in items never upload to R2) use the shared Rust
+room rules. The public lobby itself is not built yet. Name claims and
 timelapse are saved with the room; chat and cursors are ephemeral. Clients
 send the text `ping` about every 20 seconds and get
 `pong`.

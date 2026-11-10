@@ -5,9 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 mod apply;
+mod listing;
 mod membership;
 mod relay;
 pub use apply::ApplyOutcome;
+pub use listing::{
+    BUILTIN_MEDIA_SHA256, PUBLIC_ROOMS_BUILTIN_ONLY, builtin_media_title, is_builtin_media,
+};
 pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
@@ -31,7 +35,7 @@ pub use timelapse::{
     MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
 };
 
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -187,6 +191,10 @@ pub struct RoomSnapshot {
     /// classic jigsaw grid with their contours unchanged.
     #[serde(default)]
     pub cut_style: CutStyle,
+    /// Listed in the public lobby (protocol v15). Only rooms whose every
+    /// queue item is built-in may be listed; older snapshots load unlisted.
+    #[serde(default)]
+    pub listed: bool,
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -502,7 +510,10 @@ impl RoomSnapshot {
         // a player is present.
         self.stats.running_since_ms = None;
         self.protocol_version = PROTOCOL_VERSION;
-        self.sync_current_mirror();
+        self.mark_builtins_available();
+        if self.listed && !self.only_builtin_media() {
+            self.listed = false;
+        }
     }
 
     // Keep room construction explicit at the protocol boundary; these fields
@@ -557,7 +568,7 @@ impl RoomSnapshot {
             loop_end_ms: 0,
         }];
         let shape_seed = fnv1a(&media_sha256);
-        Ok(Self {
+        let mut snapshot = Self {
             protocol_version: PROTOCOL_VERSION,
             id,
             invite_code,
@@ -581,7 +592,10 @@ impl RoomSnapshot {
             stats: SolveStats::default(),
             holders: Vec::new(),
             cut_style: CutStyle::Jigsaw,
-        })
+            listed: false,
+        };
+        snapshot.mark_builtins_available();
+        Ok(snapshot)
     }
 
     /// Rehost a portable local puzzle snapshot in a new room. Network identity,
@@ -663,7 +677,9 @@ impl RoomSnapshot {
         for item in &mut self.queue {
             item.available = false;
         }
-        self.sync_current_mirror();
+        // Listing is chosen by the new room's `create_room`, not the file.
+        self.listed = false;
+        self.mark_builtins_available();
         self.revision = 1;
         self.playback.playing = false;
         self.playback.rate = self.playback.rate.clamp(0.25, 2.0);
@@ -966,6 +982,10 @@ pub enum ClientMessage {
         /// and get the classic jigsaw grid.
         #[serde(default)]
         cut_style: CutStyle,
+        /// List the room in the public lobby (protocol v15). Refused unless
+        /// every queue item is built-in; servers without a lobby refuse it.
+        #[serde(default)]
+        listed: bool,
     },
     JoinRoom {
         invite_code: String,
@@ -1049,6 +1069,11 @@ pub enum ClientMessage {
     },
     SetVideoLock {
         locked: bool,
+    },
+    /// Host-only: list the room in the public lobby or take it off
+    /// (protocol v15). Listing needs every queue item to be built-in.
+    SetListed {
+        listed: bool,
     },
     /// Where this player's pointer is on the table, in board coordinates
     /// (source-image pixels from the board's top-left). Relayed to the other
@@ -1803,7 +1828,11 @@ impl RoomRuntime {
         {
             return Err("That video is already in the queue".into());
         }
-        item.available = false;
+        if snapshot.listed && !is_builtin_media(&item.sha256) {
+            return Err(PUBLIC_ROOMS_BUILTIN_ONLY.into());
+        }
+        // Every client has the built-in loops, so they never wait on an upload.
+        item.available = is_builtin_media(&item.sha256);
         item.position_ms = 0;
         item.loop_start_ms = 0;
         item.loop_end_ms = 0;

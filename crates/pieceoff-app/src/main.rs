@@ -896,6 +896,8 @@ impl PieceOffApp {
                 .pending_snapshot
                 .as_ref()
                 .map_or(self.cut_style, |snapshot| snapshot.cut_style),
+            // Public lobby listing (protocol v15) has no UI yet.
+            listed: false,
         }
     }
 

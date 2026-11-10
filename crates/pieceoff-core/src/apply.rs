@@ -201,6 +201,10 @@ impl RoomRuntime {
                 let snapshot = self.set_video_lock(client_id, locked)?;
                 (ServerMessage::Snapshot { snapshot }, true)
             }
+            ClientMessage::SetListed { listed } => {
+                let snapshot = self.set_listed(client_id, listed)?;
+                (ServerMessage::Snapshot { snapshot }, true)
+            }
             ClientMessage::CreateHolder {
                 x,
                 y,

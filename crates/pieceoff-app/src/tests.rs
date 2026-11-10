@@ -4739,3 +4739,18 @@ fn replay_views_work_out_placement_and_joins_from_positions() {
     assert!(at(1, 2).placed);
     assert_eq!(snapshot.settled_pieces(), 3);
 }
+
+#[test]
+fn built_in_room_media_comes_from_the_app_not_the_server() {
+    use sha2::Digest;
+    for (sha256, title) in pieceoff_core::BUILTIN_MEDIA_SHA256 {
+        let bytes = crate::library_ui::builtin_media_bytes(sha256)
+            .unwrap_or_else(|| panic!("{title} is not bundled"));
+        assert_eq!(&hex(sha2::Sha256::digest(bytes)), sha256, "{title}");
+    }
+    assert!(crate::library_ui::builtin_media_bytes(&"0".repeat(64)).is_none());
+    // No server listens here: the bytes must come from the bundle.
+    let (sha256, _) = pieceoff_core::BUILTIN_MEDIA_SHA256[0];
+    let path = download_room_media("ws://127.0.0.1:9/ws", "ABCDEFGH", sha256, "webp").unwrap();
+    assert_eq!(sha256_file(&path).unwrap(), sha256);
+}
