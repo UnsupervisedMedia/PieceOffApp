@@ -6,7 +6,7 @@ use eframe::egui::RichText;
 const CARD_WIDTH: f32 = 224.0;
 const THUMB_HEIGHT: f32 = 126.0;
 
-const BUILT_INS: [(&str, &str, &str, &[u8]); 8] = [
+pub(crate) const BUILT_INS: [(&str, &str, &str, &[u8]); 8] = [
     (
         "Slow Orbit",
         "Psychedelic · soft colour fields drift in a seamless loop",
@@ -90,24 +90,36 @@ enum CardAction {
 }
 
 impl PieceOffApp {
-    fn open_builtin(&mut self, title: &str, filename: &str, bytes: &[u8], ctx: &egui::Context) {
+    /// The bundled loop written out under the library, refreshed if stale.
+    pub(crate) fn builtin_media_file(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, String> {
+        let path = self.library.dir.join("built-in-media").join(filename);
+        std::fs::create_dir_all(path.parent().ok_or("Invalid built-in media path")?)
+            .map_err(|error| error.to_string())?;
+        let needs_update = std::fs::read(&path)
+            .map(|existing| existing.as_slice() != bytes)
+            .unwrap_or(true);
+        if needs_update {
+            std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn open_builtin(
+        &mut self,
+        title: &str,
+        filename: &str,
+        bytes: &[u8],
+        ctx: &egui::Context,
+    ) {
         if self.network.is_some() || self.probe_rx.is_some() {
             return;
         }
-        let path = self.library.dir.join("built-in-media").join(filename);
-        let result = (|| {
-            std::fs::create_dir_all(path.parent().ok_or("Invalid built-in media path")?)
-                .map_err(|error| error.to_string())?;
-            let needs_update = std::fs::read(&path)
-                .map(|existing| existing.as_slice() != bytes)
-                .unwrap_or(true);
-            if needs_update {
-                std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
-            }
-            Ok::<_, String>(())
-        })();
-        match result {
-            Ok(()) => {
+        match self.builtin_media_file(filename, bytes) {
+            Ok(path) => {
                 self.begin_probe(path, true, ctx);
                 self.title = title.to_owned();
             }

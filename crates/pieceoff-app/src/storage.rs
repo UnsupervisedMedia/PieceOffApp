@@ -10,6 +10,10 @@ pub(crate) struct RecentRoom {
     pub(crate) server_url: String,
     pub(crate) invite_code: String,
     pub(crate) player_name: String,
+    /// A hosted room's secret for this player, so rejoining keeps the same
+    /// identity (and the host role). Empty for other servers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) resume_token: String,
     pub(crate) last_joined_ms: u64,
 }
 
@@ -76,6 +80,11 @@ pub(crate) struct Settings {
     /// Private random key (32 hex digits) sent when entering a room, so the
     /// room keeps this device's player name for it. Made once on first run.
     pub(crate) player_key: String,
+    /// The last "Local or LAN" server, kept while PieceOff Online is chosen.
+    pub(crate) lan_server_url: Option<String>,
+    /// This computer's PieceOff Online key for creating rooms; empty until
+    /// the device is linked. Never logged.
+    pub(crate) device_key: crate::online::DeviceKey,
 }
 
 /// Whether `key` looks like a key `new_player_key` made.
@@ -143,6 +152,7 @@ pub(crate) fn load_recent_rooms(path: &Path) -> Result<Vec<RecentRoom>, String> 
                 .all(|byte| byte.is_ascii_alphanumeric())
             && room.player_name.chars().count() <= 32
             && !room.player_name.chars().any(char::is_control)
+            && room.resume_token.len() <= 256
     });
     rooms.sort_by_key(|room| std::cmp::Reverse(room.last_joined_ms));
     rooms.truncate(MAX_RECENT_ROOMS);

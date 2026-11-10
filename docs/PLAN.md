@@ -38,6 +38,16 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   cleanup, and Turnstile, rate limits, origin checks and socket caps. The
   worker has unit and integration tests against a local `wrangler dev`
   (`scripts/worker-test.sh`). Setup and endpoints: [DEPLOYMENT.md](DEPLOYMENT.md).
+- **Done (desktop client, 2026-11-10): online play.** Section 3 of the
+  online-play design: Online as the default server with Local or LAN beside
+  it, `/api/info` detection, device linking through `pieceoff.app/link` with a
+  stored per-device key, HTTP room creation then join with the resume token,
+  hosted multipart media behind a `MediaTransport` trait, invite links, the
+  Online rooms lobby with Quick match, and public listing for built-in rooms.
+  Uploads to the hosted service stay off at launch (`uploads` in
+  `/api/info`), so online rooms use built-in puzzles. Waiting on the Worker
+  side (registry, device keys, lobby) and moderation before the lobby is
+  turned on publicly.
 - **On hold: go-live.** Needs the owner: create the R2 bucket `pieceoff-media`,
   the Turnstile widget and secret, and wire the rooms Worker into the connected
   GitHub to Cloudflare Workers Builds path (no direct `wrangler deploy`).

@@ -93,6 +93,7 @@ fn recent_rooms_persist_deduplicate_limit_and_forget_entries() {
             server_url: " ws://LOCALHOST:8787/ws/ ".into(),
             invite_code: "abc123".into(),
             player_name: " Player ".into(),
+            resume_token: String::new(),
             last_joined_ms: 1,
         },
     )
@@ -118,6 +119,7 @@ fn recent_rooms_persist_deduplicate_limit_and_forget_entries() {
                 server_url: "ws://localhost:8787/ws".into(),
                 invite_code: format!("ROOM{index}"),
                 player_name: "Player".into(),
+                resume_token: String::new(),
                 last_joined_ms: index as u64 + 2,
             },
         )
@@ -4022,7 +4024,7 @@ fn an_invalid_server_field_is_reported_and_not_saved() {
 }
 
 #[test]
-fn reset_returns_to_the_local_server_and_forgets_the_saved_one() {
+fn reset_returns_to_the_local_server_and_saves_it() {
     let mut app = PieceOffApp {
         server_url: "game.example".into(),
         ..PieceOffApp::default()
@@ -4030,7 +4032,12 @@ fn reset_returns_to_the_local_server_and_forgets_the_saved_one() {
     app.commit_server_url();
     app.reset_server_url();
     assert_eq!(app.server_url, "ws://127.0.0.1:28878/ws");
-    assert_eq!(app.settings.server_url, None);
+    // PieceOff Online is the built-in default, so the local one is saved.
+    assert_eq!(
+        app.settings.server_url.as_deref(),
+        Some("ws://127.0.0.1:28878/ws")
+    );
+    assert_eq!(app.settings.lan_server_url, None);
 }
 
 #[test]
@@ -4042,6 +4049,7 @@ fn rejoining_a_recent_room_does_not_replace_the_saved_default() {
             invite_code: "ABCD".into(),
             player_name: "P".into(),
             title: "Room".into(),
+            resume_token: String::new(),
             last_joined_ms: 0,
         }],
         ..PieceOffApp::default()
@@ -4753,4 +4761,353 @@ fn built_in_room_media_comes_from_the_app_not_the_server() {
     let (sha256, _) = pieceoff_core::BUILTIN_MEDIA_SHA256[0];
     let path = download_room_media("ws://127.0.0.1:9/ws", "ABCDEFGH", sha256, "webp").unwrap();
     assert_eq!(sha256_file(&path).unwrap(), sha256);
+}
+
+/// One HTTP request as a stub server saw it.
+struct StubRequest {
+    line: String,
+    headers: Vec<String>,
+    body: Vec<u8>,
+}
+
+impl StubRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        let prefix = format!("{name}:");
+        self.headers
+            .iter()
+            .find_map(|h| h.strip_prefix(&prefix).map(str::trim))
+    }
+}
+
+/// A raw-socket HTTP stub: answers `count` requests in order with `answer`,
+/// returning everything it saw. Headers are lower-cased.
+fn http_stub(
+    count: usize,
+    mut answer: impl FnMut(&StubRequest) -> (u16, String, Vec<u8>) + Send + 'static,
+) -> (String, thread::JoinHandle<Vec<StubRequest>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut headers = Vec::new();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim().is_empty() {
+                    break;
+                }
+                headers.push(header.trim().to_ascii_lowercase());
+            }
+            let length = headers
+                .iter()
+                .find_map(|h| h.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let request = StubRequest {
+                line: line.trim().to_owned(),
+                headers,
+                body,
+            };
+            let (status, extra_headers, response) = answer(&request);
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
+                response.len()
+            )
+            .unwrap();
+            reader.get_mut().write_all(&response).unwrap();
+            seen.push(request);
+        }
+        seen
+    });
+    (format!("ws://{address}/ws"), handle)
+}
+
+const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":15,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
+const TEST_DEVICE_KEY: &str = "pok_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+
+#[test]
+fn hosted_detection_reads_api_info_and_axum_answers_404() {
+    let body = HOSTED_INFO.replace("15", &pieceoff_core::PROTOCOL_VERSION.to_string());
+    let (url, server) = http_stub(1, move |request| {
+        assert_eq!(request.line, "GET /api/info HTTP/1.1");
+        (200, String::new(), body.clone().into_bytes())
+    });
+    let kind = online::detect_service(&url).unwrap();
+    assert!(kind.hosted().is_some_and(|info| info.has_feature("lobby")));
+    server.join().unwrap();
+
+    let (url, server) = http_stub(1, |_| (404, String::new(), b"Not Found".to_vec()));
+    assert_eq!(
+        online::detect_service(&url).unwrap(),
+        online::ServiceKind::SelfHosted
+    );
+    server.join().unwrap();
+
+    // Nothing listening: unreachable, not self-hosted.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    assert_eq!(
+        online::detect_service(&format!("ws://{address}/ws")).unwrap_err(),
+        online::OFFLINE_MESSAGE
+    );
+}
+
+#[test]
+fn hosted_multipart_upload_resumes_missing_parts_and_download_uses_the_resume_token() {
+    let _serial = crate::package::transfer_test_lock();
+    const MIB: usize = 1024 * 1024;
+    let content: Vec<u8> = (0..8 * MIB + 1000).map(|n| (n % 253) as u8).collect();
+    let hash = hex(Sha256::digest(&content));
+    let source = std::env::temp_dir().join(format!("pieceoff-hosted-upload-{hash}.png"));
+    std::fs::write(&source, &content).unwrap();
+    let cached = std::env::temp_dir()
+        .join("pieceoff-media-cache")
+        .join(format!("{hash}.png"));
+    let _ = std::fs::remove_file(&cached);
+    let upload_id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let served = content.clone();
+    let expected_hash = hash.clone();
+    let (url, server) = http_stub(4, move |request| {
+        match request.line.split(' ').nth(1).unwrap() {
+            "/api/rooms/ABCD2345/media" => {
+                assert!(request.line.starts_with("POST "));
+                assert_eq!(request.header("authorization"), Some("bearer upload-token"));
+                let start: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(start["sha256"], expected_hash.as_str());
+                assert_eq!(start["size"], served.len() as u64);
+                assert_eq!(start["part_size"], 8 * MIB as u64);
+                // Part 1 arrived before an earlier attempt was cut off.
+                let reply = format!(
+                    r#"{{"complete":false,"upload_id":"{upload_id}","part_count":2,"part_size":{},"missing":[2]}}"#,
+                    8 * MIB
+                );
+                (200, String::new(), reply.into_bytes())
+            }
+            path if path == format!("/api/rooms/ABCD2345/media/{upload_id}/parts/2") => {
+                assert!(request.line.starts_with("PUT "));
+                assert_eq!(request.body, &served[8 * MIB..]);
+                assert_eq!(
+                    request.header("x-part-sha256"),
+                    Some(hex(Sha256::digest(&served[8 * MIB..])).as_str())
+                );
+                (200, String::new(), br#"{"missing":[]}"#.to_vec())
+            }
+            path if path == format!("/api/rooms/ABCD2345/media/{upload_id}/complete") => {
+                (200, String::new(), br#"{"ok":true}"#.to_vec())
+            }
+            path => {
+                assert_eq!(path, format!("/api/rooms/ABCD2345/media/{expected_hash}"));
+                assert_eq!(
+                    request.header("authorization"),
+                    Some("bearer resume-secret")
+                );
+                (200, String::new(), served.clone())
+            }
+        }
+    });
+    let session = online::HostedSession::new(
+        "ABCD2345".into(),
+        Some("resume-secret".into()),
+        online::ServiceInfo::default(),
+    );
+    let transport = media_transport(&url, "ABCD2345", Some(&session)).unwrap();
+    transport.upload(&hash, "upload-token", &source).unwrap();
+    let downloaded = transport.download(&hash, "png").unwrap();
+    assert_eq!(std::fs::read(&downloaded).unwrap(), content);
+    server.join().unwrap();
+    std::fs::remove_file(source).unwrap();
+    let _ = std::fs::remove_file(cached);
+}
+
+#[test]
+fn hosted_storage_full_is_reported_in_plain_words() {
+    let _serial = crate::package::transfer_test_lock();
+    let content = b"room media that does not fit".to_vec();
+    let hash = hex(Sha256::digest(&content));
+    let source = std::env::temp_dir().join(format!("pieceoff-hosted-full-{hash}.png"));
+    std::fs::write(&source, &content).unwrap();
+    let (url, server) = http_stub(1, |_| {
+        (
+            507,
+            String::new(),
+            br#"{"error":"PieceOff Online is out of media space right now. Try a smaller file or try later."}"#.to_vec(),
+        )
+    });
+    let session =
+        online::HostedSession::new("ABCD2345".into(), None, online::ServiceInfo::default());
+    let error = session
+        .media(&url)
+        .unwrap()
+        .upload_file(&hash, "t", &source)
+        .unwrap_err();
+    assert_eq!(error, online::STORAGE_FULL_MESSAGE);
+    server.join().unwrap();
+    std::fs::remove_file(source).unwrap();
+}
+
+fn pump_online(app: &mut PieceOffApp, ctx: &egui::Context, done: impl Fn(&PieceOffApp) -> bool) {
+    let started = Instant::now();
+    while !done(app) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "status: {}",
+            app.status
+        );
+        app.poll_online(ctx);
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_refused_device_key_is_cleared_and_relinking_resumes_the_create() {
+    let (url, server) = http_stub(4, |request| {
+        match request.line.as_str() {
+        "POST /api/rooms HTTP/1.1" if request.header("authorization") != Some(&format!("bearer {}", TEST_DEVICE_KEY.to_ascii_lowercase())) => {
+            // The new key: the room is created.
+            let message: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(message["type"], "create_room");
+            (
+                200,
+                String::new(),
+                br#"{"code":"WXYZ6789","client_id":"host","resume_token":"creator-secret"}"#.to_vec(),
+            )
+        }
+        "POST /api/rooms HTTP/1.1" => (401, String::new(), br#"{"error":"Unknown device","relink":true}"#.to_vec()),
+        "POST /api/links HTTP/1.1" => (
+            200,
+            String::new(),
+            br#"{"link_code":"ABCD2345","poll_secret":"poll-secret","url":"https://pieceoff.app/link?c=ABCD2345","expires_in":600}"#.to_vec(),
+        ),
+        line => {
+            assert_eq!(line, "GET /api/links/ABCD2345 HTTP/1.1");
+            assert_eq!(request.header("authorization"), Some("bearer poll-secret"));
+            (
+                200,
+                String::new(),
+                br#"{"status":"approved","device_key":"pok_NEWKEYabcdefghijklmnopqrstuvwxyz0123456789"}"#.to_vec(),
+            )
+        }
+    }
+    });
+    let ctx = egui::Context::default();
+    let info: online::ServiceInfo = serde_json::from_str(
+        &HOSTED_INFO.replace("15", &pieceoff_core::PROTOCOL_VERSION.to_string()),
+    )
+    .unwrap();
+    let mut app = PieceOffApp {
+        server_url: url.clone(),
+        startup_media: None,
+        ..PieceOffApp::default()
+    };
+    app.settings.device_key = online::DeviceKey::parse(TEST_DEVICE_KEY).unwrap();
+    app.online
+        .remember_service(&url, online::ServiceKind::Hosted(info));
+    app.media_path = Some(PathBuf::from("Slow Orbit.webp"));
+    app.media_hash = pieceoff_core::BUILTIN_MEDIA_SHA256[0].0.into();
+    app.media_extension = "webp".into();
+    app.media_size = (64, 48);
+    let message = app.create_request();
+    app.begin_create(message);
+    pump_online(&mut app, &ctx, |app| {
+        app.online
+            .link
+            .as_ref()
+            .is_some_and(|link| link.reason.is_some())
+    });
+    assert!(
+        !app.settings.device_key.is_set(),
+        "the refused key is forgotten"
+    );
+    pump_online(&mut app, &ctx, |app| app.online.session.is_some());
+    assert!(app.online.link.is_none());
+    assert_eq!(
+        app.settings.device_key,
+        online::DeviceKey::parse("pok_NEWKEYabcdefghijklmnopqrstuvwxyz0123456789").unwrap()
+    );
+    let session = app.online.session.clone().unwrap();
+    assert_eq!(session.code, "WXYZ6789");
+    assert_eq!(session.token().as_deref(), Some("creator-secret"));
+    assert!(!app.status.contains("pok_"), "{}", app.status);
+    app.leave_room();
+    server.join().unwrap();
+}
+
+#[test]
+fn an_invite_link_in_the_join_box_selects_pieceoff_online() {
+    let mut app = PieceOffApp {
+        server_url: "ws://192.168.1.5:28878/ws".into(),
+        invite_code: "https://pieceoff.app/join?c=abcd2345".into(),
+        ..PieceOffApp::default()
+    };
+    app.absorb_invite_paste();
+    assert_eq!(app.invite_code, "ABCD2345");
+    assert_eq!(app.server_url, online::ONLINE_SERVER_URL);
+    assert_eq!(
+        app.settings.lan_server_url.as_deref(),
+        Some("ws://192.168.1.5:28878/ws"),
+        "Local or LAN remembers the address"
+    );
+    app.select_lan_server();
+    assert_eq!(app.server_url, "ws://192.168.1.5:28878/ws");
+}
+
+#[test]
+fn public_listing_needs_a_hosted_lobby_and_built_in_media() {
+    let mut app = PieceOffApp::default();
+    let url = app.resolved_server_url().unwrap();
+    app.media_path = Some(PathBuf::from("Slow Orbit.webp"));
+    app.media_hash = pieceoff_core::BUILTIN_MEDIA_SHA256[0].0.into();
+    app.online.list_publicly = true;
+    assert_eq!(
+        app.listing_block_reason(),
+        Some("Public rooms are only on PieceOff Online.")
+    );
+    assert!(!app.wants_listing());
+    let mut info = online::ServiceInfo {
+        service: "pieceoff-rooms".into(),
+        hosted: true,
+        protocol: u32::from(pieceoff_core::PROTOCOL_VERSION),
+        ..Default::default()
+    };
+    app.online
+        .remember_service(&url, online::ServiceKind::Hosted(info.clone()));
+    assert!(
+        app.listing_block_reason()
+            .unwrap()
+            .contains("no public lobby")
+    );
+    info.features.push("lobby".into());
+    app.online
+        .remember_service(&url, online::ServiceKind::Hosted(info));
+    assert_eq!(app.listing_block_reason(), None);
+    assert!(app.wants_listing());
+    assert!(matches!(
+        app.create_request(),
+        ClientMessage::CreateRoom { listed: true, .. }
+    ));
+    // Uploads are off unless the service says so: only built-ins.
+    assert!(app.custom_media_blocked());
+    assert!(app.chosen_media_builtin());
+    app.media_hash = "b".repeat(64);
+    assert!(
+        app.listing_block_reason()
+            .unwrap()
+            .contains("built-in puzzles only")
+    );
+    assert!(matches!(
+        app.create_request(),
+        ClientMessage::CreateRoom { listed: false, .. }
+    ));
+    app.begin_create(app.create_request());
+    assert_eq!(app.status, online::BUILTIN_ONLY_MESSAGE);
+    assert!(app.network.is_none());
 }

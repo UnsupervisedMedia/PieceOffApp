@@ -64,6 +64,8 @@ mod library;
 mod library_ui;
 mod media_tools;
 mod net;
+mod online;
+mod online_ui;
 mod package;
 mod playback;
 mod probe;
@@ -85,6 +87,7 @@ use holders::*;
 use i18n::Language;
 use library::{Library, LibrarySort};
 use net::*;
+use online_ui::OnlineState;
 use package::*;
 use playback::*;
 use probe::*;
@@ -296,6 +299,8 @@ struct PieceOffApp {
     tools_rx: Option<mpsc::Receiver<Vec<media_tools::ToolReport>>>,
     /// The offer to download the video codecs, and the download itself.
     codec: codec_ui::CodecState,
+    /// PieceOff Online: service checks, device link, lobby, hosted session.
+    online: OnlineState,
 }
 
 impl Default for PieceOffApp {
@@ -310,6 +315,7 @@ impl Default for PieceOffApp {
             load_settings(&settings_path())
         };
         settings.mouse = settings.mouse.clone().sanitized();
+        settings.device_key = std::mem::take(&mut settings.device_key).sanitized();
         if !valid_player_key(&settings.player_key) {
             settings.player_key = new_player_key();
             if !cfg!(test) && !settings.player_key.is_empty() {
@@ -334,9 +340,16 @@ impl Default for PieceOffApp {
         let (library, library_notice) = Library::load(library_dir);
         let controls = Controls::from_settings(&settings.keybindings);
         let effects = SoundEffects::new(settings.effects_volume, settings.effects_muted);
+        // Tests must never reach the real service by default.
+        let default_server = if cfg!(test) {
+            server_addr::LOCAL_SERVER_URL
+        } else {
+            online::ONLINE_SERVER_URL
+        };
         let (server_url, server_url_source) = server_addr::initial_server_url(
             settings.server_url.as_deref(),
             std::env::var("PIECEOFF_SERVER_URL").ok().as_deref(),
+            default_server,
         );
         Self {
             server_url,
@@ -469,6 +482,7 @@ impl Default for PieceOffApp {
             tools: Vec::new(),
             tools_rx: None,
             codec: Default::default(),
+            online: OnlineState::default(),
         }
     }
 }
@@ -484,6 +498,12 @@ impl PieceOffApp {
         self.player_name.clone_from(&recent.player_name);
         self.title.clone_from(&recent.title);
         self.recent_room_selection = Some(index);
+        self.online.recent_resume = (!recent.resume_token.is_empty()).then(|| {
+            (
+                recent.invite_code.to_ascii_uppercase(),
+                recent.resume_token.clone(),
+            )
+        });
         self.status = format!("Ready to rejoin {} ({}).", recent.title, recent.invite_code);
     }
 
@@ -513,6 +533,9 @@ impl PieceOffApp {
         match self.resolved_server_url() {
             Ok(url) => {
                 self.server_url.clone_from(&url);
+                if url != online::ONLINE_SERVER_URL {
+                    self.settings.lan_server_url = Some(url.clone());
+                }
                 if self.settings.server_url.as_deref() != Some(url.as_str()) {
                     self.settings.server_url = Some(url);
                     self.persist_settings();
@@ -529,14 +552,14 @@ impl PieceOffApp {
         }
     }
 
-    /// Forget the saved server and go back to the local one.
+    /// "Local or LAN" back to the server on this device.
     fn reset_server_url(&mut self) {
-        self.server_url = server_addr::DEFAULT_SERVER_URL.into();
-        self.server_url_source = "built-in default";
+        self.server_url = server_addr::LOCAL_SERVER_URL.into();
+        self.server_url_source = "saved setting";
         self.server_edit_dirty = false;
-        if self.settings.server_url.take().is_some() {
-            self.persist_settings();
-        }
+        self.settings.lan_server_url = None;
+        self.settings.server_url = Some(server_addr::LOCAL_SERVER_URL.into());
+        self.persist_settings();
     }
 
     fn persist_settings(&self) {
@@ -625,6 +648,9 @@ impl PieceOffApp {
                 }
                 if let Err(error) = self.apply_media(result.path, metadata, ctx) {
                     self.status = error;
+                    self.online.quick_match_create = false;
+                } else {
+                    self.finish_quick_match();
                 }
             }
             Ok(ProbeOutcome::ChooseSetup {
@@ -859,9 +885,7 @@ impl PieceOffApp {
         self.reconnect_at = None;
         self.reconnect_attempt = 0;
         let message = self.create_request();
-        self.media_ready = false;
-        self.media_uploading = true;
-        self.connect(message);
+        self.begin_create(message);
     }
 
     /// The request that creates a room from the media, grid and cut style
@@ -896,8 +920,8 @@ impl PieceOffApp {
                 .pending_snapshot
                 .as_ref()
                 .map_or(self.cut_style, |snapshot| snapshot.cut_style),
-            // Public lobby listing (protocol v15) has no UI yet.
-            listed: false,
+            // Only hosted servers list rooms, and only built-in ones.
+            listed: self.wants_listing(),
         }
     }
 
@@ -1011,9 +1035,25 @@ impl PieceOffApp {
             self.status = "Already connected to a room.".into();
             return;
         }
+        if self.online_busy() {
+            return;
+        }
         if self.invite_code.trim().is_empty() {
             self.status = "Enter a room code.".into();
             return;
+        }
+        // A code, or an invite link (which also picks PieceOff Online).
+        match online::parse_invite(&self.invite_code) {
+            Some(invite) => {
+                if invite.online {
+                    self.select_online_server();
+                }
+                self.invite_code = invite.code;
+            }
+            None => {
+                self.status = "That is not a room code or invite link.".into();
+                return;
+            }
         }
         let message = ClientMessage::JoinRoom {
             invite_code: self.invite_code.clone(),
@@ -1023,7 +1063,7 @@ impl PieceOffApp {
             spectator: self.watch_only,
             player_key: self.settings.player_key.clone(),
         };
-        self.connect(message);
+        self.begin_join(message);
     }
 
     fn require_media(&mut self) -> bool {
@@ -1034,7 +1074,7 @@ impl PieceOffApp {
             self.status = "Already connected to a room.".into();
             false
         } else {
-            true
+            !self.online_busy()
         }
     }
 
@@ -1210,6 +1250,7 @@ impl PieceOffApp {
             self.save_to_library();
         }
         self.network = None;
+        self.online.session = None;
         self.snapshot = None;
         self.peers.clear();
         self.spectators.clear();

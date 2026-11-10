@@ -210,7 +210,9 @@ impl PieceOffApp {
                         }
                     });
                 ui.add_space(6.0);
-                if ui
+                if self.custom_media_blocked() {
+                    self.add_builtin_menu(ui, can_edit);
+                } else if ui
                     .add_enabled(can_edit, egui::Button::new("Add video…"))
                     .clicked()
                 {
