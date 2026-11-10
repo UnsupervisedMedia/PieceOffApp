@@ -16,9 +16,9 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    ChatLine, ClientMessage, MediaItem, PROTOCOL_VERSION, REPLACED_BY_NEW_CONNECTION, RoomRuntime,
-    RoomSnapshot, SceneBounds, ServerMessage, StoredRoom, clean_chat_text, clean_media_extension,
-    clean_name, valid_media_dimensions, valid_sha256,
+    CHAT_OFF, ChatLine, ClientMessage, MediaItem, PROTOCOL_VERSION, REMOVED_BY_HOST,
+    REPLACED_BY_NEW_CONNECTION, RoomRuntime, RoomSnapshot, SceneBounds, ServerMessage, StoredRoom,
+    clean_chat_text, clean_media_extension, clean_name, valid_media_dimensions, valid_sha256,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1198,7 +1198,17 @@ async fn handle_socket(
         persist_room(&state, &room).await;
         return;
     }
-    if !chat_history.is_empty()
+    // Lines from before chat was switched off (say, while the room was
+    // still invite-only) are not shown to newcomers.
+    let chat_on = room
+        .runtime
+        .lock()
+        .await
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.chat_enabled);
+    if chat_on
+        && !chat_history.is_empty()
         && send(
             &mut socket,
             &ServerMessage::ChatHistory {
@@ -1234,7 +1244,21 @@ async fn handle_socket(
                 }
                 // Backstop for a replacement announced before this socket
                 // subscribed: a replaced connection is no longer seated.
-                if !spectator && !room.runtime.lock().await.names.contains_key(&client_id) {
+                let (seated, banned) = {
+                    let runtime = room.runtime.lock().await;
+                    let seated = if spectator {
+                        runtime.spectators.contains_key(&client_id)
+                    } else {
+                        runtime.names.contains_key(&client_id)
+                    };
+                    (seated, runtime.is_banned(&name, None))
+                };
+                if !seated && banned {
+                    let _ = send(&mut socket, &kicked(&client_id)).await;
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                if !seated && !spectator {
                     let _ = send(&mut socket, &ServerMessage::Error { message: REPLACED_BY_NEW_CONNECTION.into() }).await;
                     break;
                 }
@@ -1248,6 +1272,13 @@ async fn handle_socket(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             event = events.recv() => match event {
+                Ok(packet @ ServerMessage::Kicked { .. }) => {
+                    if packet.visible_to(&client_id) {
+                        let _ = send(&mut socket, &packet).await;
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
                 Ok(packet) => {
                     if packet.visible_to(&client_id)
                         && send(&mut socket, &packet).await.is_err()
@@ -1291,6 +1322,12 @@ async fn handle_socket(
                     if matches!(message, ClientMessage::RequestTimelapse) {
                         let reply = timelapse_reply(&room, &mut relay_budgets, Instant::now()).await;
                         if send(&mut socket, &reply).await.is_err() { break }
+                        continue;
+                    }
+                    if matches!(message, ClientMessage::Chat { .. })
+                        && !room.runtime.lock().await.snapshot.as_ref().is_some_and(|s| s.chat_enabled)
+                    {
+                        let _ = send(&mut socket, &ServerMessage::Error { message: CHAT_OFF.into() }).await;
                         continue;
                     }
                     match relay_ephemeral(&room, &client_id, &name, spectator, &table, &mut relay_budgets, &message, Instant::now()) {
@@ -1518,9 +1555,58 @@ async fn dispatch(
         return Err(NO_PUBLIC_LOBBY.into());
     }
     let mut runtime = room.runtime.lock().await;
+    if let ClientMessage::KickPlayer { name } = message {
+        kick_player(room, &mut runtime, client_id, &name)?;
+        return Ok(true);
+    }
     let outcome = runtime.apply(client_id, message, now_ms())?;
     let _ = room.events.send(outcome.event);
     Ok(outcome.persist)
+}
+
+/// The notice a removed connection gets before its socket closes.
+fn kicked(client_id: &str) -> ServerMessage {
+    ServerMessage::Kicked {
+        client_id: client_id.to_owned(),
+        message: REMOVED_BY_HOST.into(),
+    }
+}
+
+/// The host removes a player: each removed connection is told and closes
+/// itself (see `handle_socket`), everyone else sees them leave, and the room
+/// is saved with the ban. Called under the room lock, like `dispatch`.
+fn kick_player(
+    room: &RoomRecord,
+    runtime: &mut RoomRuntime,
+    client_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let outcome = runtime.kick_player(client_id, name, now_ms())?;
+    let clock_before = runtime.snapshot.as_ref().map(|s| s.stats.clone());
+    runtime.sync_clock_to_players(now_ms());
+    let mut snapshot = outcome.snapshot;
+    if let Some(current) = runtime.snapshot.as_mut()
+        && clock_before.as_ref() != Some(&current.stats)
+    {
+        if snapshot.is_none() {
+            current.revision += 1;
+        }
+        snapshot = Some(current.clone());
+    }
+    for (id, spectator) in &outcome.removed {
+        let _ = room.events.send(kicked(id));
+        let _ = room.events.send(ServerMessage::PeerLeft {
+            name: outcome.name.clone(),
+            spectator: *spectator,
+        });
+        let _ = room.cursors.send(ServerMessage::CursorHidden {
+            client_id: id.clone(),
+        });
+    }
+    if let Some(snapshot) = snapshot {
+        let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+    }
+    Ok(())
 }
 
 async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
@@ -1539,6 +1625,7 @@ async fn persist_room(state: &AppState, room: &Arc<RoomRecord>) {
             snapshot,
             name_claims: runtime.name_claims.clone(),
             timelapse: runtime.timelapse.clone(),
+            bans: runtime.bans.clone(),
         }
     };
     let dir = (*state.data_dir).clone();
@@ -1569,6 +1656,7 @@ fn persist_snapshot(data_dir: &Path, snapshot: &RoomSnapshot) -> std::io::Result
             snapshot: snapshot.clone(),
             name_claims: Vec::new(),
             timelapse: Default::default(),
+            bans: Vec::new(),
         },
     )
 }
@@ -1676,6 +1764,7 @@ async fn load_rooms(state: &AppState) {
             mut snapshot,
             name_claims,
             timelapse,
+            mut bans,
         } = stored;
         for piece in &mut snapshot.pieces {
             piece.held_by = None;
@@ -1687,6 +1776,8 @@ async fn load_rooms(state: &AppState) {
         runtime.timelapse = timelapse;
         runtime.name_claims = name_claims;
         runtime.name_claims.truncate(pieceoff_core::MAX_NAME_CLAIMS);
+        bans.drain(..bans.len().saturating_sub(pieceoff_core::MAX_ROOM_BANS));
+        runtime.bans = bans;
         rooms.insert(
             code,
             Arc::new(RoomRecord::with_runtime(runtime, last_activity)),
@@ -3404,6 +3495,133 @@ mod tests {
         laptop.send(join("Ada", "new-laptop")).await.unwrap();
         let welcome = read_logged(&mut laptop, "welcome", &mut log).await;
         assert_eq!(welcome["name"], "Ada");
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn the_host_removes_a_player_who_then_cannot_rejoin_and_can_switch_chat_off() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-kick-{}", Uuid::new_v4()));
+        let (address, state) = queue_test_server(&data_dir).await;
+        let (mut host, code, hash) = queue_test_room(address, b"kick clip").await;
+        let mut log = Vec::new();
+        let text = |value: serde_json::Value| Message::Text(value.to_string().into());
+        let join = |name: &str, key: &str| {
+            text(serde_json::json!({
+                "type":"join_room", "invite_code":code, "name":name,
+                "media_sha256":hash, "media_extension":"", "player_key":key
+            }))
+        };
+        let connect = || async { connect_async(format!("ws://{address}/ws")).await.unwrap().0 };
+        let mut troll = connect().await;
+        troll.send(join("Troll", "troll-device")).await.unwrap();
+        read_logged(&mut troll, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+        let mut bo = connect().await;
+        bo.send(join("Bo", "bo-device")).await.unwrap();
+        read_logged(&mut bo, "welcome", &mut log).await;
+        read_logged(&mut host, "peer_joined", &mut log).await;
+        troll
+            .send(text(serde_json::json!({"type":"drag_start","piece_id":0})))
+            .await
+            .unwrap();
+        read_logged(&mut host, "pieces_changed", &mut log).await;
+
+        let kick = text(serde_json::json!({"type":"kick_player","name":"troll"}));
+        bo.send(kick.clone()).await.unwrap();
+        let refused = read_logged(&mut bo, "error", &mut log).await;
+        assert_eq!(refused["message"], "Only the host can remove a player");
+        host.send(text(
+            serde_json::json!({"type":"kick_player","name":"Host"}),
+        ))
+        .await
+        .unwrap();
+        let refused = read_logged(&mut host, "error", &mut log).await;
+        assert_eq!(refused["message"], "You can't remove yourself");
+
+        host.send(kick).await.unwrap();
+        let notice = read_logged(&mut troll, "kicked", &mut log).await;
+        assert_eq!(notice["message"], REMOVED_BY_HOST);
+        let closed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match troll.next().await {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the removed player's socket closes");
+        let left = read_logged(&mut host, "peer_left", &mut log).await;
+        assert_eq!(left["name"], "Troll");
+        // Bo's refused kick was answered with a resync snapshot first.
+        loop {
+            let snapshot = read_logged(&mut host, "snapshot", &mut log).await;
+            let free = snapshot["snapshot"]["pieces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|piece| piece["held_by"].is_null());
+            if free {
+                break;
+            }
+        }
+        assert!(!log.iter().any(|line| line.contains("troll-device")));
+
+        // Not back under the name, nor under a new name with the same key.
+        for (name, key) in [("Troll", "other-device"), ("Fresh Face", "troll-device")] {
+            let mut again = connect().await;
+            again.send(join(name, key)).await.unwrap();
+            let refused = read_logged(&mut again, "error", &mut log).await;
+            assert_eq!(refused["message"], REMOVED_BY_HOST);
+        }
+        // The ban is saved with the room.
+        let room = state.rooms.read().await.get(&code).cloned().unwrap();
+        persist_room(&state, &room).await;
+        let saved: Vec<String> = fs::read_dir(&data_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .map(|entry| fs::read_to_string(entry.path()).unwrap())
+            .collect();
+        assert!(
+            saved
+                .iter()
+                .any(|json| json.contains(r#""bans":[{"name":"troll""#))
+        );
+
+        // Chat off: lines are refused, pings still go, newcomers get no history.
+        bo.send(text(serde_json::json!({"type":"chat","text":"before"})))
+            .await
+            .unwrap();
+        read_logged(&mut host, "chat", &mut log).await;
+        host.send(text(
+            serde_json::json!({"type":"set_chat_enabled","enabled":false}),
+        ))
+        .await
+        .unwrap();
+        let off = read_logged(&mut host, "snapshot", &mut log).await;
+        assert_eq!(off["snapshot"]["chat_enabled"], false);
+        bo.send(text(serde_json::json!({"type":"chat","text":"hello?"})))
+            .await
+            .unwrap();
+        let refused = read_logged(&mut bo, "error", &mut log).await;
+        assert_eq!(refused["message"], CHAT_OFF);
+        bo.send(text(serde_json::json!({"type":"ping","x":1.0,"y":1.0})))
+            .await
+            .unwrap();
+        read_logged(&mut host, "ping", &mut log).await;
+        let mut late = connect().await;
+        late.send(join("Late", "late-device")).await.unwrap();
+        read_logged(&mut late, "welcome", &mut log).await;
+        host.send(text(
+            serde_json::json!({"type":"set_chat_enabled","enabled":true}),
+        ))
+        .await
+        .unwrap();
+        let mut seen = Vec::new();
+        let on = read_logged(&mut late, "snapshot", &mut seen).await;
+        assert_eq!(on["snapshot"]["chat_enabled"], true);
+        assert!(!seen.iter().any(|line| line.contains("chat_history")));
         let _ = fs::remove_dir_all(data_dir);
     }
 

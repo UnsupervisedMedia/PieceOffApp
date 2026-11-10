@@ -5258,3 +5258,127 @@ fn a_legacy_device_key_moves_to_the_official_origin_only() {
     let saved = serde_json::to_string(&settings).unwrap();
     assert!(!saved.contains("\"device_key\""), "{saved}");
 }
+
+#[test]
+fn muting_a_player_hides_their_chat_pings_and_cursor_on_this_device_only() {
+    let mut rig = DragRig::new(2, 2);
+    rig.app.peers = vec!["Ana".into(), "Bo".into()];
+    rig.app.chat.set_muted("ANA", true);
+    for message in [
+        ServerMessage::Chat(chat_line(1, "ana", "Ana", "rude")),
+        ServerMessage::Chat(chat_line(2, "bo", "Bo", "hello")),
+        ServerMessage::Ping {
+            client_id: "ana".into(),
+            name: "Ana".into(),
+            x: 1.0,
+            y: 1.0,
+        },
+        ServerMessage::Cursor {
+            client_id: "ana".into(),
+            name: "Ana".into(),
+            x: 1.0,
+            y: 1.0,
+        },
+        ServerMessage::Cursor {
+            client_id: "bo".into(),
+            name: "Bo".into(),
+            x: 2.0,
+            y: 2.0,
+        },
+    ] {
+        rig.incoming_tx.send(message).unwrap();
+    }
+    rig.relay();
+    let shown = |app: &PieceOffApp| -> Vec<String> {
+        app.chat
+            .visible_entries()
+            .filter_map(|entry| match entry {
+                chat::ChatEntry::Line(line) => Some(line.text.clone()),
+                chat::ChatEntry::Note { .. } => None,
+            })
+            .collect()
+    };
+    assert_eq!(shown(&rig.app), ["hello"]);
+    assert_eq!(rig.app.chat.unread, 1, "a muted line is not unread");
+    assert!(rig.app.chat.pings.is_empty());
+    assert!(rig.app.cursors.remote.contains_key("bo"));
+    assert!(!rig.app.cursors.remote.contains_key("ana"));
+    // Muting sends nothing: it is this device's choice.
+    assert!(rig.outgoing_rx.try_recv().is_err());
+    rig.app.chat.set_muted("Ana", false);
+    assert_eq!(
+        shown(&rig.app),
+        ["rude", "hello"],
+        "unmuting shows them again"
+    );
+    rig.app.chat.set_muted("Ana", true);
+    rig.app.leave_room();
+    assert!(!rig.app.chat.is_muted("Ana"), "mutes last for one room");
+}
+
+#[test]
+fn the_host_removes_a_player_by_name() {
+    let mut rig = DragRig::new(2, 2);
+    rig.app.confirm_kick = Some("Ana".into());
+    rig.app.kick_player("Ana");
+    assert!(rig.app.confirm_kick.is_none());
+    match rig.outgoing_rx.try_recv() {
+        Ok(ClientMessage::KickPlayer { name }) => assert_eq!(name, "Ana"),
+        other => panic!("expected kick_player, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_removed_player_is_told_why_and_does_not_reconnect() {
+    for removal in [
+        ServerMessage::Kicked {
+            client_id: "host".into(),
+            message: REMOVED_BY_HOST.into(),
+        },
+        // A rejoin the ban refused.
+        ServerMessage::Error {
+            message: REMOVED_BY_HOST.into(),
+        },
+    ] {
+        let mut rig = DragRig::new(2, 2);
+        rig.app.invite_code = "INVITE".into();
+        // Someone else's notice is not ours.
+        rig.incoming_tx
+            .send(ServerMessage::Kicked {
+                client_id: "other".into(),
+                message: REMOVED_BY_HOST.into(),
+            })
+            .unwrap();
+        rig.relay();
+        assert!(!rig.app.removed_by_host);
+        rig.incoming_tx.send(removal).unwrap();
+        rig.incoming_tx
+            .send(ServerMessage::Error {
+                message: "Room server connection closed.".into(),
+            })
+            .unwrap();
+        rig.relay();
+        assert!(rig.app.removed_by_host);
+        assert!(rig.app.network.is_none());
+        assert!(rig.app.reconnect_at.is_none(), "no automatic reconnect");
+        assert_eq!(rig.app.status, REMOVED_BY_HOST);
+    }
+}
+
+#[test]
+fn chat_off_and_report_links() {
+    let mut rig = DragRig::new(2, 2);
+    rig.app.snapshot.as_mut().unwrap().chat_enabled = false;
+    rig.app.chat.show();
+    // The chat box renders its "off" note without a text box.
+    let _ = rig
+        .ctx
+        .run(egui::RawInput::default(), |ctx| rig.app.chat_overlay(ctx));
+    let link = moderation_ui::report_mailto("AB CD/23?x");
+    assert!(
+        link.starts_with("mailto:contact@pieceoff.app?subject="),
+        "{link}"
+    );
+    assert!(link.contains("ABCD23x"), "{link}");
+    assert!(!link.contains(' ') && !link.contains('/'), "{link}");
+}

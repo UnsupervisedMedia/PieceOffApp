@@ -72,6 +72,21 @@ struct LeaveReply {
 }
 
 #[derive(Serialize)]
+struct KickedReply {
+    client_id: String,
+    spectator: bool,
+}
+
+#[derive(Serialize)]
+struct KickReply {
+    name: String,
+    removed: Vec<KickedReply>,
+    snapshot: Option<RoomSnapshot>,
+    /// The `kicked` frame for each removed connection, in `removed` order.
+    notices: Vec<ServerMessage>,
+}
+
+#[derive(Serialize)]
 struct TickReply {
     events: Vec<ServerMessage>,
     persist: bool,
@@ -92,6 +107,13 @@ pub fn protocol_version() -> u16 {
 #[wasm_bindgen]
 pub fn builtin_media_title(sha256: &str) -> Option<String> {
     pieceoff_core::builtin_media_title(sha256).map(str::to_owned)
+}
+
+/// Whether a display name may be shown in the public lobby or used in a
+/// listed room.
+#[wasm_bindgen]
+pub fn public_name_allowed(name: &str) -> bool {
+    pieceoff_core::public_name_allowed(name)
 }
 
 /// One room's rules, driven by JSON strings so a JavaScript Durable Object
@@ -117,6 +139,12 @@ impl Room {
         runtime.name_claims = stored.name_claims;
         runtime.name_claims.truncate(pieceoff_core::MAX_NAME_CLAIMS);
         runtime.timelapse = stored.timelapse;
+        runtime.bans = stored.bans;
+        let excess = runtime
+            .bans
+            .len()
+            .saturating_sub(pieceoff_core::MAX_ROOM_BANS);
+        runtime.bans.drain(..excess);
         if let Some(snapshot) = runtime.snapshot.as_ref() {
             runtime.timelapse.sanitize(snapshot);
         }
@@ -133,6 +161,7 @@ impl Room {
             snapshot: snapshot.for_storage(clock(now_ms)),
             name_claims: self.runtime.name_claims.clone(),
             timelapse: self.runtime.timelapse.clone(),
+            bans: self.runtime.bans.clone(),
         });
         serde_json::to_string(&stored).unwrap_or_else(|_| "null".into())
     }
@@ -171,6 +200,48 @@ impl Room {
             }),
             Err(message) => reply(Reply::Err(message)),
         }
+    }
+
+    /// The host removes a player by name (`kick_player`). The reply lists
+    /// the connections to notify with `notices` and close, then the host
+    /// sends `peer_left` for each and `snapshot` if present.
+    pub fn kick(&mut self, client_id: &str, message_json: &str, now_ms: f64) -> String {
+        let name = match serde_json::from_str::<ClientMessage>(message_json) {
+            Ok(ClientMessage::KickPlayer { name }) => name,
+            Ok(_) => return err_reply("Not a kick_player message"),
+            Err(e) => return err_reply(format!("Bad message: {e}")),
+        };
+        match self.runtime.kick_player(client_id, &name, clock(now_ms)) {
+            Ok(outcome) => ok_reply(KickReply {
+                notices: outcome
+                    .removed
+                    .iter()
+                    .map(|(id, _)| ServerMessage::Kicked {
+                        client_id: id.clone(),
+                        message: pieceoff_core::REMOVED_BY_HOST.into(),
+                    })
+                    .collect(),
+                name: outcome.name,
+                removed: outcome
+                    .removed
+                    .into_iter()
+                    .map(|(client_id, spectator)| KickedReply {
+                        client_id,
+                        spectator,
+                    })
+                    .collect(),
+                snapshot: outcome.snapshot,
+            }),
+            Err(message) => err_reply(message),
+        }
+    }
+
+    /// Whether the room lets players chat right now.
+    pub fn chat_enabled(&self) -> bool {
+        self.runtime
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.chat_enabled)
     }
 
     /// Validate a cursor, chat line or ping without changing the saved room.
@@ -478,6 +549,33 @@ mod tests {
             reply.contains(pieceoff_core::PUBLIC_ROOMS_BUILTIN_ONLY),
             "{reply}"
         );
+    }
+
+    #[test]
+    fn kick_removes_and_bans_and_survives_storage() {
+        let mut room = hosted();
+        let joined = room.join_v14("p1", "Troll", SHA, "troll-key", false, 1.0);
+        assert!(joined.starts_with(r#"{"ok""#), "{joined}");
+        assert!(
+            room.kick("p1", r#"{"type":"kick_player","name":"Host"}"#, 2.0)
+                .starts_with(r#"{"err""#)
+        );
+        let reply = room.kick("host", r#"{"type":"kick_player","name":"troll"}"#, 2.0);
+        assert!(
+            reply.contains(r#""removed":[{"client_id":"p1","spectator":false}]"#),
+            "{reply}"
+        );
+        assert!(
+            reply.contains(
+                r#"{"type":"kicked","client_id":"p1","message":"The host removed you from this room."}"#
+            ),
+            "{reply}"
+        );
+        let mut again = Room::from_snapshot(&room.stored_snapshot_json(3.0)).unwrap();
+        let refused = again.join_v14("p2", "Someone", SHA, "troll-key", false, 4.0);
+        assert_eq!(refused, r#"{"err":"The host removed you from this room."}"#);
+        assert!(public_name_allowed("Ada") && !public_name_allowed("p0rn"));
+        assert!(again.chat_enabled());
     }
 
     #[test]

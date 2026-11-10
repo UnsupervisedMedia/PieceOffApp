@@ -182,10 +182,12 @@ cuttable proxy. It covers `/api/info` detection; linking the computer (the test
 approves the link as the site page would) and the key stored under that origin;
 creating a listed room with a built-in loop over HTTP and claiming it with the
 resume token, with nothing uploaded or downloaded; the lobby listing with the
-bundled title and quick match joining it; a snapped piece and a chat line seen by
-both, and the lobby's progress; dropped networks with the same identity for the
-guest and the host (the host role passes to a player who stayed, as on any room
-server, and comes back once alone); delisting; and the uploads-off refusal from
+bundled title and quick match joining it; a snapped piece, chat refused in the
+public room until the host turns it on, then a chat line seen by both, and the
+lobby's progress; dropped networks with the same identity for the guest and the
+host (the host role passes to a player who stayed, as on any room server, and
+comes back once alone); delisting; the host removing the guest, who is told why,
+does not reconnect, and is refused on rejoining; and the uploads-off refusal from
 both the app and the Worker. It needs node and the Worker toolchain
 (`worker/build.sh`) and takes about a minute.
 

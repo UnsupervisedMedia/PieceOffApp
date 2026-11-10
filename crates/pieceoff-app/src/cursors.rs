@@ -216,6 +216,9 @@ impl PieceOffApp {
         // A steady order, so overlapping cursors do not flicker.
         cursors.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (_, cursor) in cursors {
+            if self.chat.is_muted(&cursor.name) {
+                continue;
+            }
             paint_cursor(
                 painter,
                 to_screen(cursor.position(now)),

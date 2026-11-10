@@ -57,6 +57,9 @@ pub(crate) struct RoomChat {
     /// as Escape arrives, before the shortcuts run, so without this the
     /// Escape that leaves the chat would also clear the selection.
     pub(crate) typing: bool,
+    /// Players muted on this device, lowercased: their chat, pings and
+    /// cursors are not shown. Kept for this room only.
+    pub(crate) muted: std::collections::HashSet<String>,
 }
 
 impl RoomChat {
@@ -65,6 +68,30 @@ impl RoomChat {
         let open = self.open;
         *self = Self::default();
         self.open = open;
+    }
+
+    pub(crate) fn is_muted(&self, name: &str) -> bool {
+        !self.muted.is_empty() && self.muted.contains(&name.to_lowercase())
+    }
+
+    /// Mute or unmute a player on this device. Their lines stay in the
+    /// history, hidden, so unmuting shows them again.
+    pub(crate) fn set_muted(&mut self, name: &str, muted: bool) {
+        let folded = name.to_lowercase();
+        if muted {
+            self.pings.retain(|ping| ping.name.to_lowercase() != folded);
+            self.muted.insert(folded);
+        } else {
+            self.muted.remove(&folded);
+        }
+    }
+
+    /// The history as shown: muted players' lines left out.
+    pub(crate) fn visible_entries(&self) -> impl Iterator<Item = &ChatEntry> {
+        self.entries.iter().filter(|entry| match entry {
+            ChatEntry::Line(line) => !self.is_muted(&line.name),
+            ChatEntry::Note { .. } => true,
+        })
     }
 
     pub(crate) fn show(&mut self) {
@@ -85,7 +112,10 @@ impl RoomChat {
 
     /// A line from the server. Ours never counts as unread.
     pub(crate) fn receive(&mut self, line: ChatLine, own_client_id: Option<&str>) {
-        if !self.open && own_client_id != Some(line.client_id.as_str()) {
+        if !self.open
+            && own_client_id != Some(line.client_id.as_str())
+            && !self.is_muted(&line.name)
+        {
             self.unread += 1;
         }
         self.push(ChatEntry::Line(line));
@@ -109,7 +139,10 @@ impl RoomChat {
             return;
         }
         if !self.open {
-            self.unread += fresh.iter().filter(|line| line.name != own_name).count();
+            self.unread += fresh
+                .iter()
+                .filter(|line| line.name != own_name && !self.is_muted(&line.name))
+                .count();
         }
         // History predates anything said since we joined; keep time order.
         let mut entries: Vec<ChatEntry> = self.entries.drain(..).collect();
@@ -259,6 +292,11 @@ impl PieceOffApp {
     /// unread count when collapsed, the history and a text box when open.
     pub(crate) fn chat_overlay(&mut self, ctx: &egui::Context) {
         let now_ms = crate::board::server_clock_ms();
+        let language = self.settings.language;
+        let chat_enabled = self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.chat_enabled);
         let hint = self.hint_with_keys("Room chat", Action::FocusChat);
         let send_hint = format!(
             "Say something · Enter sends · Esc goes back to the board{}",
@@ -320,13 +358,21 @@ impl PieceOffApp {
                             .auto_shrink([false, true])
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
-                                if self.chat.entries.is_empty() {
-                                    ui.weak("Nothing said yet.");
+                                if self.chat.visible_entries().next().is_none() {
+                                    ui.weak(language.text("Nothing said yet."));
                                 }
-                                for entry in &self.chat.entries {
+                                for entry in self.chat.visible_entries() {
                                     ui.add(egui::Label::new(chat_layout(entry, now_ms)).wrap());
                                 }
                             });
+                        if !chat_enabled {
+                            ui.weak(
+                                language.text(
+                                    "The host turned chat off in this room. Pings still work.",
+                                ),
+                            );
+                            return;
+                        }
                         let edit = egui::TextEdit::singleline(&mut self.chat.draft)
                             .hint_text("Say something…")
                             .char_limit(MAX_CHAT_CHARS)

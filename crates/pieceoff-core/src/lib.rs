@@ -7,12 +7,17 @@ use std::collections::{HashMap, HashSet};
 mod apply;
 mod listing;
 mod membership;
+mod moderation;
 mod relay;
 pub use apply::ApplyOutcome;
 pub use listing::{
     BUILTIN_MEDIA_SHA256, PUBLIC_ROOMS_BUILTIN_ONLY, builtin_media_title, is_builtin_media,
 };
 pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
+pub use moderation::{
+    CHAT_OFF, KickOutcome, MAX_ROOM_BANS, PUBLIC_NAME_REFUSED, REMOVED_BY_HOST, RoomBan,
+    public_name_allowed,
+};
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
 mod claims;
@@ -195,6 +200,14 @@ pub struct RoomSnapshot {
     /// queue item is built-in may be listed; older snapshots load unlisted.
     #[serde(default)]
     pub listed: bool,
+    /// Room chat is on (protocol v15). Older snapshots load with it on; a
+    /// room that becomes listed switches it off until the host turns it on.
+    #[serde(default = "chat_enabled_default")]
+    pub chat_enabled: bool,
+}
+
+fn chat_enabled_default() -> bool {
+    true
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -593,6 +606,7 @@ impl RoomSnapshot {
             holders: Vec::new(),
             cut_style: CutStyle::Jigsaw,
             listed: false,
+            chat_enabled: true,
         };
         snapshot.mark_builtins_available();
         Ok(snapshot)
@@ -679,6 +693,7 @@ impl RoomSnapshot {
         }
         // Listing is chosen by the new room's `create_room`, not the file.
         self.listed = false;
+        self.chat_enabled = true;
         self.mark_builtins_available();
         self.revision = 1;
         self.playback.playing = false;
@@ -1075,6 +1090,17 @@ pub enum ClientMessage {
     SetListed {
         listed: bool,
     },
+    /// Host-only: switch room chat on or off (protocol v15). Pings are
+    /// unaffected.
+    SetChatEnabled {
+        enabled: bool,
+    },
+    /// Host-only: remove everyone under this display name and ban the name
+    /// and their player key from the room for its lifetime (protocol v15).
+    /// The host cannot remove themself.
+    KickPlayer {
+        name: String,
+    },
     /// Where this player's pointer is on the table, in board coordinates
     /// (source-image pixels from the board's top-left). Relayed to the other
     /// players and never stored.
@@ -1233,6 +1259,12 @@ pub enum ServerMessage {
     Timelapse {
         timelapse: Timelapse,
     },
+    /// The host removed this connection from the room (protocol v15). The
+    /// server closes the socket next; clients must not reconnect.
+    Kicked {
+        client_id: String,
+        message: String,
+    },
 }
 
 /// Tidy a chat line the way the server does: line breaks become spaces,
@@ -1282,6 +1314,11 @@ pub struct RoomRuntime {
     /// Which player key owns each name in this room (see `claims`). Host
     /// state only: hosts persist it beside the snapshot, never send it.
     pub name_claims: Vec<NameClaim>,
+    /// Names and keys the host removed (see `moderation`). Host state:
+    /// saved beside the snapshot, never sent.
+    pub bans: Vec<RoomBan>,
+    /// The key digest each connection joined with, for bans. Not saved.
+    member_keys: HashMap<String, String>,
     drag_groups: HashMap<String, Vec<u32>>,
 }
 

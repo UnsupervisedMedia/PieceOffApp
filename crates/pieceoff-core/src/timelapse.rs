@@ -145,6 +145,9 @@ pub struct StoredRoom {
     pub name_claims: Vec<NameClaim>,
     #[serde(default, skip_serializing_if = "Timelapse::is_empty")]
     pub timelapse: Timelapse,
+    /// Players the host removed (protocol v15), bounded by `MAX_ROOM_BANS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bans: Vec<crate::RoomBan>,
 }
 
 impl RoomRuntime {
@@ -162,6 +165,7 @@ impl RoomRuntime {
         name: &str,
         key_hash: Option<&str>,
     ) -> Result<(), String> {
+        self.check_admission(name, key_hash)?;
         let folded = name.to_lowercase();
         let claimed_by_other = self
             .name_claims
@@ -187,6 +191,7 @@ impl RoomRuntime {
         }
         self.spectators
             .insert(client_id.to_owned(), name.to_owned());
+        self.note_member_key(client_id, key_hash);
         Ok(())
     }
 
@@ -469,6 +474,7 @@ mod tests {
             snapshot: room.snapshot.clone().unwrap(),
             name_claims: Vec::new(),
             timelapse: room.timelapse.clone(),
+            bans: Vec::new(),
         };
         let text = serde_json::to_string(&stored).unwrap();
         let back: StoredRoom = serde_json::from_str(&text).unwrap();
@@ -486,6 +492,7 @@ mod tests {
             snapshot: room.snapshot.clone().unwrap(),
             name_claims: Vec::new(),
             timelapse: Timelapse::default(),
+            bans: Vec::new(),
         };
         assert!(!serde_json::to_string(&empty).unwrap().contains("timelapse"));
     }

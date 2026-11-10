@@ -294,6 +294,7 @@ impl PieceOffApp {
                     self.reconnect_attempt = 0;
                     self.room_gone = false;
                     self.replaced_elsewhere = false;
+                    self.removed_by_host = false;
                     self.invite_code = snapshot.invite_code.clone();
                     self.title = snapshot.title.clone();
                     self.media_ready =
@@ -508,14 +509,25 @@ impl PieceOffApp {
                     };
                 }
                 ServerMessage::MediaUploadToken { .. } => {}
+                ServerMessage::Kicked { client_id, .. } => {
+                    if self.client_id.as_deref() == Some(client_id.as_str()) {
+                        self.removed_by_host = true;
+                        let shown = self.settings.language.text(REMOVED_BY_HOST);
+                        self.chat.note(shown);
+                        self.status = shown.into();
+                    }
+                }
                 ServerMessage::Cursor {
                     client_id,
                     name,
                     x,
                     y,
                 } => {
-                    // The server never echoes our own, but be sure.
-                    if self.client_id.as_deref() != Some(client_id.as_str()) {
+                    // The server never echoes our own, but be sure. Muted
+                    // players' pointers are not drawn on this device.
+                    if self.client_id.as_deref() != Some(client_id.as_str())
+                        && !self.chat.is_muted(&name)
+                    {
                         let now = ctx.input(|input| input.time);
                         self.cursors.update(client_id, name, x, y, now);
                     }
@@ -532,6 +544,7 @@ impl PieceOffApp {
                 ServerMessage::ChatHistory { lines } => {
                     self.chat.history(lines, &self.player_name);
                 }
+                ServerMessage::Ping { name, .. } if self.chat.is_muted(&name) => {}
                 ServerMessage::Ping { name, x, y, .. } => {
                     let now = ctx.input(|input| input.time);
                     self.chat.add_ping(name, x, y, now);
@@ -558,7 +571,14 @@ impl PieceOffApp {
                     if message == REPLACED_BY_NEW_CONNECTION {
                         self.replaced_elsewhere = true;
                     }
-                    self.status = message;
+                    // A rejoin the host's ban refused.
+                    if message == REMOVED_BY_HOST {
+                        self.removed_by_host = true;
+                    }
+                    // The close that follows a removal keeps its explanation.
+                    if !(self.removed_by_host && message == "Room server connection closed.") {
+                        self.status = message;
+                    }
                     // Only a room we are already in can be rejoined; a failed
                     // first connection keeps its own explanation.
                     if disconnected && self.snapshot.is_some() {
@@ -579,6 +599,9 @@ impl PieceOffApp {
                         } else if self.replaced_elsewhere {
                             self.reconnect_at = None;
                             self.status = REPLACED_BY_NEW_CONNECTION.into();
+                        } else if self.removed_by_host {
+                            self.reconnect_at = None;
+                            self.status = self.settings.language.text(REMOVED_BY_HOST).into();
                         } else {
                             let delay = reconnect_delay(self.reconnect_attempt);
                             self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);

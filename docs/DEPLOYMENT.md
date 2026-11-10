@@ -14,7 +14,8 @@ machine (no clustering; see [Limits](#limits)). Players need only its address.
 There is no account system. A room is protected by its invite code (8
 characters, about 40 bits) and media by the same code or the host's upload
 token. Treat the server as a place friends meet, not as a public service with
-moderation: see [Security notes](#security-notes).
+moderation beyond the host's tools (remove a player, switch chat off): see
+[Security notes](#security-notes).
 
 ## Docker with automatic HTTPS (recommended)
 
@@ -251,8 +252,17 @@ carries the joiner's own token; the server stores only its hash, and keeps the
 newest 64 for players who have left. Protocol v15 spectators, name claims,
 room cursors, chat, board pings, timelapse requests, and the public-listing
 rule (`listed` rooms use built-in media only; built-in items never upload to
-R2) use the shared Rust room rules. Name claims and timelapse are saved with
-the room; chat and cursors are ephemeral. Clients send the text `ping` about
+R2) use the shared Rust room rules, as does moderation: the host's
+`{"type":"kick_player","name":"…"}` sends the removed connection(s)
+`{"type":"kicked","client_id":"…","message":"The host removed you from this room."}`,
+closes them (1008), deletes their resume tokens, and bans the name and player
+key for the room's life (refused joins get an `error` with the same message);
+`{"type":"set_chat_enabled","enabled":bool}` switches chat (listed rooms start
+with it off; chat is then refused with "The host turned chat off in this
+room." and newcomers get no `chat_history`, pings still work); and names
+joining a listed room pass the core's short blocklist ("Pick a different name
+for public rooms"). Name claims, bans (at most 64) and timelapse are saved with
+the room, flushed at once after a kick; chat and cursors are ephemeral. Clients send the text `ping` about
 every 20 seconds and get `pong`.
 
 Media (`/api/rooms/<CODE>/media...`, bearer tokens in `Authorization`):
@@ -322,10 +332,16 @@ pieces, current item, listing), at most once per 10 s, and at least every
 has no players, or expires, and within 10 s of being completed; an entry with
 no heartbeat for 150 s is dropped. The title is the bundled title of the
 current built-in loop, never client text; `host_name` is the host's display
-name with control and direction characters removed, at most 24 characters.
+name with control and direction characters removed, at most 24 characters,
+and blank when the public name filter refuses it.
 Heartbeats only touch memory; the lobby writes a row only when an entry's
-content changes. **Moderation is not built yet**: do not announce the lobby
-publicly (`ONLINE_PLAY_LIVE`) before the moderation follow-up lands.
+content changes. The minimum moderation is in place (host kick with a rejoin
+ban, local mute, chat off by default in listed rooms, the name filter, and
+**More → Report room…**, a `mailto:contact@pieceoff.app` link with the code).
+Reports land in that mailbox only; nothing on the service acts on them, and a
+removed player who clears their settings and picks a new name gets back in
+(no accounts, no address bans). Decide whether that is enough before
+announcing the lobby (`ONLINE_PLAY_LIVE`).
 
 ### Cost on the free plan
 
@@ -360,8 +376,11 @@ link create/approve/poll and one-time key delivery, CORS, device-key rooms
 with the daily cap and 401 relink for unknown and revoked keys, the global
 budget's 507, release on abort and expiry and reconcile after a lost release,
 lobby listing, updates, removal and expiry with built-in titles, the
-listed-room built-in rule, and the uploads-off refusals). Nothing is deployed
-by it.
+listed-room built-in rule, the uploads-off refusals, and moderation: a kick
+closes the socket and the player cannot rejoin by token, key, name or as a
+spectator, also after a restart; listed rooms start with chat off and refuse
+chat until the host turns it on; blocked names are refused in listed rooms
+only). Nothing is deployed by it.
 
 `scripts/online-e2e.sh` plays the desktop app against that Worker: it starts
 `wrangler dev --local` with the production settings (uploads off, Turnstile
@@ -374,6 +393,8 @@ deployed.
 - One process, one machine, local disk. A second server is a separate
   service with its own rooms. Moving to a database and shared object storage is
   future work (see [the architecture](ARCHITECTURE.md)).
-- No accounts, moderation, or per-user quotas.
+- No accounts or per-user quotas. Moderation is the host's: **Remove…** in
+  the player list bans a name and its device key from that room, and the host
+  can switch room chat off. This server has no public lobby.
 - Rate limits are in memory and per address, so they reset on restart and do
   not tell apart people sharing one address.

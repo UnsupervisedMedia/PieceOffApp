@@ -87,7 +87,9 @@ impl RoomSnapshot {
         if listed && !self.only_builtin_media() {
             return Err(PUBLIC_ROOMS_BUILTIN_ONLY.into());
         }
+        let was_listed = self.listed;
         self.listed = listed;
+        self.note_listing_change(was_listed);
         Ok(())
     }
 }
@@ -99,6 +101,11 @@ impl RoomRuntime {
         let snapshot = self.snapshot.as_mut().ok_or("Room is not initialized")?;
         if snapshot.host_id != client_id {
             return Err("Only the host can list or unlist the room".into());
+        }
+        // The host's name is what the public lobby shows.
+        let host_name = self.names.get(client_id).map(String::as_str);
+        if listed && !snapshot.listed && !host_name.is_some_and(crate::public_name_allowed) {
+            return Err(crate::PUBLIC_NAME_REFUSED.into());
         }
         if snapshot.listed != listed {
             snapshot.try_set_listed(listed)?;

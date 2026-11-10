@@ -6,9 +6,9 @@ use eframe::egui::{
 use futures_util::{SinkExt, StreamExt};
 
 use pieceoff_core::{
-    ClientMessage, CutStyle, Piece, PlaybackState, REPLACED_BY_NEW_CONNECTION, RepeatMode,
-    RoomSnapshot, ServerMessage, TrayArrangement, piece_outline, valid_media_dimensions,
-    valid_media_extension,
+    ClientMessage, CutStyle, Piece, PlaybackState, REMOVED_BY_HOST, REPLACED_BY_NEW_CONNECTION,
+    RepeatMode, RoomSnapshot, ServerMessage, TrayArrangement, piece_outline,
+    valid_media_dimensions, valid_media_extension,
 };
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,7 @@ mod keyboard_play;
 mod library;
 mod library_ui;
 mod media_tools;
+mod moderation_ui;
 mod net;
 mod online;
 mod online_ui;
@@ -290,6 +291,11 @@ struct PieceOffApp {
     /// The server closed this connection because the same player joined the
     /// room again from another window; reconnecting would take it back.
     replaced_elsewhere: bool,
+    /// The host removed us from this room; it refuses us now, so reconnecting
+    /// cannot help.
+    removed_by_host: bool,
+    /// The host asked to remove this player and has not confirmed yet.
+    confirm_kick: Option<String>,
     /// When the video decoder was first seen stopped, for automatic retries.
     decoder_dead_since: Option<Instant>,
     /// The "could not restart" message has been shown for this stoppage.
@@ -481,6 +487,8 @@ impl Default for PieceOffApp {
             last_move_sent_at: f64::NEG_INFINITY,
             room_gone: false,
             replaced_elsewhere: false,
+            removed_by_host: false,
+            confirm_kick: None,
             decoder_dead_since: None,
             decoder_gave_up_reported: false,
             tools: Vec::new(),
@@ -1274,6 +1282,8 @@ impl PieceOffApp {
         self.reconnect_attempt = 0;
         self.room_gone = false;
         self.replaced_elsewhere = false;
+        self.removed_by_host = false;
+        self.confirm_kick = None;
         self.decoder_restarts_after_error = 0;
         self.decoder_recovering = false;
         if let Some(decoder) = &self.decoder_playing {

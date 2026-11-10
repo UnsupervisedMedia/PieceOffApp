@@ -415,7 +415,25 @@ fn two_desktop_apps_play_together_on_the_rooms_worker() {
     );
     assert_eq!(placed(&host), 1);
 
-    // Chat goes round.
+    // Public rooms start with chat off; the guest is refused until the host
+    // turns it on. Then chat goes round.
+    assert!(!guest.snapshot().chat_enabled);
+    guest.app.chat.draft = "too early".into();
+    guest.app.send_chat();
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the chat-off refusal",
+        |p| p[1].app.status == pieceoff_core::CHAT_OFF,
+    );
+    host.app
+        .send(ClientMessage::SetChatEnabled { enabled: true });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "chat to be switched on",
+        |p| p[1].snapshot().chat_enabled,
+    );
     guest.app.chat.draft = "hello from the guest".into();
     guest.app.send_chat();
     let said = |player: &Player| {
@@ -552,6 +570,35 @@ fn two_desktop_apps_play_together_on_the_rooms_worker() {
         "the room to leave the lobby",
         |rooms| entry(rooms, &code).is_none(),
     );
+
+    // The guest comes back; the host removes them. They are told why, do
+    // not reconnect, and cannot rejoin.
+    guest.app.select_recent_room(0);
+    guest.app.join_room();
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(40),
+        "the guest to rejoin before the kick",
+        |p| p[1].in_room() && p[0].app.peers.iter().any(|peer| peer == "Guest"),
+    );
+    host.app.kick_player("Guest");
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(20),
+        "the guest to be removed",
+        |p| p[1].app.removed_by_host && p[1].app.network.is_none() && p[0].app.peers.is_empty(),
+    );
+    assert_eq!(guest.app.status, pieceoff_core::REMOVED_BY_HOST);
+    run_for(&mut [&mut host, &mut guest], Duration::from_secs(3));
+    assert!(guest.app.reconnect_at.is_none() && !guest.app.connected);
+    guest.app.join_room();
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(20),
+        "the rejoin to be refused",
+        |p| p[1].app.network.is_none() && p[1].app.status == pieceoff_core::REMOVED_BY_HOST,
+    );
+    assert!(!guest.app.connected && host.app.peers.is_empty());
 
     // 7. Uploads are off: the host's own picture is refused with the
     // service's words, by the app and (when the app does not know) by the

@@ -2,7 +2,13 @@
  * The Rust room core, initialised once per isolate. Every module that needs
  * the core imports it from here so initialisation happens before first use.
  */
-import { Room, builtin_media_title, initSync, protocol_version } from "../wasm/pieceoff_room_wasm.js";
+import {
+  Room,
+  builtin_media_title,
+  initSync,
+  protocol_version,
+  public_name_allowed,
+} from "../wasm/pieceoff_room_wasm.js";
 import wasmModule from "../wasm/pieceoff_room_wasm_bg.wasm";
 
 initSync({ module: wasmModule });
@@ -15,6 +21,11 @@ export const PROTOCOL_VERSION: number = protocol_version();
 /** The bundled title of a built-in loop, or null for any other fingerprint. */
 export function builtinTitle(sha256: string): string | null {
   return builtin_media_title(sha256) ?? null;
+}
+
+/** Whether a display name may be shown in the public lobby (the core's short blocklist). */
+export function publicNameAllowed(name: string): boolean {
+  return public_name_allowed(name);
 }
 
 export const UPLOADS_OFF_ERROR =

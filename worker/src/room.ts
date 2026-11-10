@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Room, UPLOADS_OFF_ERROR, builtinTitle, uploadsEnabled } from "./core.ts";
+import { Room, UPLOADS_OFF_ERROR, builtinTitle, publicNameAllowed, uploadsEnabled } from "./core.ts";
 import type { Env } from "./env";
 import { numVar } from "./http.ts";
 import { type LobbyEntry, MAX_HOST_NAME, lobbyAction, lobbyCheckTime, sanitizeText } from "./lobby-state.ts";
@@ -93,6 +93,12 @@ interface InitResult {
   ok: boolean;
   error?: string;
   resumeToken?: string;
+}
+
+/** The lobby's host name: sanitized, and blank if the name filter refuses it. */
+function lobbyHostName(name: string): string {
+  const clean = sanitizeText(name, MAX_HOST_NAME);
+  return publicNameAllowed(clean) ? clean : "";
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -739,6 +745,7 @@ export class RoomDO extends DurableObject<Env> {
       ws.send(this.wasm(() => this.room.timelapse_event()));
       return;
     }
+    if (parsed.type === "kick_player") return this.kick(ws, attachment, message);
 
     if (
       parsed.type === "queue_add" &&
@@ -1095,11 +1102,62 @@ export class RoomDO extends DurableObject<Env> {
     this.writeRoster();
     this.writeSecrets();
     ws.send(JSON.stringify({ ...(JSON.parse(welcome) as object), resume_token: resumeToken }));
-    if (this.chatHistory.length > 0) {
+    // Lines from before chat was switched off (say, while the room was still
+    // invite-only) are not shown to newcomers.
+    if (this.chatHistory.length > 0 && this.wasm(() => this.room.chat_enabled())) {
       ws.send(JSON.stringify({ type: "chat_history", lines: this.chatHistory }));
     }
     this.broadcast(JSON.stringify({ type: "peer_joined", name: attachment.name, spectator }), ws);
     this.markDirty();
+    this.lobbyDirty = true;
+    await this.syncLobby(Date.now(), true);
+    await this.schedule();
+  }
+
+  /**
+   * The host removes a player (`kick_player { name }`): every connection
+   * under that name is told and closed, its resume tokens stop working, and
+   * the core bans the name and key for the room's life. The ban is flushed
+   * at once so an eviction cannot lose it.
+   */
+  private async kick(ws: WebSocket, attachment: Attachment, frame: string): Promise<void> {
+    const reply = JSON.parse(this.wasm(() => this.room.kick(attachment.clientId, frame, Date.now()))) as Reply<{
+      name: string;
+      removed: { client_id: string; spectator: boolean }[];
+      snapshot: unknown;
+      notices: unknown[];
+    }>;
+    if ("err" in reply) return this.sendError(ws, reply.err);
+    const removed = new Set(reply.ok.removed.map((entry) => entry.client_id));
+    reply.ok.removed.forEach((entry, index) => {
+      for (const socket of this.ctx.getWebSockets()) {
+        const target = socket.deserializeAttachment() as Attachment | null;
+        if (!target?.joined || target.clientId !== entry.client_id) continue;
+        target.joined = false; // its close event must not release it again
+        try {
+          socket.serializeAttachment(target);
+          socket.send(JSON.stringify(reply.ok.notices[index]));
+          socket.close(1008, "removed by host");
+        } catch {
+          // already gone
+        }
+      }
+      delete this.roster[entry.client_id];
+      this.spectatorIds.delete(entry.client_id);
+      this.lastSeen.delete(entry.client_id);
+      this.broadcast(JSON.stringify({ type: "peer_left", name: reply.ok.name, spectator: entry.spectator }));
+      this.broadcast(JSON.stringify({ type: "cursor_hidden", client_id: entry.client_id }));
+    });
+    for (const [hash, clientId] of Object.entries(this.secrets)) {
+      if (removed.has(clientId)) delete this.secrets[hash];
+    }
+    if (reply.ok.snapshot !== null) {
+      this.broadcast(JSON.stringify({ type: "snapshot", snapshot: reply.ok.snapshot }));
+    }
+    const clockEvent = this.wasm(() => this.room.sync_occupied(Date.now()));
+    if (clockEvent !== undefined) this.broadcast(clockEvent);
+    this.writeSecrets();
+    this.flush();
     this.lobbyDirty = true;
     await this.syncLobby(Date.now(), true);
     await this.schedule();
@@ -1234,7 +1292,7 @@ export class RoomDO extends DurableObject<Env> {
     return {
       code: snapshot.invite_code,
       title,
-      host_name: sanitizeText(this.roster[snapshot.host_id] ?? "", MAX_HOST_NAME),
+      host_name: lobbyHostName(this.roster[snapshot.host_id] ?? ""),
       players,
       max_players: MAX_PLAYERS,
       spectators,

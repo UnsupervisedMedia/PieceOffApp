@@ -19,6 +19,10 @@ impl ServerMessage {
             ServerMessage::MediaUploadToken {
                 client_id: recipient,
                 ..
+            }
+            | ServerMessage::Kicked {
+                client_id: recipient,
+                ..
             } => recipient == client_id,
             // A player's own pointer is never echoed back.
             ServerMessage::Cursor {
@@ -204,6 +208,15 @@ impl RoomRuntime {
             ClientMessage::SetListed { listed } => {
                 let snapshot = self.set_listed(client_id, listed)?;
                 (ServerMessage::Snapshot { snapshot }, true)
+            }
+            ClientMessage::SetChatEnabled { enabled } => {
+                let snapshot = self.set_chat_enabled(client_id, enabled)?;
+                (ServerMessage::Snapshot { snapshot }, true)
+            }
+            // Removing a player closes sockets, which only the host can do:
+            // hosts call `kick_player`.
+            ClientMessage::KickPlayer { .. } => {
+                return Err("Removing a player is handled by the host".into());
             }
             ClientMessage::CreateHolder {
                 x,

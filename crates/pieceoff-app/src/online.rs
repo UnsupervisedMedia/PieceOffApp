@@ -577,6 +577,10 @@ pub(crate) fn parse_lobby(body: &str) -> Result<Vec<LobbyRoom>, String> {
                 room.title = "Puzzle".into();
             }
             room.host_name = clean_text(&room.host_name, 24);
+            // The service blanks names the public filter refuses; so do we.
+            if !pieceoff_core::public_name_allowed(&room.host_name) {
+                room.host_name.clear();
+            }
             Some(room)
         })
         .take(100)

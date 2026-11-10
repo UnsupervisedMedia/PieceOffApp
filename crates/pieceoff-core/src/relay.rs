@@ -16,11 +16,11 @@ impl RoomRuntime {
             .or_else(|| self.spectators.get(client_id))
             .ok_or("Player is not in this room")?;
         let spectator = self.is_spectator(client_id);
-        let bounds = self
-            .snapshot
-            .as_ref()
-            .ok_or("Room is not ready")?
-            .scene_bounds();
+        let snapshot = self.snapshot.as_ref().ok_or("Room is not ready")?;
+        let bounds = snapshot.scene_bounds();
+        if matches!(message, ClientMessage::Chat { .. }) && !snapshot.chat_enabled {
+            return Err(crate::CHAT_OFF.into());
+        }
         let event = match message {
             ClientMessage::Cursor { x, y } if !spectator && bounds.contains(x, y) => {
                 Some(ServerMessage::Cursor {

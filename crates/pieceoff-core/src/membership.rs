@@ -70,6 +70,9 @@ impl RoomRuntime {
             return Err("Invalid media fingerprint".into());
         }
         let name = clean_name(&name);
+        if listed && !crate::public_name_allowed(&name) {
+            return Err(crate::PUBLIC_NAME_REFUSED.into());
+        }
         let clean_title = clean_title(&title);
         let clean_extension = clean_media_extension(&media_extension)?;
         let snapshot = if let Some(initial) = initial_snapshot {

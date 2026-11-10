@@ -173,6 +173,39 @@ impl Language {
             crate::online::UNAVAILABLE_MESSAGE => {
                 "PieceOff Online no está disponible ahora. Inténtalo más tarde o usa Local o red local."
             }
+            // Moderation.
+            "muted" => "silenciado",
+            "Mute" => "Silenciar",
+            "Unmute" => "Quitar silencio",
+            "Hide this player's chat, pings and cursor on this device" => {
+                "Oculta el chat, los avisos y el cursor de este jugador en este dispositivo"
+            }
+            "Show this player's chat, pings and cursor again" => {
+                "Vuelve a mostrar el chat, los avisos y el cursor de este jugador"
+            }
+            "Remove…" => "Expulsar…",
+            "Remove" => "Expulsar",
+            "Remove player?" => "¿Expulsar al jugador?",
+            "Remove this player from the room. They can't rejoin it." => {
+                "Expulsa a este jugador de la sala. No podrá volver a entrar."
+            }
+            "They leave the room now and can't rejoin it, under this name or another, from this device." => {
+                "Sale de la sala ahora y no podrá volver a entrar, ni con este nombre ni con otro, desde este dispositivo."
+            }
+            "Room chat" => "Chat de la sala",
+            "Let everyone in the room chat. Public rooms start with chat off; pings always work." => {
+                "Permite que todos chateen en la sala. Las salas públicas empiezan con el chat desactivado; los avisos siempre funcionan."
+            }
+            "Report room…" => "Denunciar sala…",
+            "Email PieceOff about abuse in this public room. The room code is filled in." => {
+                "Escribe a PieceOff para denunciar abusos en esta sala pública. El código de la sala ya va incluido."
+            }
+            "Nothing said yet." => "Nadie ha escrito todavía.",
+            "The host turned chat off in this room. Pings still work." => {
+                "El anfitrión desactivó el chat en esta sala. Los avisos siguen funcionando."
+            }
+            pieceoff_core::REMOVED_BY_HOST => "El anfitrión te expulsó de esta sala.",
+            pieceoff_core::PUBLIC_NAME_REFUSED => "Elige otro nombre para las salas públicas",
             crate::online::OFFLINE_MESSAGE => {
                 "No se puede conectar con PieceOff Online. Revisa tu conexión a internet e inténtalo de nuevo."
             }
@@ -197,5 +230,11 @@ mod tests {
                 .starts_with("PieceOff Online usa")
         );
         assert_eq!(serde_json::to_string(&language).unwrap(), "\"spanish\"");
+        assert_eq!(language.text("Room chat"), "Chat de la sala");
+        assert!(
+            language
+                .text(pieceoff_core::REMOVED_BY_HOST)
+                .starts_with("El anfitrión")
+        );
     }
 }

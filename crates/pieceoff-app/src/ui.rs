@@ -5,7 +5,7 @@ pub(crate) const ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
 pub(crate) const ACCENT_FILL: Color32 = Color32::from_rgb(37, 99, 235);
 pub(crate) const SUCCESS: Color32 = Color32::from_rgb(110, 220, 145);
 pub(crate) const WARNING: Color32 = Color32::from_rgb(245, 190, 80);
-const DANGER: Color32 = Color32::from_rgb(240, 110, 110);
+pub(crate) const DANGER: Color32 = Color32::from_rgb(240, 110, 110);
 const PANEL: Color32 = Color32::from_rgb(24, 27, 33);
 const CARD: Color32 = Color32::from_rgb(32, 36, 44);
 const CANVAS: Color32 = Color32::from_rgb(35, 38, 44);
@@ -318,6 +318,8 @@ impl PieceOffApp {
                 self.messages_open = false;
             } else if self.confirm_restart {
                 self.confirm_restart = false;
+            } else if self.confirm_kick.is_some() {
+                self.confirm_kick = None;
             } else {
                 self.selected_pieces.clear();
             }
@@ -429,15 +431,18 @@ impl PieceOffApp {
                         format!("{} (you)", self.player_name)
                     };
                     ui.label(RichText::new(me).strong());
-                    for peer in &self.peers {
-                        ui.label(peer);
+                    for peer in self.peers.clone() {
+                        self.player_row(ui, &peer, is_host);
                     }
                     if self.peers.is_empty() && !self.spectating {
                         ui.weak("Share the invite code to play together.");
                     }
                     if !self.spectators.is_empty() {
                         ui.separator();
-                        ui.weak(format!("Watching: {}", self.spectators.join(", ")));
+                        ui.weak(language.text("Watching"));
+                        for watcher in self.spectators.clone() {
+                            self.player_row(ui, &watcher, is_host);
+                        }
                     }
                     if is_host {
                         ui.separator();
@@ -618,6 +623,8 @@ impl PieceOffApp {
             }
             self.effects_controls(ui);
             self.listed_toggle(ui, is_host);
+            self.chat_toggle(ui, is_host);
+            self.report_room_button(ui, ctx);
             if !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, language.text("Reference image"));
             }
@@ -1317,6 +1324,7 @@ impl PieceOffApp {
                     });
                 });
         }
+        self.kick_window(ctx);
         self.codec_window(ctx);
         self.link_window(ctx);
         if self.help_open {

@@ -80,7 +80,14 @@ The app starts on **Online**: rooms run on PieceOff Online
   joins the busiest room with a free seat, or starts a public room with a
   random built-in puzzle. Tick **List publicly** when creating a room, or use
   **More → Listed publicly** as the host, to show yours there. Public rooms use
-  the built-in puzzles only.
+  the built-in puzzles only, and start with chat off (the host turns it on in
+  **More → Room chat**; pings always work).
+- **Dealing with trouble.** Open the player list in the room toolbar: **Mute**
+  hides a player's chat, pings and cursor on your screen only; the host's
+  **Remove…** sends a player out of the room for good (they can't rejoin it
+  under that name or from that computer). Public rooms refuse rude display
+  names. **More → Report room…** emails contact@pieceoff.app with the room
+  code.
 - **Linking this computer.** The first time you create a room online, the app
   shows a code and an **Open browser** button. Approve the code on
   `pieceoff.app/link` (a quick anti-spam check) and the app carries on; it
