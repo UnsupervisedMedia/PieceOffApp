@@ -58,6 +58,8 @@ mod decoder;
 #[cfg(test)]
 mod e2e;
 mod holders;
+mod i18n;
+mod keyboard_play;
 mod library;
 mod library_ui;
 mod media_tools;
@@ -80,6 +82,7 @@ use controls::*;
 use cursors::*;
 use decoder::*;
 use holders::*;
+use i18n::Language;
 use library::{Library, LibrarySort};
 use net::*;
 use package::*;
@@ -117,7 +120,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             apply_theme(&cc.egui_ctx);
-            Ok(Box::new(PieceOffApp::default()))
+            let app = PieceOffApp::default();
+            cc.egui_ctx.set_zoom_factor(
+                f32::from(app.settings.interface_scale.unwrap_or(100).clamp(100, 150)) / 100.0,
+            );
+            Ok(Box::new(app))
         }),
     )
 }
@@ -197,6 +204,8 @@ struct PieceOffApp {
     cut_style: CutStyle,
     dragging: Option<ActiveDrag>,
     selected_pieces: std::collections::HashSet<u32>,
+    keyboard_play_open: bool,
+    keyboard_piece_id: Option<u32>,
     piece_filter: PieceFilter,
     show_reference: bool,
     show_queue: bool,
@@ -402,6 +411,8 @@ impl Default for PieceOffApp {
             cut_style: CutStyle::Jigsaw,
             dragging: None,
             selected_pieces: std::collections::HashSet::new(),
+            keyboard_play_open: false,
+            keyboard_piece_id: None,
             piece_filter: PieceFilter::All,
             show_reference: false,
             show_queue: false,

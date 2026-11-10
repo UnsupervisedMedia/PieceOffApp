@@ -46,6 +46,86 @@ describe("room media", () => {
     return { code, host, hostToken, uploadToken: welcome.media_upload_token };
   }
 
+  it("revokes the upload token when the last host leaves", async () => {
+    const { code, host, uploadToken } = await hostedRoom();
+    const started = await api(code, "", {
+      method: "POST",
+      headers: { ...bearer(uploadToken), "content-type": "application/json" },
+      body: JSON.stringify({ sha256: FILE_SHA, size: FILE.length, part_size: PART }),
+    });
+    assert.equal(started.status, 200);
+    const { upload_id: uploadId } = await started.json();
+    host.close();
+    assert.equal(await host.waitClosed(), true);
+    const denied = await api(code, `/${uploadId}`, { headers: bearer(uploadToken) });
+    assert.equal(denied.status, 403);
+  });
+
+  it("hands a fresh upload token to the new host and revokes the old one", async () => {
+    const { code, host, uploadToken } = await hostedRoom();
+    const guest = await connect(port, code);
+    guest.send(joinMessage(code, "Guest", undefined, FILE_SHA));
+    const welcome = await guest.next(ofType("welcome"), "guest welcome");
+    const guestId = welcome.client_id;
+    host.close();
+    await guest.next(
+      (frame) => frame.type === "snapshot" && frame.snapshot.host_id === guestId,
+      "host handoff",
+    );
+    const assignment = await guest.next(ofType("media_upload_token"), "new host token");
+    assert.equal(assignment.client_id, guestId);
+    assert.equal(assignment.sha256, FILE_SHA);
+    assert.notEqual(assignment.token, uploadToken);
+    const start = (token) => api(code, "", {
+      method: "POST",
+      headers: { ...bearer(token), "content-type": "application/json" },
+      body: JSON.stringify({ sha256: FILE_SHA, size: FILE.length, part_size: PART }),
+    });
+    assert.equal((await start(uploadToken)).status, 403);
+    assert.equal((await start(assignment.token)).status, 200);
+    guest.close();
+  });
+
+  it("assigns a queued clip to the host and makes it available after upload", async () => {
+    const { code, host } = await hostedRoom();
+    const bytes = Buffer.from("a second short clip");
+    const sha256 = hex(bytes);
+    host.send({
+      type: "queue_add", sha256, extension: "webm", title: "Second clip",
+      width: 640, height: 360, duration_ms: 5000,
+    });
+    await host.next(
+      (frame) => frame.type === "snapshot" && frame.snapshot.queue.some((item) => item.sha256 === sha256),
+      "queued clip",
+    );
+    const assignment = await host.next(ofType("media_upload_token"), "queued upload token");
+    assert.equal(assignment.sha256, sha256);
+    const started = await api(code, "", {
+      method: "POST",
+      headers: { ...bearer(assignment.token), "content-type": "application/json" },
+      body: JSON.stringify({ sha256, size: bytes.length, part_size: bytes.length }),
+    });
+    assert.equal(started.status, 200);
+    const { upload_id: uploadId } = await started.json();
+    const part = await api(code, `/${uploadId}/parts/1`, {
+      method: "PUT",
+      headers: { ...bearer(assignment.token), "x-part-sha256": sha256 },
+      body: bytes,
+    });
+    assert.equal(part.status, 200);
+    const complete = await api(code, `/${uploadId}/complete`, {
+      method: "POST", headers: bearer(assignment.token),
+    });
+    assert.equal(complete.status, 200);
+    const available = await host.next(
+      (frame) => frame.type === "snapshot" &&
+        frame.snapshot.queue.some((item) => item.sha256 === sha256 && item.available),
+      "queued clip available",
+    );
+    assert.equal(available.snapshot.queue.find((item) => item.sha256 === sha256).available, true);
+    host.close();
+  });
+
   it("uploads in parts, resumes after a restart, verifies hashes, and serves ranges", async () => {
     const { code, host, hostToken, uploadToken } = await hostedRoom();
     const guest = await connect(port, code);

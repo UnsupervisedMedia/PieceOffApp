@@ -56,6 +56,19 @@ describe("room worker", () => {
     const joined = await a.next(ofType("peer_joined"), "peer_joined");
     assert.equal(joined.name, "Bee");
 
+    a.send({ type: "cursor", x: 10, y: 20 });
+    const cursor = await b.next(ofType("cursor"), "host cursor");
+    assert.equal(cursor.name, "Host");
+    assert.equal(cursor.client_id, hostId);
+    assert.equal(a.pending(), 0, "a player does not receive their own cursor");
+    b.send({ type: "chat", text: " hello\nroom " });
+    const chatA = await a.next(ofType("chat"), "chat from Bee");
+    const chatB = await b.next(ofType("chat"), "own chat");
+    assert.equal(chatA.text, "hello room");
+    assert.equal(chatA.id, chatB.id);
+    a.send({ type: "ping", x: 12, y: 18 });
+    assert.equal((await b.next(ofType("ping"), "board ping")).name, "Host");
+
     // A takes a piece; both see the lease; B cannot take it.
     a.send({ type: "drag_start", piece_id: 0 });
     const leaseA = await a.next(ofType("pieces_changed"), "lease for A");
@@ -116,6 +129,25 @@ describe("room worker", () => {
     const error = await socket.next(ofType("error"), "room-not-found error");
     assert.equal(error.message, "Room code not found");
     assert.equal(await socket.waitClosed(), true);
+  });
+
+  it("resumes the solve clock in the first welcome after an empty room", async () => {
+    const { code, resume_token } = await createRoom(port);
+    const host = await connect(port, code);
+    host.send(joinMessage(code, "Host", resume_token));
+    await host.next(ofType("welcome"), "host welcome");
+    host.send({ type: "drag_start", piece_id: 0 });
+    await host.next(ofType("pieces_changed"), "clock start");
+    host.send({ type: "drag_end", piece_id: 0, x: 300, y: 200 });
+    await host.next(ofType("pieces_changed"), "clock drop");
+    host.close();
+    assert.equal(await host.waitClosed(), true);
+    const guest = await connect(port, code);
+    guest.send(joinMessage(code, "Guest", undefined, SHA));
+    const welcome = await guest.next(ofType("welcome"), "guest welcome");
+    assert.equal(welcome.snapshot.stats.started, true);
+    assert.equal(typeof welcome.snapshot.stats.running_since_ms, "number");
+    guest.close();
   });
 
   it("rejects a malformed room code before touching a room", async () => {
@@ -215,5 +247,54 @@ describe("room worker", () => {
     } finally {
       await idle.stop();
     }
+  });
+
+  it("keeps spectators out of play and persists claims and timelapse", async () => {
+    const { code, resume_token: hostToken } = await createRoom(port, { player_key: "host-key" });
+    const host = await connect(port, code);
+    host.send({ ...joinMessage(code, "Host", hostToken), player_key: "host-key" });
+    const hostWelcome = await host.next(ofType("welcome"), "host welcome");
+    assert.equal(hostWelcome.spectator, false);
+
+    const watcher = await connect(port, code);
+    watcher.send({ ...joinMessage(code, "Watcher"), spectator: true, player_key: "watch-key" });
+    const watchWelcome = await watcher.next(ofType("welcome"), "spectator welcome");
+    assert.equal(watchWelcome.spectator, true);
+    assert.deepEqual(watchWelcome.peers, ["Host"]);
+    assert.equal((await host.next(ofType("peer_joined"), "spectator joined")).spectator, true);
+    watcher.send({ type: "drag_start", piece_id: 0 });
+    await watcher.next(ofType("error"), "spectator cannot move");
+    watcher.send({ type: "ping", x: 1, y: 1 });
+    await watcher.next(ofType("error"), "spectator cannot ping");
+    watcher.send({ type: "chat", text: "Watching" });
+    assert.equal((await host.next(ofType("chat"), "spectator chat")).text, "Watching");
+
+    host.send({ type: "drag_start", piece_id: 0 });
+    await host.next(ofType("pieces_changed"), "host lease");
+    host.send({ type: "drag_end", piece_id: 0, x: 300, y: 200 });
+    await host.next(ofType("pieces_changed"), "host drop");
+    host.send({ type: "request_timelapse" });
+    const before = await host.next(ofType("timelapse"), "timelapse");
+    assert.ok(before.timelapse.frames.length > 0);
+
+    const imposter = await connect(port, code);
+    imposter.send({ ...joinMessage(code, "Host"), player_key: "other-key" });
+    await imposter.next(ofType("error"), "claimed name refused");
+    imposter.close();
+    watcher.close();
+    host.close();
+    await delay(1000);
+    await server.stop();
+    port = await freePort();
+    server = await startServer(port, persistDir);
+
+    const returner = await connect(port, code);
+    returner.send({ ...joinMessage(code, "Host", hostToken), player_key: "host-key" });
+    const welcome = await returner.next(ofType("welcome"), "host after restart");
+    assert.equal(welcome.name, "Host");
+    returner.send({ type: "request_timelapse" });
+    const after = await returner.next(ofType("timelapse"), "saved timelapse");
+    assert.deepEqual(after.timelapse, before.timelapse);
+    returner.close();
   });
 });

@@ -89,6 +89,41 @@ fn cut_style_hint(style: CutStyle) -> &'static str {
 }
 
 impl PieceOffApp {
+    fn language_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.settings.language.text("Language"), |ui| {
+            for language in [Language::English, Language::Spanish] {
+                if ui
+                    .selectable_label(self.settings.language == language, language.label())
+                    .clicked()
+                {
+                    self.settings.language = language;
+                    self.persist_settings();
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    /// Let players enlarge the interface without changing puzzle board zoom.
+    fn interface_scale_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.settings.language.text("Interface size"), |ui| {
+            for percent in [100, 125, 150] {
+                if ui
+                    .selectable_label(
+                        self.settings.interface_scale.unwrap_or(100) == percent,
+                        format!("{percent}%"),
+                    )
+                    .clicked()
+                {
+                    self.settings.interface_scale = Some(percent);
+                    ui.ctx().set_zoom_factor(f32::from(percent) / 100.0);
+                    self.persist_settings();
+                    ui.close();
+                }
+            }
+        });
+    }
+
     /// Switch the cut style; a grid picked from a preset follows to the same
     /// preset in the new style.
     pub(crate) fn set_cut_style(&mut self, style: CutStyle, aspect: f32) {
@@ -357,6 +392,7 @@ impl PieceOffApp {
     }
 
     fn room_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, is_host: bool) {
+        let language = self.settings.language;
         let Some((code, title, media_available)) = self.snapshot.as_ref().map(|snapshot| {
             (
                 snapshot.invite_code.clone(),
@@ -419,26 +455,26 @@ impl PieceOffApp {
                 },
             );
             if self.spectating {
-                ui.label(RichText::new("Watching").color(ACCENT))
+                ui.label(RichText::new(language.text("Watching")).color(ACCENT))
                     .on_hover_text(
                         "You joined to watch: chat works, pieces and holders do not move",
                     );
             }
         } else if self.network.is_some() {
             status_dot(ui, WARNING);
-            ui.colored_label(WARNING, "Connecting…");
+            ui.colored_label(WARNING, language.text("Connecting…"));
         } else {
             status_dot(ui, DANGER);
-            ui.colored_label(DANGER, "Offline");
-            if ui.button("Rejoin").clicked() {
+            ui.colored_label(DANGER, language.text("Offline"));
+            if ui.button(language.text("Rejoin")).clicked() {
                 self.join_room();
             }
         }
         if self.media_uploading {
             ui.spinner();
-            ui.label("Uploading media…");
+            ui.label(language.text("Uploading media…"));
         } else if !media_available {
-            ui.colored_label(WARNING, "Media only on this device")
+            ui.colored_label(WARNING, language.text("Media only on this device"))
                 .on_hover_text("Other players cannot download the media from the server yet.");
         }
         ui.separator();
@@ -471,7 +507,11 @@ impl PieceOffApp {
             ),
         ] {
             let hint = self.hint_with_keys(hint, action);
-            if ui.button(label).on_hover_text(hint).clicked() {
+            if ui
+                .button(language.text(label))
+                .on_hover_text(hint)
+                .clicked()
+            {
                 self.view_command = Some(command);
             }
         }
@@ -481,7 +521,7 @@ impl PieceOffApp {
             "Lock the board so it cannot be panned or zoomed"
         };
         if ui
-            .selectable_label(self.settings.lock_view, "Lock")
+            .selectable_label(self.settings.lock_view, language.text("Lock"))
             .on_hover_text(lock_hint)
             .clicked()
         {
@@ -505,7 +545,7 @@ impl PieceOffApp {
         }
         ui.separator();
         if !self.spectating {
-            ui.menu_button("Arrange", |ui| {
+            ui.menu_button(language.text("Arrange"), |ui| {
                 if ui
                     .button("Edges first")
                     .on_hover_text(self.hint_with_keys(
@@ -532,11 +572,15 @@ impl PieceOffApp {
             })
             .response
             .on_hover_text("Tidy the loose pieces in the tray");
-            ui.menu_button("Holders", |ui| self.holders_menu(ui, is_host))
-                .response
-                .on_hover_text("Your own sorting areas on the table");
+            ui.menu_button(language.text("Holders"), |ui| {
+                self.holders_menu(ui, is_host)
+            })
+            .response
+            .on_hover_text("Your own sorting areas on the table");
         }
-        ui.menu_button("More", |ui| {
+        ui.menu_button(language.text("More"), |ui| {
+            self.language_menu(ui);
+            self.interface_scale_menu(ui);
             let mut ghost = self.settings.show_ghost;
             if ui
                 .checkbox(
@@ -569,14 +613,18 @@ impl PieceOffApp {
             }
             self.effects_controls(ui);
             if !self.is_video && self.media_ready {
-                ui.checkbox(&mut self.show_reference, "Reference image");
+                ui.checkbox(&mut self.show_reference, language.text("Reference image"));
             }
-            if ui.button("Controls…").clicked() {
+            if ui.button(language.text("Controls…")).clicked() {
                 ui.close();
                 self.controls_open = true;
             }
+            if ui.button(language.text("Keyboard play…")).clicked() {
+                ui.close();
+                self.keyboard_play_open = true;
+            }
             if ui
-                .button("Watch timelapse")
+                .button(language.text("Watch timelapse"))
                 .on_hover_text(
                     "Replay this solve so far from the scattered start, on your screen only",
                 )
@@ -589,7 +637,7 @@ impl PieceOffApp {
             if ui
                 .add_enabled(
                     self.media_path.is_some(),
-                    egui::Button::new("Save package…"),
+                    egui::Button::new(language.text("Save package…")),
                 )
                 .clicked()
             {
@@ -597,9 +645,9 @@ impl PieceOffApp {
                 self.save_package();
             }
             let library_label = if self.library_entry_id.is_some() {
-                "Update library copy"
+                language.text("Update library copy")
             } else {
-                "Save to library"
+                language.text("Save to library")
             };
             if ui
                 .add_enabled(self.media_path.is_some(), egui::Button::new(library_label))
@@ -611,7 +659,7 @@ impl PieceOffApp {
             }
             if self.is_video
                 && ui
-                    .button("Restart video")
+                    .button(language.text("Restart video"))
                     .on_hover_text("Start the video decoder again if the picture has frozen")
                     .clicked()
             {
@@ -644,7 +692,10 @@ impl PieceOffApp {
         }
         ui.add_space(ui.available_width());
         if ui
-            .add(egui::Button::new(RichText::new("Leave").color(Color32::WHITE)).fill(DANGER))
+            .add(
+                egui::Button::new(RichText::new(language.text("Leave")).color(Color32::WHITE))
+                    .fill(DANGER),
+            )
             .on_hover_text("Leave this room")
             .clicked()
         {
@@ -654,17 +705,18 @@ impl PieceOffApp {
 
     /// The start screen's side panel: pick media, create a room, or join one.
     fn lobby_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let language = self.settings.language;
         let idle = self.network.is_none() && self.probe_rx.is_none();
-        card(ui, "Start a puzzle", |ui| {
+        card(ui, language.text("Start a puzzle"), |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(idle, egui::Button::new("Choose media…"))
+                    .add_enabled(idle, egui::Button::new(language.text("Choose media…")))
                     .clicked()
                 {
                     self.choose_media(ctx);
                 }
                 if ui
-                    .add_enabled(idle, egui::Button::new("Open package…"))
+                    .add_enabled(idle, egui::Button::new(language.text("Open package…")))
                     .clicked()
                 {
                     self.open_package(ctx);
@@ -673,7 +725,7 @@ impl PieceOffApp {
             if self.media_path.is_some()
                 && idle
                 && ui
-                    .small_button("Back to library")
+                    .small_button(language.text("Back to library"))
                     .on_hover_text("Drop this media and browse your saved puzzles")
                     .clicked()
             {
@@ -685,7 +737,7 @@ impl PieceOffApp {
                     .unwrap_or("media")
                     .to_owned()
             }) else {
-                ui.weak("Pick an image or video, or drop one on the window.");
+                ui.weak(language.text("Pick an image or video, or drop one on the window."));
                 return;
             };
             ui.label(format!(
@@ -693,11 +745,11 @@ impl PieceOffApp {
                 self.media_size.0, self.media_size.1
             ));
             ui.add_space(4.0);
-            ui.label("Title");
+            ui.label(language.text("Title"));
             ui.add(egui::TextEdit::singleline(&mut self.title).desired_width(f32::INFINITY));
             if self.pending_snapshot.is_none() {
                 let aspect = self.media_size.0 as f32 / self.media_size.1.max(1) as f32;
-                ui.label("Cut");
+                ui.label(language.text("Cut"));
                 ui.horizontal(|ui| {
                     for style in CutStyle::ALL {
                         if ui
@@ -709,7 +761,7 @@ impl PieceOffApp {
                         }
                     }
                 });
-                ui.label("Pieces");
+                ui.label(language.text("Pieces"));
                 ui.horizontal(|ui| {
                     for (label, count) in PIECE_PRESETS {
                         let grid = grid_for_style(count, aspect, self.cut_style);
@@ -739,13 +791,13 @@ impl PieceOffApp {
                     ui.weak(format!("{} pieces", self.rows * self.columns));
                 });
             } else {
-                ui.weak("This package keeps its saved pieces and progress.");
+                ui.weak(language.text("This package keeps its saved pieces and progress."));
             }
             ui.add_space(6.0);
             let label = if self.pending_snapshot.is_some() {
-                "Create room from package"
+                language.text("Create room from package")
             } else {
-                "Create room"
+                language.text("Create room")
             };
             if primary_button(ui, self.network.is_none(), label).clicked() {
                 self.create_room();
@@ -754,11 +806,11 @@ impl PieceOffApp {
         ui.add_space(8.0);
         self.server_card(ui);
         ui.add_space(8.0);
-        card(ui, "Join a room", |ui| {
+        card(ui, language.text("Join a room"), |ui| {
             ui.horizontal(|ui| {
                 let code = ui.add(
                     egui::TextEdit::singleline(&mut self.invite_code)
-                        .hint_text("Invite code")
+                        .hint_text(language.text("Invite code"))
                         .font(egui::TextStyle::Monospace)
                         .desired_width(120.0),
                 );
@@ -766,22 +818,22 @@ impl PieceOffApp {
                     code.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                 let join = ui.add_enabled(
                     self.network.is_none() && !self.invite_code.trim().is_empty(),
-                    egui::Button::new("Join"),
+                    egui::Button::new(language.text("Join")),
                 );
                 if join.clicked() || (submitted && self.network.is_none()) {
                     self.join_room();
                 }
             });
-            ui.checkbox(&mut self.watch_only, "Watch only")
+            ui.checkbox(&mut self.watch_only, language.text("Watch only"))
                 .on_hover_text("Join as a spectator: see the room and chat, without moving pieces or counting as a player");
             if !self.recent_rooms.is_empty() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.weak("Recent rooms");
+                    ui.weak(language.text("Recent rooms"));
                     if self.recent_room_selection.is_some()
                         && self.network.is_none()
                         && ui
-                            .small_button("Forget")
+                            .small_button(language.text("Forget"))
                             .on_hover_text("Remove the selected room from this list")
                             .clicked()
                     {
@@ -805,12 +857,14 @@ impl PieceOffApp {
             }
         });
         ui.add_space(8.0);
-        card(ui, "You", |ui| {
-            ui.label("Name");
+        card(ui, language.text("You"), |ui| {
+            ui.label(language.text("Name"));
             ui.add(egui::TextEdit::singleline(&mut self.player_name).desired_width(f32::INFINITY));
-            if ui.button("Controls…").clicked() {
+            if ui.button(language.text("Controls…")).clicked() {
                 self.controls_open = true;
             }
+            self.interface_scale_menu(ui);
+            self.language_menu(ui);
             self.media_tools_section(ui);
         });
         ui.add_space(8.0);
@@ -825,7 +879,8 @@ impl PieceOffApp {
     /// Where rooms are hosted and joined: this device by default, or any
     /// `host`, `host:port` or `ws(s)://` address.
     fn server_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "Room server", |ui| {
+        let language = self.settings.language;
+        card(ui, language.text("Room server"), |ui| {
             ui.horizontal(|ui| {
                 let field = ui
                     .add(
@@ -841,7 +896,10 @@ impl PieceOffApp {
                     self.commit_server_url_if_edited();
                 }
                 if ui
-                    .add_enabled(self.network.is_none(), egui::Button::new("Reset"))
+                    .add_enabled(
+                        self.network.is_none(),
+                        egui::Button::new(language.text("Reset")),
+                    )
                     .on_hover_text("Use the server on this device")
                     .clicked()
                 {
@@ -1274,6 +1332,9 @@ impl PieceOffApp {
         }
         if self.controls_open {
             self.controls_window(ctx);
+        }
+        if in_room && !self.spectating && self.replay.is_none() {
+            self.keyboard_play_window(ctx);
         }
         if self.messages_open {
             self.messages_window(ctx);

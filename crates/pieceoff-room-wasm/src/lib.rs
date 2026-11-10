@@ -1,4 +1,4 @@
-use pieceoff_core::{ClientMessage, RoomRuntime, RoomSnapshot, ServerMessage};
+use pieceoff_core::{ClientMessage, RoomRuntime, RoomSnapshot, ServerMessage, StoredRoom};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -50,6 +50,15 @@ struct JoinReply {
 }
 
 #[derive(Serialize)]
+struct JoinV14Reply {
+    name: String,
+    promoted_to_host: bool,
+    needs_upload_token: bool,
+    spectator: bool,
+    replaced: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct AssignmentReply {
     client_id: String,
     sha256: String,
@@ -60,6 +69,12 @@ struct LeaveReply {
     name: String,
     snapshot: Option<RoomSnapshot>,
     upload_assignment: Option<AssignmentReply>,
+}
+
+#[derive(Serialize)]
+struct TickReply {
+    events: Vec<ServerMessage>,
+    persist: bool,
 }
 
 fn reply(reply: Reply) -> String {
@@ -83,11 +98,16 @@ impl Room {
     }
 
     pub fn from_snapshot(snapshot_json: &str) -> Result<Room, JsError> {
-        let snapshot: RoomSnapshot =
+        let stored: StoredRoom =
             serde_json::from_str(snapshot_json).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Room {
-            runtime: RoomRuntime::from_snapshot(snapshot),
-        })
+        let mut runtime = RoomRuntime::from_snapshot(stored.snapshot);
+        runtime.name_claims = stored.name_claims;
+        runtime.name_claims.truncate(pieceoff_core::MAX_NAME_CLAIMS);
+        runtime.timelapse = stored.timelapse;
+        if let Some(snapshot) = runtime.snapshot.as_ref() {
+            runtime.timelapse.sanitize(snapshot);
+        }
+        Ok(Room { runtime })
     }
 
     pub fn snapshot_json(&self) -> String {
@@ -96,11 +116,11 @@ impl Room {
 
     /// The snapshot to save at `now_ms`, with the solve clock banked.
     pub fn stored_snapshot_json(&self, now_ms: f64) -> String {
-        let stored = self
-            .runtime
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.for_storage(clock(now_ms)));
+        let stored = self.runtime.snapshot.as_ref().map(|snapshot| StoredRoom {
+            snapshot: snapshot.for_storage(clock(now_ms)),
+            name_claims: self.runtime.name_claims.clone(),
+            timelapse: self.runtime.timelapse.clone(),
+        });
         serde_json::to_string(&stored).unwrap_or_else(|_| "null".into())
     }
 
@@ -108,6 +128,22 @@ impl Room {
     /// while someone is.
     pub fn set_occupied(&mut self, occupied: bool, now_ms: f64) {
         self.runtime.set_occupied(occupied, clock(now_ms));
+    }
+
+    /// Update the solve clock after membership changes and return a snapshot
+    /// when spectators or other players need to see the transition.
+    pub fn sync_occupied(&mut self, now_ms: f64) -> Option<String> {
+        let before = self.runtime.snapshot.as_ref()?.stats.clone();
+        self.runtime.sync_clock_to_players(clock(now_ms));
+        let snapshot = self.runtime.snapshot.as_mut()?;
+        if snapshot.stats == before {
+            return None;
+        }
+        snapshot.revision += 1;
+        serde_json::to_string(&ServerMessage::Snapshot {
+            snapshot: snapshot.clone(),
+        })
+        .ok()
     }
 
     pub fn handle(&mut self, client_id: &str, message_json: &str, now_ms: f64) -> String {
@@ -121,6 +157,21 @@ impl Room {
                 persist: out.persist,
             }),
             Err(message) => reply(Reply::Err(message)),
+        }
+    }
+
+    /// Validate a cursor, chat line or ping without changing the saved room.
+    pub fn relay(&self, client_id: &str, message_json: &str, chat_id: f64, now_ms: f64) -> String {
+        let message: ClientMessage = match serde_json::from_str(message_json) {
+            Ok(message) => message,
+            Err(e) => return err_reply(format!("Bad message: {e}")),
+        };
+        match self
+            .runtime
+            .relay(client_id, message, clock(chat_id), clock(now_ms))
+        {
+            Ok(event) => ok_reply(event),
+            Err(message) => err_reply(message),
         }
     }
 
@@ -157,10 +208,83 @@ impl Room {
         }
     }
 
+    /// Join with protocol v14 identity and spectator semantics.
+    pub fn join_v14(
+        &mut self,
+        client_id: &str,
+        name: &str,
+        media_sha256: &str,
+        key_hash: &str,
+        spectator: bool,
+        now_ms: f64,
+    ) -> String {
+        let Some(snapshot) = self.runtime.snapshot.as_ref() else {
+            return err_reply("Room is not ready");
+        };
+        if media_sha256 != snapshot.media_sha256 && !snapshot.media_available {
+            return err_reply(
+                "The room media is still uploading. Wait for the host and try joining again.",
+            );
+        }
+        let name = pieceoff_core::clean_name(name);
+        let key_hash = (!key_hash.is_empty()).then_some(key_hash);
+        if spectator {
+            return match self.runtime.admit_spectator(client_id, &name, key_hash) {
+                Ok(()) => ok_reply(JoinV14Reply {
+                    name,
+                    promoted_to_host: false,
+                    needs_upload_token: false,
+                    spectator: true,
+                    replaced: Vec::new(),
+                }),
+                Err(message) => err_reply(message),
+            };
+        }
+        let replaced = match self
+            .runtime
+            .admit_player(client_id, &name, key_hash, clock(now_ms))
+        {
+            Ok(replaced) => replaced,
+            Err(message) => return err_reply(message),
+        };
+        match self.runtime.join(client_id, &name, media_sha256) {
+            Ok(outcome) => ok_reply(JoinV14Reply {
+                name: outcome.name,
+                promoted_to_host: outcome.promoted_to_host,
+                needs_upload_token: outcome.needs_upload_token,
+                spectator: false,
+                replaced,
+            }),
+            Err(message) => err_reply(message),
+        }
+    }
+
+    pub fn claim_creator(&mut self, client_id: &str, key_hash: &str, now_ms: f64) -> String {
+        let Some(name) = self.runtime.names.get(client_id).cloned() else {
+            return err_reply("Creator is not in this room");
+        };
+        match self.runtime.admit_player(
+            client_id,
+            &name,
+            (!key_hash.is_empty()).then_some(key_hash),
+            clock(now_ms),
+        ) {
+            Ok(_) => ok_reply(()),
+            Err(message) => err_reply(message),
+        }
+    }
+
     /// Remove a player. The reply tells the host which events to send:
     /// `peer_left`, then `snapshot` if present, then an upload token for
     /// `upload_assignment` if present.
     pub fn leave(&mut self, client_id: &str, fallback_name: &str) -> String {
+        if let Some(name) = self.runtime.spectators.remove(client_id) {
+            return ok_reply(LeaveReply {
+                name,
+                snapshot: None,
+                upload_assignment: None,
+            });
+        }
         let outcome = self.runtime.leave(client_id, fallback_name);
         ok_reply(LeaveReply {
             name: outcome.name,
@@ -181,10 +305,54 @@ impl Room {
         media_upload_token: Option<String>,
     ) -> String {
         match self.runtime.welcome(client_id, name, media_upload_token) {
-            Ok(event) => serde_json::to_string(&event)
-                .unwrap_or_else(|_| r#"{"err":"encode failed"}"#.into()),
+            Ok(mut event) => {
+                if let ServerMessage::Welcome {
+                    spectator,
+                    spectators,
+                    server_now_ms,
+                    ..
+                } = &mut event
+                {
+                    *spectator = self.runtime.is_spectator(client_id);
+                    *spectators = self
+                        .runtime
+                        .spectators
+                        .iter()
+                        .filter(|(id, _)| id.as_str() != client_id)
+                        .map(|(_, name)| name.clone())
+                        .collect();
+                    *server_now_ms = 0;
+                }
+                serde_json::to_string(&event)
+                    .unwrap_or_else(|_| r#"{"err":"encode failed"}"#.into())
+            }
             Err(message) => err_reply(message),
         }
+    }
+
+    pub fn welcome_v14(
+        &self,
+        client_id: &str,
+        name: &str,
+        media_upload_token: Option<String>,
+        now_ms: f64,
+    ) -> String {
+        let json = self.welcome(client_id, name, media_upload_token);
+        let Ok(mut event) = serde_json::from_str::<ServerMessage>(&json) else {
+            return json;
+        };
+        if let ServerMessage::Welcome { server_now_ms, .. } = &mut event {
+            *server_now_ms = clock(now_ms);
+        }
+        serde_json::to_string(&event).unwrap_or(json)
+    }
+
+    /// The current solve's replay, answered only to the requesting connection.
+    pub fn timelapse_event(&self) -> String {
+        serde_json::to_string(&ServerMessage::Timelapse {
+            timelapse: self.runtime.timelapse.clone(),
+        })
+        .unwrap_or_else(|_| r#"{"err":"encode failed"}"#.into())
     }
 
     /// Media with this fingerprint finished uploading. The reply carries the
@@ -214,10 +382,13 @@ impl Room {
 
     /// Record a player whose WebSocket survived hibernation, without the
     /// checks `join` makes. Used when rebuilding a room from storage.
-    pub fn restore_player(&mut self, client_id: &str, name: &str) {
-        self.runtime
-            .names
-            .insert(client_id.to_owned(), pieceoff_core::clean_name(name));
+    pub fn restore_player(&mut self, client_id: &str, name: &str, spectator: bool) {
+        let roster = if spectator {
+            &mut self.runtime.spectators
+        } else {
+            &mut self.runtime.names
+        };
+        roster.insert(client_id.to_owned(), pieceoff_core::clean_name(name));
     }
 
     pub fn peer_count(&self) -> u32 {
@@ -229,6 +400,21 @@ impl Room {
         self.runtime
             .tick_advance(clock(now_ms))
             .and_then(|snapshot| serde_json::to_string(&ServerMessage::Snapshot { snapshot }).ok())
+    }
+
+    /// Server-owned room maintenance, including claims and holders.
+    pub fn tick_v14(&mut self, now_ms: f64) -> String {
+        let now = clock(now_ms);
+        let mut events = Vec::new();
+        if let Some(snapshot) = self.runtime.tick_advance(now) {
+            events.push(ServerMessage::Snapshot { snapshot });
+        }
+        let claims_changed = self.runtime.tick_claims(now);
+        if let Some(event) = self.runtime.tick_holders(now) {
+            events.push(event);
+        }
+        let persist = claims_changed || !events.is_empty();
+        ok_reply(TickReply { events, persist })
     }
 }
 
@@ -409,7 +595,7 @@ mod tests {
     fn restore_player_rebuilds_the_roster_and_deadline_is_exposed() {
         let mut room = created();
         assert_eq!(room.peer_count(), 0);
-        room.restore_player("p1", "Pat");
+        room.restore_player("p1", "Pat", false);
         assert_eq!(room.peer_count(), 1);
         assert_eq!(room.next_tick_deadline(0.0), -1.0);
     }

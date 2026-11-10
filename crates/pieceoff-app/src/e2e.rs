@@ -1020,6 +1020,16 @@ fn queue_swap_advance_and_lock_across_two_clients() {
         },
     );
 
+    // Pause first: with repeat All, a slow run could otherwise reach the end
+    // of the clip and legitimately advance during the lock check below.
+    host.app.publish_playback(false, 0);
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the pause to reach both players",
+        |p| !p[0].snapshot().playback.playing && !p[1].snapshot().playback.playing,
+    );
+
     // Locked: the host's own swap is refused.
     host.app.send(ClientMessage::SetVideoLock { locked: true });
     pump(

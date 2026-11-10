@@ -184,6 +184,11 @@ share codes only with the people you want in the room.
 Shortcuts can be rebound in **More → Controls…**. The board also has **All**,
 **Edges**, and **Interior** tray filters, **Arrange** for loose pieces, and
 **Holders** to make, rename, and remove holders.
+The start screen and **More** menu offer interface size and an English/Spanish
+language setting; Spanish currently covers the create/join flow and main room
+controls, with remaining text in English.
+**More → Keyboard play…** offers focusable piece selection and move buttons
+for playing without dragging a pointer.
 Press **F1** or **?** in the app for the complete shortcut list.
 
 ## Build and develop

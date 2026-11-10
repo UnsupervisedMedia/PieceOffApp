@@ -32,7 +32,7 @@ async function fakeVerifier() {
     req.on("end", () => {
       const token = new URLSearchParams(data).get("response");
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: token === "good-token" }));
+      res.end(JSON.stringify({ success: token === "good-token", hostname: "play.example", action: "create_room" }));
     });
   });
   await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
@@ -49,6 +49,7 @@ describe("room creation gate", () => {
     const port = await boot({
       DEV_ALLOW_UNVERIFIED_CREATE: 0,
       TURNSTILE_SECRET: "secret",
+      TURNSTILE_HOSTNAME: "play.example",
       TURNSTILE_VERIFY_URL: verifyUrl,
     });
     assert.equal((await post(port)).status, 403, "no token");
@@ -63,6 +64,7 @@ describe("room creation gate", () => {
     const port = await boot({
       DEV_ALLOW_UNVERIFIED_CREATE: 0,
       TURNSTILE_SECRET: "secret",
+      TURNSTILE_HOSTNAME: "play.example",
       TURNSTILE_VERIFY_URL: `http://127.0.0.1:${dead}/verify`,
     });
     assert.equal((await post(port, { "x-turnstile-token": "good-token" })).status, 403);

@@ -44,10 +44,17 @@ export async function verifyTurnstile(options: {
   secret: string;
   token: string;
   ip: string;
+  expectedHostname: string;
+  expectedAction: string;
   url?: string;
   fetcher?: typeof fetch;
 }): Promise<boolean> {
-  if (options.token.length === 0 || options.secret.length === 0) return false;
+  if (
+    options.token.length === 0 ||
+    options.secret.length === 0 ||
+    options.expectedHostname.length === 0 ||
+    options.expectedAction.length === 0
+  ) return false;
   const form = new URLSearchParams({ secret: options.secret, response: options.token });
   if (options.ip.length > 0) form.set("remoteip", options.ip);
   try {
@@ -57,8 +64,14 @@ export async function verifyTurnstile(options: {
       signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
     });
     if (response.status !== 200) return false;
-    const result = (await response.json()) as { success?: unknown };
-    return result.success === true;
+    const result = (await response.json()) as {
+      success?: unknown;
+      hostname?: unknown;
+      action?: unknown;
+    };
+    return result.success === true &&
+      result.hostname === options.expectedHostname &&
+      result.action === options.expectedAction;
   } catch {
     return false;
   }
