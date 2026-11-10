@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 mod apply;
 mod membership;
+mod relay;
 pub use apply::ApplyOutcome;
 pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
 mod sanitize;

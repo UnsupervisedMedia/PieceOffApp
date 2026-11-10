@@ -49,6 +49,8 @@ async function checkCreateAllowed(request: Request, env: Env): Promise<Response 
       secret: env.TURNSTILE_SECRET,
       token: request.headers.get("x-turnstile-token") ?? "",
       ip: ip === "local" ? "" : ip,
+      expectedHostname: env.TURNSTILE_HOSTNAME ?? "",
+      expectedAction: "create_room",
       url: trustedVerifyUrl(env.TURNSTILE_VERIFY_URL),
     });
     return ok ? null : json({ error: "Verification failed" }, 403);
@@ -108,12 +110,10 @@ export default {
       if (!CODE_RE.test(code)) return json({ error: "Room code not found" }, 404);
       const refused = checkOrigin(request, env);
       if (refused) return refused;
+      // Budget every code lookup before allocating or contacting its Durable Object.
+      const { success } = await env.LOOKUP_LIMITER.limit({ key: clientIp(request) });
+      if (!success) return json({ error: "Too many lookups. Try again later." }, 429);
       const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
-      // Guessing codes is the only way to find a room: budget the misses.
-      if (!(await stub.exists())) {
-        const { success } = await env.LOOKUP_LIMITER.limit({ key: clientIp(request) });
-        if (!success) return json({ error: "Too many lookups. Try again later." }, 429);
-      }
       return stub.fetch(request);
     }
     return new Response("Not found", { status: 404 });

@@ -13,6 +13,24 @@ use super::*;
 use pieceoff_server::{RunningServer, config::Config};
 use std::hash::{Hash, Hasher};
 
+/// Start a server again on the address the previous one used. macOS can keep
+/// the port briefly after the old listener closes, so retry `AddrInUse` for
+/// a few seconds instead of failing the test.
+fn restart_server(config: &Config) -> RunningServer {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match RunningServer::start(config) {
+            Ok(server) => return server,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("restart the server: {error}"),
+        }
+    }
+}
+
 const STEP: Duration = Duration::from_millis(4);
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
@@ -379,7 +397,7 @@ fn two_players_solve_a_looping_video_leave_rejoin_and_survive_a_server_restart()
     server.stop();
     let mut restarted = config.clone();
     restarted.bind = server_address(&url);
-    let server = RunningServer::start(&restarted).unwrap();
+    let server = restart_server(&restarted);
     pump(
         &mut [&mut host, &mut guest],
         Duration::from_secs(40),
@@ -487,7 +505,7 @@ fn a_server_crash_keeps_every_dropped_piece_and_frees_the_one_in_flight() {
     server.crash();
     let mut restarted = config.clone();
     restarted.bind = server_address(&url);
-    let server = RunningServer::start(&restarted).unwrap();
+    let server = restart_server(&restarted);
     pump(
         &mut [&mut host, &mut guest],
         Duration::from_secs(40),
@@ -553,7 +571,7 @@ fn a_room_the_server_no_longer_has_stops_the_reconnect_loop_and_keeps_the_work_l
     std::fs::remove_dir_all(&config.data_dir).unwrap();
     let mut restarted = config.clone();
     restarted.bind = server_address(&url);
-    let server = RunningServer::start(&restarted).unwrap();
+    let server = restart_server(&restarted);
 
     pump(
         &mut [&mut host],
@@ -1018,6 +1036,16 @@ fn queue_swap_advance_and_lock_across_two_clients() {
                 && p[1].app.media_hash == hash_a
                 && p[1].snapshot().playback.playing
         },
+    );
+
+    // Pause first: with repeat All, a slow run could otherwise reach the end
+    // of the clip and legitimately advance during the lock check below.
+    host.app.publish_playback(false, 0);
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(10),
+        "the pause to reach both players",
+        |p| !p[0].snapshot().playback.playing && !p[1].snapshot().playback.playing,
     );
 
     // Locked: the host's own swap is refused.

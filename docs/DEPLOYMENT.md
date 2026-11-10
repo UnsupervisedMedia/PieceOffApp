@@ -161,7 +161,10 @@ public (everyone sees the host's id), so it proves nothing; to come back as the
 same player, including the creator claiming the host role, put the
 `resume_token` in the `join_room` frame. Every `welcome` carries the joiner's
 own token; the server stores only its hash, and keeps the newest 64 for players
-who have left. Clients send the text `ping` about every 20 seconds and get
+who have left. Protocol v14 spectators, name claims, room cursors, chat, board
+pings, and timelapse requests use the shared Rust room rules. Name claims and
+timelapse are saved with the room; chat and cursors are ephemeral. Clients
+send the text `ping` about every 20 seconds and get
 `pong`.
 
 Media (`/api/rooms/<CODE>/media...`, bearer tokens in `Authorization`):
@@ -197,12 +200,15 @@ closed), `IDLE_CLEANUP_MS` (3600000, an empty room is deleted after this),
 `ROOM_MEDIA_QUOTA_BYTES` (1 GiB per room, stored plus in flight),
 `MAX_MEDIA_BYTES`, `MEDIA_MIN_PART_BYTES`, `MEDIA_MAX_PART_BYTES`,
 `ALLOWED_ORIGINS` (comma separated browser origins besides the site's own),
+`TURNSTILE_HOSTNAME` (the exact hostname of the room-creation widget; required
+when Turnstile is enabled),
 `TURNSTILE_VERIFY_URL` (tests only). Secrets: `TURNSTILE_SECRET`
 (`wrangler secret put`, never committed). `DEV_ALLOW_UNVERIFIED_CREATE=1`
 skips Turnstile for local runs only; without a secret and without that flag,
 creation is refused. Bindings: Durable Object `ROOMS` (SQLite), R2 `MEDIA`
 (bucket `pieceoff-media`), rate limits `CREATE_LIMITER` (10 rooms per minute
-per address) and `LOOKUP_LIMITER` (20 misses per minute per address).
+per address) and `LOOKUP_LIMITER` (20 room-code socket requests per minute per
+address, checked before contacting a room Durable Object).
 
 ### Local testing and production
 

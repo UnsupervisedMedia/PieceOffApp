@@ -8,6 +8,8 @@ export interface Env {
   LOOKUP_LIMITER: RateLimit;
   /** Turnstile secret key (`wrangler secret put TURNSTILE_SECRET`). */
   TURNSTILE_SECRET?: string;
+  /** Exact hostname where the room-creation widget runs. */
+  TURNSTILE_HOSTNAME?: string;
   /** Override for tests; defaults to Cloudflare's siteverify endpoint. */
   TURNSTILE_VERIFY_URL?: string;
   /** "1" lets room creation skip Turnstile. Local development only. */

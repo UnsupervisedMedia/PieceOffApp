@@ -52,6 +52,10 @@ pub(crate) struct Settings {
     pub(crate) hide_peer_cursors: bool,
     /// Hide the solve clock in the progress readout. Off by default.
     pub(crate) hide_solve_timer: bool,
+    /// Interface size as a percentage; board zoom remains independent.
+    pub(crate) interface_scale: Option<u8>,
+    /// Language for app controls; room content and player text stay unchanged.
+    pub(crate) language: Language,
     /// Last name and server used to enter a room.
     pub(crate) player_name: Option<String>,
     pub(crate) server_url: Option<String>,

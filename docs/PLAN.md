@@ -26,12 +26,14 @@ the [licensing and hosted-service model](LICENSING.md).
 
 The optional managed service at `pieceoff.app` runs the same room rules as the
 self-hosted server: one Rust room core, hosted by axum or by a Cloudflare
-Durable Object, with media in R2. Status as of 2026-10-22:
+Durable Object, with media in R2. Status as of 2026-11-05:
 
 - **Done.** Room rules (`RoomRuntime::apply`) and a wasm room crate in core
   (#18, merged). Join/leave/host handoff in core, plus a TypeScript Durable
   Object host with hibernating sockets, SQLite write-behind, reconnect with a
-  secret resume token, and liveness sweeps. Resumable multipart media in R2
+  secret resume token, and liveness sweeps. Protocol v14 spectators, name
+  claims, and solve timelapse now run in the hosted core, with claims and
+  timelapse saved alongside the room snapshot. Resumable multipart media in R2
   with quota and ranged download, expiry of empty and unclaimed rooms with R2
   cleanup, and Turnstile, rate limits, origin checks and socket caps. The
   worker has unit and integration tests against a local `wrangler dev`
@@ -40,13 +42,14 @@ Durable Object, with media in R2. Status as of 2026-10-22:
   the Turnstile widget and secret, and wire the rooms Worker into the connected
   GitHub to Cloudflare Workers Builds path (no direct `wrangler deploy`).
   Nothing has been deployed.
-- **Next: Plan 1C.** Protocol v9 (`seed_sha256`, `still_sha256`, owner and
-  source fields); completion still and release of the finished video so a solved
+- **Next: Plan 1C media lifecycle.** The earlier protocol v9 sketch is stale;
+  the current wire protocol is v14. Decide the schema change for `seed_sha256`,
+  `still_sha256`, owner and source fields; completion still and release of the
+  finished video so a solved
   room keeps only a still; restart of a released item accepted only if the
-  re-upload matches `seed_sha256`; quota-freeing media deletion. Move ephemeral
-  messages (cursors, chat, pings) behind a shared core `relay()` so the Durable
-  Object host relays them like the axum server does; the wasm `Room` currently
-  answers those with an error.
+  re-upload matches `seed_sha256`; quota-freeing media deletion. Ephemeral
+  cursors, chat and pings now pass through shared Rust relay validation in the
+  Durable Object, with host-side rate limits and in-memory chat history.
 - **Later: Plan 1D, web client.** egui compiled to WASM sharing the desktop board
   code, a browser `MediaDecoderBackend` (hidden `<video>` uploaded to GL through
   an `egui_glow` paint callback; the spike measured 60 fps at 400 pieces),
@@ -54,10 +57,8 @@ Durable Object, with media in R2. Status as of 2026-10-22:
   widget, and a measured cold-load size. Desktop browsers only for v1; a
   phone/tablet client and joining self-hosted servers from the web client are
   out of scope for now.
-- **Known gaps to schedule.** The upload token is not rotated when a host
-  leaves with nobody to take over; unknown-room lookups reach the Durable
-  Object before the lookup limiter; Turnstile `hostname` and `action` are not
-  checked; one wasm instance is shared by all rooms in an isolate; native
+- **Known gaps to schedule.** A wasm module is shared by all rooms in an
+  isolate; verify that a trap in one room cannot affect another. Native
   Windows and macOS launches are still unverified. The design spec and plans
   for this work live in `docs/superpowers/`, which is gitignored, so they exist
   only on the author's machine until that is decided.

@@ -28,16 +28,16 @@ describe("originAllowed", () => {
 
 describe("verifyTurnstile", () => {
   const ok = (body) => async () => new Response(JSON.stringify(body), { status: 200 });
-  const args = { secret: "s", token: "t", ip: "1.2.3.4", url: "https://verify.test/x" };
+  const args = { secret: "s", token: "t", ip: "1.2.3.4", expectedHostname: "pieceoff.example", expectedAction: "create_room", url: "https://verify.test/x" };
 
   it("accepts when the service says success", async () => {
-    assert.equal(await verifyTurnstile({ ...args, fetcher: ok({ success: true }) }), true);
+    assert.equal(await verifyTurnstile({ ...args, fetcher: ok({ success: true, hostname: "pieceoff.example", action: "create_room" }) }), true);
   });
   it("sends the secret, token and client address as a form", async () => {
     let seen;
     const fetcher = async (url, init) => {
       seen = { url, body: String(init.body), method: init.method };
-      return new Response(JSON.stringify({ success: true }));
+      return new Response(JSON.stringify({ success: true, hostname: "pieceoff.example", action: "create_room" }));
     };
     await verifyTurnstile({ ...args, fetcher });
     assert.equal(seen.method, "POST");
@@ -48,6 +48,11 @@ describe("verifyTurnstile", () => {
   });
   it("denies when the service says failure", async () => {
     assert.equal(await verifyTurnstile({ ...args, fetcher: ok({ success: false }) }), false);
+  });
+  it("denies tokens for another action or widget hostname", async () => {
+    assert.equal(await verifyTurnstile({ ...args, fetcher: ok({ success: true, hostname: "evil.example", action: "create_room" }) }), false);
+    assert.equal(await verifyTurnstile({ ...args, fetcher: ok({ success: true, hostname: "pieceoff.example", action: "login" }) }), false);
+    assert.equal(await verifyTurnstile({ ...args, expectedHostname: "", fetcher: ok({ success: true }) }), false);
   });
   it("fails closed on a missing token, bad status, bad JSON and network errors", async () => {
     assert.equal(await verifyTurnstile({ ...args, token: "", fetcher: ok({ success: true }) }), false);

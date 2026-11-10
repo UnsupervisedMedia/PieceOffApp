@@ -54,6 +54,13 @@ for their recipe and provenance. The maintainer-only generator uses NumPy
 operating-system libraries, and additional assets separately before
 redistribution.
 
+The desktop accessibility bridge uses AccessKit (MIT or Apache-2.0) and, on
+Linux, AT-SPI through the Rust `atspi` (MIT or Apache-2.0) and `zbus` (MIT)
+crates. The Windows and macOS AccessKit bridges (MIT or Apache-2.0) use their
+platform accessibility APIs. These crates are built into the app; they add no
+separately bundled executable. The normal
+generated dependency notices must include them in release packages.
+
 The project name and logo, if added, are not granted as a trademark by the
 Apache-2.0 license. Do not imply endorsement or affiliation when redistributing
 modified builds.
