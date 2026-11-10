@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import { Room, initSync } from "../wasm/pieceoff_room_wasm.js";
-import wasmModule from "../wasm/pieceoff_room_wasm_bg.wasm";
+import { Room, UPLOADS_OFF_ERROR, builtinTitle, publicNameAllowed, uploadsEnabled } from "./core.ts";
 import type { Env } from "./env";
+import { numVar } from "./http.ts";
+import { type LobbyEntry, MAX_HOST_NAME, lobbyAction, lobbyCheckTime, sanitizeText } from "./lobby-state.ts";
+import type { Reserved } from "./registry.ts";
 import {
   type Failure,
   type Limits,
@@ -16,8 +18,6 @@ import {
 import { cleanupDeadline } from "./lifecycle.ts";
 import { alarmTarget, shouldSetAlarm } from "./schedule.ts";
 import { ipKey } from "./security.ts";
-
-initSync({ module: wasmModule });
 
 /** Largest accepted frame in bytes, matching PIECEOFF_MAX_MESSAGE_BYTES' default. */
 const MAX_FRAME_BYTES = 1_048_576;
@@ -44,6 +44,26 @@ const PART_IN_FLIGHT_MS = 5 * 60_000;
 /** Open sockets (joined or not) one address may hold on a room. */
 const MAX_SOCKETS_PER_IP = 8;
 const DEFAULT_PREJOIN_MS = 15_000;
+/** Mirrors pieceoff-core's MAX_PLAYERS. */
+const MAX_PLAYERS = 8;
+const DEFAULT_LOBBY_THROTTLE_MS = 10_000;
+const DEFAULT_LOBBY_HEARTBEAT_MS = 60_000;
+const DEFAULT_RECONCILE_MS = 30 * 60_000;
+
+/** Test hook state (FAIL_BUDGET_RELEASE_ONCE): once per isolate, not per room. */
+let injectedReleaseFailure = false;
+
+/** The parts of a room snapshot the lobby needs. */
+interface LobbySnapshot {
+  invite_code: string;
+  host_id: string;
+  listed?: boolean;
+  media_sha256: string;
+  current?: number;
+  queue?: { sha256: string }[];
+  pieces: { placed: boolean }[];
+  cut_style?: string;
+}
 
 /** What a media call returns over RPC: data on success, a status on failure. */
 export type MediaReply<T> = ({ ok: true } & T) | (Failure & { missing?: number[] });
@@ -73,6 +93,12 @@ interface InitResult {
   ok: boolean;
   error?: string;
   resumeToken?: string;
+}
+
+/** The lobby's host name: sanitized, and blank if the name filter refuses it. */
+function lobbyHostName(name: string): string {
+  const clean = sanitizeText(name, MAX_HOST_NAME);
+  return publicNameAllowed(clean) ? clean : "";
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -130,6 +156,20 @@ export class RoomDO extends DurableObject<Env> {
   private readonly prejoinMs: number;
   private readonly idleCleanupMs: number;
   private readonly unclaimedMs: number;
+  /** Hash prefix of the device key that created the room ("" for browser rooms). */
+  private creatorDevice = "";
+  /** Budget calls run one at a time so a reconcile never races a reservation. */
+  private budgetChain: Promise<unknown> = Promise.resolve();
+  /** The room has reserved global media budget at some point. */
+  private budgetUsed = false;
+  /** `listed` as last read from the snapshot. */
+  private listedHint = false;
+  /** The lobby may hold an entry for this room (stored, so a restart can remove it). */
+  private lobbyListed = false;
+  /** Something lobby-visible changed since the last upsert. */
+  private lobbyDirty = false;
+  private lobbySentAt = 0;
+  private lobbyCheckedAt = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -172,6 +212,10 @@ export class RoomDO extends DurableObject<Env> {
     this.uploadToken = this.readKv("upload_token");
     const storedEmpty = this.readKv("empty_since");
     this.emptySince = storedEmpty === null ? null : Number(storedEmpty);
+    this.creatorDevice = this.readKv("creator_device") ?? "";
+    this.budgetUsed = this.readKv("budget_used") === "1";
+    this.lobbyListed = this.readKv("lobby_listed") === "1";
+    this.listedHint = this.lobbySnapshot()?.listed === true;
     for (const [clientId, name] of Object.entries(this.roster)) {
       this.wasm(() => this.room.restore_player(clientId, name, this.spectatorIds.has(clientId)));
     }
@@ -212,6 +256,7 @@ export class RoomDO extends DurableObject<Env> {
     message: unknown,
     roomId: string,
     code: string,
+    creatorDevice = "",
   ): Promise<InitResult> {
     if (this.initialized) return { ok: false, error: "exists" };
     this.ctx.storage.sql.exec(
@@ -244,6 +289,10 @@ export class RoomDO extends DurableObject<Env> {
     this.uploadToken = crypto.randomUUID();
     this.writeKv("pending", clientId);
     this.writeKv("room_id", roomId);
+    this.writeKv("created_at", String(Date.now()));
+    if (creatorDevice) this.writeKv("creator_device", creatorDevice);
+    this.creatorDevice = creatorDevice;
+    this.listedHint = this.lobbySnapshot()?.listed === true;
     this.setEmptySince(Date.now());
     this.writeKv("upload_token", this.uploadToken);
     this.writeSecrets();
@@ -338,8 +387,18 @@ export class RoomDO extends DurableObject<Env> {
     token: string,
     request: { sha256: string; size: number; partSize: number },
   ): Promise<MediaReply<{ complete: boolean } & Partial<UploadInfo>>> {
+    if (!uploadsEnabled(this.env)) return { ok: false, status: 403, error: UPLOADS_OFF_ERROR };
     const denied = await this.authorizeUpload(token);
     if (denied) return denied;
+    // Serialised with other budget changes: the room's checks, its row and
+    // the registry's reservation move together.
+    return this.withBudget(() => this.startUploadLocked(request));
+  }
+
+  private async startUploadLocked(
+    request: { sha256: string; size: number; partSize: number },
+  ): Promise<MediaReply<{ complete: boolean } & Partial<UploadInfo>>> {
+    if (!this.live()) return { ok: false, status: 404, error: ROOM_NOT_FOUND };
     const sha256 = String(request.sha256).toLowerCase();
     if (this.ctx.storage.sql.exec("SELECT 1 FROM media WHERE sha256 = ?", sha256).toArray().length) {
       return { ok: true, complete: true };
@@ -352,6 +411,7 @@ export class RoomDO extends DurableObject<Env> {
       if (upload.r2UploadId === "") {
         // The object was evicted before R2 answered; this row can never be used.
         this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", upload.id);
+        await this.releaseBudget(upload.size, true);
       } else if (upload.size !== request.size || upload.partSize !== request.partSize) {
         return { ok: false, status: 409, error: "An upload with different sizes is in progress" };
       } else {
@@ -364,7 +424,9 @@ export class RoomDO extends DurableObject<Env> {
     }
     const plan = planUpload({ ...request, sha256 }, this.mediaLimits(), this.mediaUsage());
     if (!plan.ok) return plan;
-    // Reserve before awaiting R2 so concurrent starts see this upload's bytes.
+    // The room's own row first, then the service-wide reservation. A crash
+    // between the two under-counts until the next reconcile; nothing is
+    // ever reserved without a row that will eventually release it.
     const uploadId = crypto.randomUUID();
     this.ctx.storage.sql.exec(
       "INSERT INTO uploads (id, sha256, size, part_size, part_count, r2_upload_id, parts) VALUES (?, ?, ?, ?, ?, '', '{}')",
@@ -374,11 +436,21 @@ export class RoomDO extends DurableObject<Env> {
       request.partSize,
       plan.partCount,
     );
+    if (!this.budgetUsed) {
+      this.budgetUsed = true;
+      this.writeKv("budget_used", "1");
+    }
+    const reserved = await this.reserveBudget(request.size);
+    if (!reserved.ok) {
+      if (this.live()) this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+      return reserved;
+    }
     try {
       const multipart = await this.env.MEDIA.createMultipartUpload(this.mediaKey(sha256));
       if (!this.live()) {
         // The room was deleted while R2 was answering: do not leave the upload behind.
         await multipart.abort().catch(() => undefined);
+        await this.releaseBudget(request.size, true);
         return { ok: false, status: 404, error: ROOM_NOT_FOUND };
       }
       this.ctx.storage.sql.exec(
@@ -388,10 +460,66 @@ export class RoomDO extends DurableObject<Env> {
       );
     } catch (error) {
       if (this.live()) this.ctx.storage.sql.exec("DELETE FROM uploads WHERE id = ?", uploadId);
+      await this.releaseBudget(request.size, true);
       console.error("createMultipartUpload failed", String(error));
       return { ok: false, status: 502, error: "Media storage is unavailable" };
     }
     return { ok: true, complete: false, ...this.uploadInfo(this.loadUpload(uploadId)!) };
+  }
+
+  // ---- Global media budget (RegistryDO) -------------------------------------
+
+  private withBudget<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.budgetChain.then(work, work);
+    this.budgetChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private registry() {
+    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+  }
+
+  private async reserveBudget(bytes: number): Promise<Reserved> {
+    try {
+      return await this.registry().reserveMedia(this.readKv("room_id") ?? "", this.creatorDevice, bytes);
+    } catch (error) {
+      console.error("media budget unavailable", String(error));
+      return { ok: false, status: 503, error: "Media storage is unavailable. Try again soon." };
+    }
+  }
+
+  /** Give a reservation back. A failure only leaves drift the next reconcile fixes. */
+  private async releaseBudget(bytes: number, refundDevice: boolean): Promise<void> {
+    if (
+      this.env.FAIL_BUDGET_RELEASE_ONCE === "1" &&
+      this.env.DEV_ALLOW_UNVERIFIED_CREATE === "1" &&
+      !injectedReleaseFailure
+    ) {
+      injectedReleaseFailure = true; // test hook: as if the object died here
+      return;
+    }
+    try {
+      await this.registry().releaseMedia(this.readKv("room_id") ?? "", this.creatorDevice, bytes, refundDevice);
+    } catch (error) {
+      console.error("releasing media budget failed", String(error));
+    }
+  }
+
+  /** Report the room's true media total, at most once per reconcile interval. */
+  private async reconcileBudget(now: number): Promise<void> {
+    if (!this.budgetUsed || !this.live()) return;
+    const every = numVar(this.env.BUDGET_RECONCILE_MS, DEFAULT_RECONCILE_MS);
+    if (now - Number(this.readKv("budget_reconciled_at") ?? "0") < every) return;
+    await this.withBudget(async () => {
+      this.ensureMediaTables();
+      const usage = this.mediaUsage();
+      await this.registry().reconcileRoom(
+        this.readKv("room_id") ?? "",
+        this.creatorDevice,
+        usage.completedBytes + usage.reservedBytes,
+      );
+      this.writeKv("budget_reconciled_at", String(now));
+    }).catch((error) => console.error("media budget reconcile failed", String(error)));
   }
 
   async uploadStatus(token: string, uploadId: string): Promise<MediaReply<UploadInfo>> {
@@ -512,6 +640,10 @@ export class RoomDO extends DurableObject<Env> {
   async abortUpload(token: string, uploadId: string): Promise<MediaReply<object>> {
     const denied = await this.authorizeUpload(token);
     if (denied) return denied;
+    return this.withBudget(() => this.abortUploadLocked(uploadId));
+  }
+
+  private async abortUploadLocked(uploadId: string): Promise<MediaReply<object>> {
     const upload = this.loadUpload(uploadId);
     if (upload === null) return { ok: false, status: 404, error: "No such upload" };
     if (upload.r2UploadId !== "") {
@@ -525,6 +657,7 @@ export class RoomDO extends DurableObject<Env> {
     for (const slot of [...this.partsInFlight.keys()]) {
       if (slot.startsWith(`${uploadId}:`)) this.partsInFlight.delete(slot);
     }
+    await this.releaseBudget(upload.size, true);
     return { ok: true };
   }
 
@@ -612,15 +745,32 @@ export class RoomDO extends DurableObject<Env> {
       ws.send(this.wasm(() => this.room.timelapse_event()));
       return;
     }
+    if (parsed.type === "kick_player") return this.kick(ws, attachment, message);
 
+    if (
+      parsed.type === "queue_add" &&
+      !uploadsEnabled(this.env) &&
+      builtinTitle(String((parsed as { sha256?: unknown }).sha256 ?? "")) === null
+    ) {
+      return this.sendError(ws, UPLOADS_OFF_ERROR);
+    }
     const reply = JSON.parse(
       this.wasm(() => this.room.handle(attachment.clientId, message, Date.now())),
     ) as Reply<{ event: unknown; persist: boolean }>;
     if ("err" in reply) return this.sendError(ws, reply.err);
     this.broadcast(JSON.stringify(reply.ok.event));
-    if (reply.ok.persist) this.markDirty();
-    if (parsed.type === "queue_add" && typeof (parsed as { sha256?: unknown }).sha256 === "string") {
-      const sha256 = (parsed as { sha256: string }).sha256.toLowerCase();
+    if (reply.ok.persist) {
+      this.markDirty();
+      this.lobbyDirty = true;
+    }
+    if (parsed.type === "set_listed") await this.syncLobby(Date.now(), true);
+    else await this.syncLobby(Date.now(), false);
+    // Built-in media is available at once and is never uploaded.
+    const queuedSha = parsed.type === "queue_add" && typeof (parsed as { sha256?: unknown }).sha256 === "string"
+      ? (parsed as { sha256: string }).sha256.toLowerCase()
+      : null;
+    if (queuedSha !== null && this.waitingInQueue(queuedSha)) {
+      const sha256 = queuedSha;
       const alreadyStored = await this.env.MEDIA.head(this.mediaKey(sha256));
       if (alreadyStored !== null) {
         const event = this.wasm(() => this.room.mark_item_available(sha256));
@@ -708,9 +858,14 @@ export class RoomDO extends DurableObject<Env> {
       }>;
       if ("ok" in ticked) {
         for (const event of ticked.ok.events) this.broadcast(JSON.stringify(event));
-        if (ticked.ok.persist) this.markDirty();
+        if (ticked.ok.persist) {
+          this.markDirty();
+          this.lobbyDirty = true;
+        }
       }
     }
+    await this.syncLobby(now, false);
+    await this.reconcileBudget(now);
     await this.schedule();
   }
 
@@ -778,6 +933,13 @@ export class RoomDO extends DurableObject<Env> {
         cursor = page.truncated ? page.cursor : undefined;
       } while (cursor !== undefined);
     }
+    // The media is gone, so is its share of the global budget. A failure
+    // throws and the alarm retries, like the R2 deletes above.
+    if (this.budgetUsed && roomId !== null) await this.registry().forgetRoom(roomId);
+    if (this.lobbyListed) {
+      const code = this.lobbySnapshot()?.invite_code;
+      if (code) await this.lobbyStub().remove(code).catch(() => undefined); // else it expires
+    }
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     // Only now is the room gone. If anything above threw, `initialized` is
@@ -793,6 +955,9 @@ export class RoomDO extends DurableObject<Env> {
     this.emptySince = null;
     this.partsInFlight.clear();
     this.lastSeen.clear();
+    this.budgetUsed = false;
+    this.lobbyListed = false;
+    this.listedHint = false;
   }
 
   /** Drop players whose socket has said nothing (not even a ping) for too long. */
@@ -937,11 +1102,64 @@ export class RoomDO extends DurableObject<Env> {
     this.writeRoster();
     this.writeSecrets();
     ws.send(JSON.stringify({ ...(JSON.parse(welcome) as object), resume_token: resumeToken }));
-    if (this.chatHistory.length > 0) {
+    // Lines from before chat was switched off (say, while the room was still
+    // invite-only) are not shown to newcomers.
+    if (this.chatHistory.length > 0 && this.wasm(() => this.room.chat_enabled())) {
       ws.send(JSON.stringify({ type: "chat_history", lines: this.chatHistory }));
     }
     this.broadcast(JSON.stringify({ type: "peer_joined", name: attachment.name, spectator }), ws);
     this.markDirty();
+    this.lobbyDirty = true;
+    await this.syncLobby(Date.now(), true);
+    await this.schedule();
+  }
+
+  /**
+   * The host removes a player (`kick_player { name }`): every connection
+   * under that name is told and closed, its resume tokens stop working, and
+   * the core bans the name and key for the room's life. The ban is flushed
+   * at once so an eviction cannot lose it.
+   */
+  private async kick(ws: WebSocket, attachment: Attachment, frame: string): Promise<void> {
+    const reply = JSON.parse(this.wasm(() => this.room.kick(attachment.clientId, frame, Date.now()))) as Reply<{
+      name: string;
+      removed: { client_id: string; spectator: boolean }[];
+      snapshot: unknown;
+      notices: unknown[];
+    }>;
+    if ("err" in reply) return this.sendError(ws, reply.err);
+    const removed = new Set(reply.ok.removed.map((entry) => entry.client_id));
+    reply.ok.removed.forEach((entry, index) => {
+      for (const socket of this.ctx.getWebSockets()) {
+        const target = socket.deserializeAttachment() as Attachment | null;
+        if (!target?.joined || target.clientId !== entry.client_id) continue;
+        target.joined = false; // its close event must not release it again
+        try {
+          socket.serializeAttachment(target);
+          socket.send(JSON.stringify(reply.ok.notices[index]));
+          socket.close(1008, "removed by host");
+        } catch {
+          // already gone
+        }
+      }
+      delete this.roster[entry.client_id];
+      this.spectatorIds.delete(entry.client_id);
+      this.lastSeen.delete(entry.client_id);
+      this.broadcast(JSON.stringify({ type: "peer_left", name: reply.ok.name, spectator: entry.spectator }));
+      this.broadcast(JSON.stringify({ type: "cursor_hidden", client_id: entry.client_id }));
+    });
+    for (const [hash, clientId] of Object.entries(this.secrets)) {
+      if (removed.has(clientId)) delete this.secrets[hash];
+    }
+    if (reply.ok.snapshot !== null) {
+      this.broadcast(JSON.stringify({ type: "snapshot", snapshot: reply.ok.snapshot }));
+    }
+    const clockEvent = this.wasm(() => this.room.sync_occupied(Date.now()));
+    if (clockEvent !== undefined) this.broadcast(clockEvent);
+    this.writeSecrets();
+    this.flush();
+    this.lobbyDirty = true;
+    await this.syncLobby(Date.now(), true);
     await this.schedule();
   }
 
@@ -966,6 +1184,8 @@ export class RoomDO extends DurableObject<Env> {
       this.setEmptySince(Date.now());
       this.flush();
     }
+    this.lobbyDirty = true;
+    await this.syncLobby(Date.now(), true);
     await this.schedule();
   }
 
@@ -1022,6 +1242,115 @@ export class RoomDO extends DurableObject<Env> {
         delete this.secrets[hash];
         surplus--;
       }
+    }
+  }
+
+  // ---- Public lobby (LobbyDO) ----------------------------------------------
+
+  private lobbyStub() {
+    return this.env.LOBBY.get(this.env.LOBBY.idFromName("lobby"));
+  }
+
+  private lobbySnapshot(): LobbySnapshot | null {
+    try {
+      return JSON.parse(this.wasm(() => this.room.snapshot_json())) as LobbySnapshot | null;
+    } catch {
+      return null;
+    }
+  }
+
+  private createdAt(): number {
+    const stored = Number(this.readKv("created_at"));
+    if (stored > 0) return stored;
+    const now = Date.now();
+    this.writeKv("created_at", String(now)); // rooms made before the lobby existed
+    return now;
+  }
+
+  /**
+   * What the lobby should show for this room, or null when it should not be
+   * listed: not listed, nobody playing, finished, or (defensively) a current
+   * item that is not a built-in loop. The title is the bundled one.
+   */
+  private lobbyEntry(snapshot: LobbySnapshot | null, now: number): LobbyEntry | null {
+    this.listedHint = snapshot?.listed === true;
+    if (snapshot === null || !snapshot.listed || !this.live()) return null;
+    let players = 0;
+    let spectators = 0;
+    for (const attachment of this.attachments()) {
+      if (!attachment.joined) continue;
+      if (attachment.spectator) spectators++;
+      else players++;
+    }
+    if (players === 0) return null;
+    const pieces = snapshot.pieces.length;
+    const placed = snapshot.pieces.filter((piece) => piece.placed).length;
+    if (pieces > 0 && placed === pieces) return null;
+    const item = snapshot.queue?.[snapshot.current ?? 0];
+    const title = builtinTitle(item?.sha256 ?? snapshot.media_sha256);
+    if (title === null) return null;
+    return {
+      code: snapshot.invite_code,
+      title,
+      host_name: lobbyHostName(this.roster[snapshot.host_id] ?? ""),
+      players,
+      max_players: MAX_PLAYERS,
+      spectators,
+      pieces,
+      placed,
+      cut_style: snapshot.cut_style ?? "jigsaw",
+      created_at: this.createdAt(),
+      updated_at: now,
+    };
+  }
+
+  private setLobbyListed(listed: boolean): void {
+    if (this.lobbyListed === listed) return;
+    this.lobbyListed = listed;
+    this.writeKv("lobby_listed", listed ? "1" : "");
+  }
+
+  /**
+   * Keep the lobby's entry for this room current. Upserts go out at most
+   * once per throttle period and, while players are in, at least once per
+   * heartbeat; a remove is sent as soon as it is noticed. `urgent` is for
+   * joins, leaves and listing changes; otherwise this is cheap to call
+   * often (it reads the snapshot at most once per throttle period).
+   */
+  private async syncLobby(now: number, urgent: boolean): Promise<void> {
+    if (!urgent && !this.listedHint && !this.lobbyListed) return;
+    const throttleMs = numVar(this.env.LOBBY_THROTTLE_MS, DEFAULT_LOBBY_THROTTLE_MS);
+    const heartbeatMs = numVar(this.env.LOBBY_HEARTBEAT_MS, DEFAULT_LOBBY_HEARTBEAT_MS);
+    if (!urgent) {
+      if (now - this.lobbyCheckedAt < throttleMs) return;
+      const quietFor = now - this.lobbySentAt;
+      if (this.lobbyListed && !this.lobbyDirty && quietFor < heartbeatMs) return;
+    }
+    const snapshot = this.lobbySnapshot();
+    const entry = this.lobbyEntry(snapshot, now);
+    const timing = {
+      wanted: entry !== null,
+      listed: this.lobbyListed,
+      dirty: this.lobbyDirty,
+      now,
+      lastSentAt: this.lobbySentAt,
+      throttleMs,
+      heartbeatMs,
+    };
+    const action = lobbyAction(timing);
+    this.lobbyCheckedAt = lobbyCheckTime({ ...timing, action });
+    try {
+      if (action === "upsert" && entry !== null) {
+        await this.lobbyStub().upsert(entry);
+        this.lobbySentAt = now;
+        this.lobbyDirty = false;
+        this.setLobbyListed(true);
+      } else if (action === "remove" && snapshot !== null) {
+        await this.lobbyStub().remove(snapshot.invite_code);
+        this.setLobbyListed(false);
+      }
+    } catch (error) {
+      console.error("lobby update failed", String(error)); // retried on the next check
     }
   }
 

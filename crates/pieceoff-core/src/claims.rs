@@ -59,6 +59,7 @@ impl RoomRuntime {
         key_hash: Option<&str>,
         now_ms: u64,
     ) -> Result<Vec<String>, String> {
+        self.check_admission(name, key_hash)?;
         let folded = name.to_lowercase();
         let live: Vec<String> = self
             .names
@@ -106,6 +107,7 @@ impl RoomRuntime {
             self.forget_drag(id);
         }
         self.names.insert(client_id.to_owned(), name.to_owned());
+        self.note_member_key(client_id, key_hash);
         Ok(replaced)
     }
 

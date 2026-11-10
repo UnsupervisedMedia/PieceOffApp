@@ -67,6 +67,41 @@ native Windows and macOS launch checks and a two-person video/audio playtest
 remain release-readiness work. See the [feature matrix](docs/FEATURE_MATRIX.md)
 for implemented and remaining work.
 
+## Play online
+
+The app starts on **Online**: rooms run on PieceOff Online
+(`rooms.pieceoff.app`), so nobody has to run a server.
+
+- **With friends.** Create a room and press **Copy invite link** in the room
+  toolbar. A friend pastes `https://pieceoff.app/join?c=CODE` (or just the
+  8-character code) into **Join a room**; a link switches their app to Online.
+- **With anyone.** **Online rooms** on the start screen lists public rooms
+  (refreshing every 10 seconds) with **Join** and **Watch**. **Quick match**
+  joins the busiest room with a free seat, or starts a public room with a
+  random built-in puzzle. Tick **List publicly** when creating a room, or use
+  **More → Listed publicly** as the host, to show yours there. Public rooms use
+  the built-in puzzles only, and start with chat off (the host turns it on in
+  **More → Room chat**; pings always work).
+- **Dealing with trouble.** Open the player list in the room toolbar: **Mute**
+  hides a player's chat, pings and cursor on your screen only; the host's
+  **Remove…** sends a player out of the room for good (they can't rejoin it
+  under that name or from that computer). Public rooms refuse rude display
+  names. **More → Report room…** emails contact@pieceoff.app with the room
+  code.
+- **Linking this computer.** The first time you create a room online, the app
+  shows a code and an **Open browser** button. Approve the code on
+  `pieceoff.app/link` (a quick anti-spam check) and the app carries on; it
+  keeps a private device key in its settings, which it only ever sends back
+  to the secure (`wss://`) server that issued it. Joining never needs this. If the
+  key is revoked the app asks you to link again. **Unlink** in the Room server
+  card forgets it.
+- **Your own files.** PieceOff Online uses the built-in puzzles for now. To
+  play your own images and videos, pick **Local or LAN** and use a room server
+  on your computer or network (below).
+
+Choosing **Local or LAN** brings back the address field; the app remembers
+both. A saved choice, then `PIECEOFF_SERVER_URL`, wins over the Online default.
+
 ## Play locally
 
 ### Install
@@ -122,10 +157,11 @@ cargo run -p pieceoff-server
 cargo run -p pieceoff-app
 ```
 
-Choose an image, video, animated image, or `.pieceoff` package on the start
-screen. Create a room and share its invite code. A friend can enter the room
-server address and code to join; the server address defaults to
-`ws://<host>:28878/ws` for a room on another machine.
+Pick **Local or LAN** under **Room server**, then choose an image, video,
+animated image, or `.pieceoff` package on the start screen. Create a room and
+share its invite code. A friend can enter the room server address and code to
+join; the server address defaults to `ws://<host>:28878/ws` for a room on
+another machine.
 
 ### Supported media and limits
 

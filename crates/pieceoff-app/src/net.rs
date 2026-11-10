@@ -45,6 +45,9 @@ impl PieceOffApp {
             repaint: self.repaint.clone(),
         };
         let media_files = self.media_files.clone();
+        // A hosted room routes the socket by code, claims the player with
+        // its resume token, and moves media through multipart uploads.
+        let session = self.online.session.clone();
         let (outgoing, outgoing_rx) = tokio_mpsc::unbounded_channel();
         let _ = outgoing.send(first);
         self.network = Some(Network { outgoing, incoming });
@@ -65,8 +68,21 @@ impl PieceOffApp {
                     }
                 };
                 let versioned = with_protocol(&url);
-                let Ok((stream, _)) = connect_async(&versioned).await else { let _ = incoming_tx.send(ServerMessage::Error { message: format!("Could not connect to {url}. Check the address and that the server is running.") }); return; };
+                let versioned = match &session {
+                    Some(session) => session.socket_url(&versioned),
+                    None => versioned,
+                };
+                let stream = match connect_async(&versioned).await {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        for message in connect_failure_messages(&url, &error, session.is_some()) {
+                            let _ = incoming_tx.send(ServerMessage::Error { message });
+                        }
+                        return;
+                    }
+                };
                 let (mut writer, mut reader) = stream.split();
+                let mut first_packet = true;
                 let mut outgoing_rx = outgoing_rx;
                 let mut media_transfer_started = false;
                 let mut connected_client_id: Option<String> = None;
@@ -75,13 +91,20 @@ impl PieceOffApp {
                     tokio::select! {
                         next = outgoing_rx.recv() => {
                             let Some(packet) = next else { break };
-                            let Ok(text) = serde_json::to_string(&packet) else { continue };
+                            let text = match &session {
+                                Some(session) if std::mem::take(&mut first_packet) => session.first_message_json(&packet),
+                                _ => serde_json::to_string(&packet).ok(),
+                            };
+                            let Some(text) = text else { continue };
                             if writer.send(Message::Text(text.into())).await.is_err() { break; }
                         }
                         next = reader.next() => match next {
                             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(packet) => {
                                     if let ServerMessage::Welcome { client_id, snapshot, .. } = &packet {
+                                        if let Some(session) = &session {
+                                            session.absorb_welcome(&text);
+                                        }
                                         connected_client_id = Some(client_id.clone());
                                         connected_media_hash = Some(snapshot.media_sha256.clone());
                                     }
@@ -94,7 +117,7 @@ impl PieceOffApp {
                                                 Ok(files) => pending_uploads(snapshot, &files),
                                                 Err(_) => Vec::new(),
                                             };
-                                            spawn_item_uploads(&url, token, pending, &incoming_tx);
+                                            spawn_item_uploads(&url, token, pending, session.clone(), &incoming_tx);
                                         }
                                     }
                                     if let ServerMessage::MediaUploadToken { client_id, token, sha256 } = &packet {
@@ -104,7 +127,7 @@ impl PieceOffApp {
                                                 Err(_) => None,
                                             };
                                             if let Some(target) = target {
-                                                spawn_item_uploads(&url, token, vec![target], &incoming_tx);
+                                                spawn_item_uploads(&url, token, vec![target], session.clone(), &incoming_tx);
                                             }
                                         }
                                     }
@@ -151,13 +174,23 @@ impl PieceOffApp {
         let Ok(url) = self.resolved_server_url() else {
             return;
         };
+        let session = self.online.session.clone();
         let tx = WakingSender {
             tx: self.item_download_tx.clone(),
             repaint: self.repaint.clone(),
         };
         thread::spawn(move || {
+            let transport = match media_transport(&url, &code, session.as_ref()) {
+                Ok(transport) => transport,
+                Err(error) => {
+                    for (sha256, _) in wanted {
+                        let _ = tx.send((sha256, Err(error.clone())));
+                    }
+                    return;
+                }
+            };
             for (sha256, extension) in wanted {
-                let result = download_room_media_retrying(&url, &code, &sha256, &extension);
+                let result = download_retrying(transport.as_ref(), &sha256, &extension);
                 let _ = tx.send((sha256, result));
             }
         });
@@ -261,12 +294,15 @@ impl PieceOffApp {
                     self.reconnect_attempt = 0;
                     self.room_gone = false;
                     self.replaced_elsewhere = false;
+                    self.removed_by_host = false;
                     self.invite_code = snapshot.invite_code.clone();
                     self.title = snapshot.title.clone();
                     self.media_ready =
                         self.media_path.is_some() && self.media_hash == snapshot.media_sha256;
                     let is_host = media_upload_token.is_some();
-                    self.media_uploading = is_host;
+                    // Built-in items are available at once: nothing to upload.
+                    let uploads_pending = snapshot.queue.iter().any(|item| !item.available);
+                    self.media_uploading = is_host && uploads_pending;
                     let downloading_media =
                         snapshot.media_available && self.media_hash != snapshot.media_sha256;
                     if downloading_media {
@@ -276,7 +312,7 @@ impl PieceOffApp {
                     }
                     self.snapshot = Some(snapshot);
                     self.connected = true;
-                    self.status = if is_host {
+                    self.status = if is_host && uploads_pending {
                         "Room created. Uploading media before sharing the invite code…".into()
                     } else if spectator {
                         format!(
@@ -306,6 +342,12 @@ impl PieceOffApp {
                             server_url: self.server_url.clone(),
                             invite_code: snapshot.invite_code.clone(),
                             player_name: name,
+                            resume_token: self
+                                .online
+                                .session
+                                .as_ref()
+                                .and_then(|session| session.token())
+                                .unwrap_or_default(),
                             last_joined_ms: SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -467,14 +509,25 @@ impl PieceOffApp {
                     };
                 }
                 ServerMessage::MediaUploadToken { .. } => {}
+                ServerMessage::Kicked { client_id, .. } => {
+                    if self.client_id.as_deref() == Some(client_id.as_str()) {
+                        self.removed_by_host = true;
+                        let shown = self.settings.language.text(REMOVED_BY_HOST);
+                        self.chat.note(shown);
+                        self.status = shown.into();
+                    }
+                }
                 ServerMessage::Cursor {
                     client_id,
                     name,
                     x,
                     y,
                 } => {
-                    // The server never echoes our own, but be sure.
-                    if self.client_id.as_deref() != Some(client_id.as_str()) {
+                    // The server never echoes our own, but be sure. Muted
+                    // players' pointers are not drawn on this device.
+                    if self.client_id.as_deref() != Some(client_id.as_str())
+                        && !self.chat.is_muted(&name)
+                    {
                         let now = ctx.input(|input| input.time);
                         self.cursors.update(client_id, name, x, y, now);
                     }
@@ -491,6 +544,7 @@ impl PieceOffApp {
                 ServerMessage::ChatHistory { lines } => {
                     self.chat.history(lines, &self.player_name);
                 }
+                ServerMessage::Ping { name, .. } if self.chat.is_muted(&name) => {}
                 ServerMessage::Ping { name, x, y, .. } => {
                     let now = ctx.input(|input| input.time);
                     self.chat.add_ping(name, x, y, now);
@@ -503,8 +557,11 @@ impl PieceOffApp {
                     }
                     // Keep the room snapshot and invite code after a transport
                     // failure so reconnecting can restore shared state.
+                    // A hosted server refuses an unknown code before the
+                    // socket opens, so no "closed" follows it.
                     let disconnected = message == "Room server connection closed."
-                        || message.starts_with("Could not connect to ");
+                        || message.starts_with("Could not connect to ")
+                        || (message == "Room code not found" && self.online.session.is_some());
                     // Reconnecting to a room the server no longer has can
                     // never work; every other refusal (full, busy, rate
                     // limited) may pass, so those keep retrying.
@@ -514,7 +571,14 @@ impl PieceOffApp {
                     if message == REPLACED_BY_NEW_CONNECTION {
                         self.replaced_elsewhere = true;
                     }
-                    self.status = message;
+                    // A rejoin the host's ban refused.
+                    if message == REMOVED_BY_HOST {
+                        self.removed_by_host = true;
+                    }
+                    // The close that follows a removal keeps its explanation.
+                    if !(self.removed_by_host && message == "Room server connection closed.") {
+                        self.status = message;
+                    }
                     // Only a room we are already in can be rejoined; a failed
                     // first connection keeps its own explanation.
                     if disconnected && self.snapshot.is_some() {
@@ -535,6 +599,9 @@ impl PieceOffApp {
                         } else if self.replaced_elsewhere {
                             self.reconnect_at = None;
                             self.status = REPLACED_BY_NEW_CONNECTION.into();
+                        } else if self.removed_by_host {
+                            self.reconnect_at = None;
+                            self.status = self.settings.language.text(REMOVED_BY_HOST).into();
                         } else {
                             let delay = reconnect_delay(self.reconnect_attempt);
                             self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
@@ -586,13 +653,19 @@ pub(crate) fn token_upload(
     files.get(hash).map(|path| (hash.to_owned(), path.clone()))
 }
 
-/// Upload each file in order on one background thread.
+/// Upload each file in order on one background thread. Built-in loops are
+/// never uploaded: every app has them.
 fn spawn_item_uploads(
     url: &str,
     token: &str,
     items: Vec<(String, PathBuf)>,
+    session: Option<crate::online::HostedSession>,
     errors: &WakingSender<ServerMessage>,
 ) {
+    let items: Vec<(String, PathBuf)> = items
+        .into_iter()
+        .filter(|(hash, _)| !pieceoff_core::is_builtin_media(hash))
+        .collect();
     if items.is_empty() {
         return;
     }
@@ -600,8 +673,17 @@ fn spawn_item_uploads(
     let token = token.to_owned();
     let errors = errors.clone();
     thread::spawn(move || {
+        let transport = match media_transport(&url, "", session.as_ref()) {
+            Ok(transport) => transport,
+            Err(error) => {
+                let _ = errors.send(ServerMessage::Error {
+                    message: format!("Could not upload room media: {error}"),
+                });
+                return;
+            }
+        };
         for (hash, path) in items {
-            if let Err(error) = upload_room_media(&url, &hash, &token, &path) {
+            if let Err(error) = transport.upload(&hash, &token, &path) {
                 let _ = errors.send(ServerMessage::Error {
                     message: format!("Could not upload room media: {error}"),
                 });
@@ -609,6 +691,36 @@ fn spawn_item_uploads(
             }
         }
     });
+}
+
+/// What to tell the player when the socket could not open. Messages keep
+/// the "Could not connect to" prefix the reconnect logic watches for; a
+/// hosted room that does not exist says so the way a room server does, so
+/// reconnecting stops.
+pub(crate) fn connect_failure_messages(
+    url: &str,
+    error: &tokio_tungstenite::tungstenite::Error,
+    hosted: bool,
+) -> Vec<String> {
+    use tokio_tungstenite::tungstenite::Error;
+    let status = match error {
+        Error::Http(response) => Some(response.status().as_u16()),
+        _ => None,
+    };
+    match status {
+        Some(404) if hosted => vec!["Room code not found".into()],
+        Some(429) => vec![format!(
+            "Could not connect to {url}: {}",
+            crate::online::RATE_LIMITED_MESSAGE
+        )],
+        _ if hosted => vec![format!(
+            "Could not connect to {url}. {}",
+            crate::online::OFFLINE_MESSAGE
+        )],
+        _ => vec![format!(
+            "Could not connect to {url}. Check the address and that the server is running."
+        )],
+    }
 }
 
 pub(crate) fn reconnect_delay(attempt: u8) -> Duration {

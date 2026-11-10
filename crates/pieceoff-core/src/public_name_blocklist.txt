@@ -1,0 +1,54 @@
+# Display names refused in public (listed) rooms and the public lobby.
+#
+# Deliberately short and conservative: slurs and explicit sexual terms only.
+# Names are lowercased and common look-alike digits/symbols are mapped
+# (0->o 1->i 3->e 4->a 5->s 7->t @->a $->s !->i) before matching.
+#
+#   word      matches a whole word of the name (also with a trailing "s"),
+#             so "cocktail" and "peacock" pass but "big cock" does not
+#   *word     matches anywhere, even with spaces or dots between letters
+#             ("n.i.g.g.e.r"); use only where no ordinary word contains it
+#
+# Invite-only rooms are not filtered.
+
+*nigger
+*nigga
+*faggot
+fag
+kike
+spic
+chink
+*wetback
+tranny
+retard
+retarded
+rapist
+rape
+pedo
+*pedophile
+*paedophile
+nazi
+*hitler
+kkk
+*porn
+*hentai
+*blowjob
+*handjob
+*cumshot
+*dildo
+*incest
+*whore
+*slut
+cunt
+cock
+cum
+pussy
+penis
+vagina
+anal
+sex
+sexy
+nude
+milf
+*fuck
+shit

@@ -5,10 +5,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 mod apply;
+mod listing;
 mod membership;
+mod moderation;
 mod relay;
 pub use apply::ApplyOutcome;
+pub use listing::{
+    BUILTIN_MEDIA_SHA256, PUBLIC_ROOMS_BUILTIN_ONLY, builtin_media_title, is_builtin_media,
+};
 pub use membership::{JoinOutcome, LeaveOutcome, MAX_PLAYERS, UploadAssignment};
+pub use moderation::{
+    CHAT_OFF, KickOutcome, MAX_ROOM_BANS, PUBLIC_NAME_REFUSED, REMOVED_BY_HOST, RoomBan,
+    public_name_allowed,
+};
 mod sanitize;
 pub use sanitize::{clean_media_extension, clean_name, clean_title, valid_sha256};
 mod claims;
@@ -31,7 +40,7 @@ pub use timelapse::{
     MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
 };
 
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -187,6 +196,18 @@ pub struct RoomSnapshot {
     /// classic jigsaw grid with their contours unchanged.
     #[serde(default)]
     pub cut_style: CutStyle,
+    /// Listed in the public lobby (protocol v15). Only rooms whose every
+    /// queue item is built-in may be listed; older snapshots load unlisted.
+    #[serde(default)]
+    pub listed: bool,
+    /// Room chat is on (protocol v15). Older snapshots load with it on; a
+    /// room that becomes listed switches it off until the host turns it on.
+    #[serde(default = "chat_enabled_default")]
+    pub chat_enabled: bool,
+}
+
+fn chat_enabled_default() -> bool {
+    true
 }
 
 pub const PIECE_TRAY_SPACING_CELLS: f32 = 1.75;
@@ -502,7 +523,10 @@ impl RoomSnapshot {
         // a player is present.
         self.stats.running_since_ms = None;
         self.protocol_version = PROTOCOL_VERSION;
-        self.sync_current_mirror();
+        self.mark_builtins_available();
+        if self.listed && !self.only_builtin_media() {
+            self.listed = false;
+        }
     }
 
     // Keep room construction explicit at the protocol boundary; these fields
@@ -557,7 +581,7 @@ impl RoomSnapshot {
             loop_end_ms: 0,
         }];
         let shape_seed = fnv1a(&media_sha256);
-        Ok(Self {
+        let mut snapshot = Self {
             protocol_version: PROTOCOL_VERSION,
             id,
             invite_code,
@@ -581,7 +605,11 @@ impl RoomSnapshot {
             stats: SolveStats::default(),
             holders: Vec::new(),
             cut_style: CutStyle::Jigsaw,
-        })
+            listed: false,
+            chat_enabled: true,
+        };
+        snapshot.mark_builtins_available();
+        Ok(snapshot)
     }
 
     /// Rehost a portable local puzzle snapshot in a new room. Network identity,
@@ -663,7 +691,10 @@ impl RoomSnapshot {
         for item in &mut self.queue {
             item.available = false;
         }
-        self.sync_current_mirror();
+        // Listing is chosen by the new room's `create_room`, not the file.
+        self.listed = false;
+        self.chat_enabled = true;
+        self.mark_builtins_available();
         self.revision = 1;
         self.playback.playing = false;
         self.playback.rate = self.playback.rate.clamp(0.25, 2.0);
@@ -966,6 +997,10 @@ pub enum ClientMessage {
         /// and get the classic jigsaw grid.
         #[serde(default)]
         cut_style: CutStyle,
+        /// List the room in the public lobby (protocol v15). Refused unless
+        /// every queue item is built-in; servers without a lobby refuse it.
+        #[serde(default)]
+        listed: bool,
     },
     JoinRoom {
         invite_code: String,
@@ -1049,6 +1084,22 @@ pub enum ClientMessage {
     },
     SetVideoLock {
         locked: bool,
+    },
+    /// Host-only: list the room in the public lobby or take it off
+    /// (protocol v15). Listing needs every queue item to be built-in.
+    SetListed {
+        listed: bool,
+    },
+    /// Host-only: switch room chat on or off (protocol v15). Pings are
+    /// unaffected.
+    SetChatEnabled {
+        enabled: bool,
+    },
+    /// Host-only: remove everyone under this display name and ban the name
+    /// and their player key from the room for its lifetime (protocol v15).
+    /// The host cannot remove themself.
+    KickPlayer {
+        name: String,
     },
     /// Where this player's pointer is on the table, in board coordinates
     /// (source-image pixels from the board's top-left). Relayed to the other
@@ -1208,6 +1259,12 @@ pub enum ServerMessage {
     Timelapse {
         timelapse: Timelapse,
     },
+    /// The host removed this connection from the room (protocol v15). The
+    /// server closes the socket next; clients must not reconnect.
+    Kicked {
+        client_id: String,
+        message: String,
+    },
 }
 
 /// Tidy a chat line the way the server does: line breaks become spaces,
@@ -1257,6 +1314,11 @@ pub struct RoomRuntime {
     /// Which player key owns each name in this room (see `claims`). Host
     /// state only: hosts persist it beside the snapshot, never send it.
     pub name_claims: Vec<NameClaim>,
+    /// Names and keys the host removed (see `moderation`). Host state:
+    /// saved beside the snapshot, never sent.
+    pub bans: Vec<RoomBan>,
+    /// The key digest each connection joined with, for bans. Not saved.
+    member_keys: HashMap<String, String>,
     drag_groups: HashMap<String, Vec<u32>>,
 }
 
@@ -1803,7 +1865,11 @@ impl RoomRuntime {
         {
             return Err("That video is already in the queue".into());
         }
-        item.available = false;
+        if snapshot.listed && !is_builtin_media(&item.sha256) {
+            return Err(PUBLIC_ROOMS_BUILTIN_ONLY.into());
+        }
+        // Every client has the built-in loops, so they never wait on an upload.
+        item.available = is_builtin_media(&item.sha256);
         item.position_ms = 0;
         item.loop_start_ms = 0;
         item.loop_end_ms = 0;

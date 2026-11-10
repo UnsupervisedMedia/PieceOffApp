@@ -31,6 +31,9 @@ fn restart_server(config: &Config) -> RunningServer {
     }
 }
 
+/// Against a local rooms Worker; ignored unless scripts/online-e2e.sh runs it.
+mod online;
+
 const STEP: Duration = Duration::from_millis(4);
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {

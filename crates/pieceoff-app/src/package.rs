@@ -87,16 +87,16 @@ impl TransferProgress {
         }
     }
 
-    fn begin(&self, done: u64, total: u64) {
+    pub(crate) fn begin(&self, done: u64, total: u64) {
         self.done.store(done, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
     }
 
-    fn advance(&self, bytes: u64) {
+    pub(crate) fn advance(&self, bytes: u64) {
         self.done.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.total.store(0, Ordering::Relaxed);
     }
 
@@ -211,21 +211,24 @@ pub(crate) fn download_room_media(
     )
 }
 
-/// Like `download_room_media`, trying again after a dropped connection. Each
-/// attempt resumes from the bytes already on disk.
-pub(crate) fn download_room_media_retrying(
-    ws_url: &str,
-    invite_code: &str,
+/// Download through `transport`, trying again after a dropped connection.
+pub(crate) fn download_retrying(
+    transport: &dyn MediaTransport,
     sha256: &str,
     extension: &str,
 ) -> Result<PathBuf, String> {
     let mut delay = Duration::from_secs(1);
     let mut last_error = String::new();
     for attempt in 0..5 {
-        match download_room_media(ws_url, invite_code, sha256, extension) {
+        match transport.download(sha256, extension) {
             Ok(path) => return Ok(path),
-            // A file that fails its hash will not get better by asking again.
-            Err(error) if error.contains("SHA-256") || error.contains("invalid") => {
+            // A file that fails its hash will not get better by asking again,
+            // and neither will a refusal.
+            Err(error)
+                if error.contains("SHA-256")
+                    || error.contains("invalid")
+                    || error.contains("Not allowed") =>
+            {
                 return Err(error);
             }
             Err(error) => last_error = error,
@@ -238,12 +241,75 @@ pub(crate) fn download_room_media_retrying(
     Err(last_error)
 }
 
+/// How room media moves between this app and a room server. The axum
+/// server takes one streamed `PUT` and serves `GET` with `Range`; the hosted
+/// service (`online::HostedMedia`) uses resumable multipart uploads and
+/// token-authorised ranged downloads. Both write the same verified cache.
+pub(crate) trait MediaTransport: Send + Sync {
+    /// Upload the file for `sha256` with the host's upload token.
+    fn upload(&self, sha256: &str, token: &str, path: &Path) -> Result<(), String>;
+    /// Fetch `sha256` into the media cache, resuming a partial file.
+    fn download(&self, sha256: &str, extension: &str) -> Result<PathBuf, String>;
+}
+
+/// The axum room server's `/media/<sha256>` endpoints.
+pub(crate) struct AxumMedia {
+    pub(crate) ws_url: String,
+    pub(crate) invite_code: String,
+}
+
+impl MediaTransport for AxumMedia {
+    fn upload(&self, sha256: &str, token: &str, path: &Path) -> Result<(), String> {
+        upload_room_media(&self.ws_url, sha256, token, path)
+    }
+
+    fn download(&self, sha256: &str, extension: &str) -> Result<PathBuf, String> {
+        download_room_media(&self.ws_url, &self.invite_code, sha256, extension)
+    }
+}
+
+/// The transport for a room: hosted when `session` says so, axum otherwise.
+pub(crate) fn media_transport(
+    ws_url: &str,
+    invite_code: &str,
+    session: Option<&crate::online::HostedSession>,
+) -> Result<Box<dyn MediaTransport>, String> {
+    Ok(match session {
+        Some(session) => Box::new(session.media(ws_url)?),
+        None => Box::new(AxumMedia {
+            ws_url: ws_url.to_owned(),
+            invite_code: invite_code.to_owned(),
+        }),
+    })
+}
+
 pub(crate) fn download_room_media_with(
     ws_url: &str,
     invite_code: &str,
     sha256: &str,
     extension: &str,
     timeouts: TransferTimeouts,
+) -> Result<PathBuf, String> {
+    let valid_code =
+        !invite_code.is_empty() && invite_code.bytes().all(|b| b.is_ascii_alphanumeric());
+    let url = http_media_url(ws_url, &format!("/media/{sha256}?code={invite_code}"));
+    // Checked only when the cache and the built-ins cannot answer.
+    download_into_cache(sha256, extension, timeouts, move |client| {
+        if !valid_code {
+            return Err("Room sent an invalid invite code".into());
+        }
+        Ok(client.get(url.clone()?))
+    })
+}
+
+/// Fetch `sha256` into the media cache: reuse a verified cached copy or a
+/// bundled built-in, otherwise resume the partial file with `Range`
+/// requests built by `request`, checking the SHA-256 before installing it.
+pub(crate) fn download_into_cache(
+    sha256: &str,
+    extension: &str,
+    timeouts: TransferTimeouts,
+    request: impl Fn(&reqwest::Client) -> Result<reqwest::RequestBuilder, String>,
 ) -> Result<PathBuf, String> {
     if !valid_media_hash(sha256) || supported_extension(extension).is_none() {
         return Err("Room sent invalid media metadata".into());
@@ -256,13 +322,14 @@ pub(crate) fn download_room_media_with(
     if path.is_file() && sha256_file(&path).as_deref() == Ok(sha256) {
         return Ok(path);
     }
-    if invite_code.is_empty() || !invite_code.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err("Room sent an invalid invite code".into());
+    // Built-in loops ship with the app and are never uploaded to a room.
+    if let Some(bytes) = crate::library_ui::builtin_media_bytes(sha256) {
+        std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        return Ok(path);
     }
     // One partial file per hash, kept across attempts so a dropped
     // connection costs only what was not yet received.
     let temporary = cache_dir.join(format!(".{sha256}.part"));
-    let url = http_media_url(ws_url, &format!("/media/{sha256}?code={invite_code}"))?;
     let client = media_download_client(timeouts)?;
     let runtime = Builder::new_current_thread()
         .enable_all()
@@ -273,7 +340,7 @@ pub(crate) fn download_room_media_with(
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         let mut response = loop {
-            let mut request = client.get(url.clone());
+            let mut request = request(&client)?;
             if have > 0 {
                 request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
             }
@@ -287,6 +354,12 @@ pub(crate) fn download_room_media_with(
                 reqwest::StatusCode::RANGE_NOT_SATISFIABLE if have > 0 => {
                     let _ = std::fs::remove_file(&temporary);
                     have = 0;
+                }
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED => {
+                    return Err("Not allowed to download this room's media".into());
+                }
+                reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    return Err(crate::online::RATE_LIMITED_MESSAGE.into());
                 }
                 status => return Err(format!("room media download returned HTTP {status}")),
             }

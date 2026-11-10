@@ -5,7 +5,7 @@ pub(crate) const ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
 pub(crate) const ACCENT_FILL: Color32 = Color32::from_rgb(37, 99, 235);
 pub(crate) const SUCCESS: Color32 = Color32::from_rgb(110, 220, 145);
 pub(crate) const WARNING: Color32 = Color32::from_rgb(245, 190, 80);
-const DANGER: Color32 = Color32::from_rgb(240, 110, 110);
+pub(crate) const DANGER: Color32 = Color32::from_rgb(240, 110, 110);
 const PANEL: Color32 = Color32::from_rgb(24, 27, 33);
 const CARD: Color32 = Color32::from_rgb(32, 36, 44);
 const CANVAS: Color32 = Color32::from_rgb(35, 38, 44);
@@ -207,12 +207,16 @@ pub(crate) fn format_ago(elapsed: Duration) -> String {
 }
 
 /// A filled dot used as a connection indicator.
-fn status_dot(ui: &mut egui::Ui, color: Color32) {
+pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
-fn card<R>(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(crate) fn card<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::new()
         .fill(CARD)
         .corner_radius(10)
@@ -314,6 +318,8 @@ impl PieceOffApp {
                 self.messages_open = false;
             } else if self.confirm_restart {
                 self.confirm_restart = false;
+            } else if self.confirm_kick.is_some() {
+                self.confirm_kick = None;
             } else {
                 self.selected_pieces.clear();
             }
@@ -408,9 +414,10 @@ impl PieceOffApp {
             .on_hover_text("Copy the invite code")
             .clicked()
         {
-            ctx.copy_text(code);
+            ctx.copy_text(code.clone());
             self.status = "Invite code copied.".into();
         }
+        self.invite_link_button(ui, ctx, &code);
         if self.connected {
             status_dot(ui, SUCCESS);
             ui.menu_button(
@@ -424,15 +431,18 @@ impl PieceOffApp {
                         format!("{} (you)", self.player_name)
                     };
                     ui.label(RichText::new(me).strong());
-                    for peer in &self.peers {
-                        ui.label(peer);
+                    for peer in self.peers.clone() {
+                        self.player_row(ui, &peer, is_host);
                     }
                     if self.peers.is_empty() && !self.spectating {
                         ui.weak("Share the invite code to play together.");
                     }
                     if !self.spectators.is_empty() {
                         ui.separator();
-                        ui.weak(format!("Watching: {}", self.spectators.join(", ")));
+                        ui.weak(language.text("Watching"));
+                        for watcher in self.spectators.clone() {
+                            self.player_row(ui, &watcher, is_host);
+                        }
                     }
                     if is_host {
                         ui.separator();
@@ -612,6 +622,9 @@ impl PieceOffApp {
                 self.persist_settings();
             }
             self.effects_controls(ui);
+            self.listed_toggle(ui, is_host);
+            self.chat_toggle(ui, is_host);
+            self.report_room_button(ui, ctx);
             if !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, language.text("Reference image"));
             }
@@ -706,22 +719,33 @@ impl PieceOffApp {
     /// The start screen's side panel: pick media, create a room, or join one.
     fn lobby_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let language = self.settings.language;
-        let idle = self.network.is_none() && self.probe_rx.is_none();
+        let idle = self.network.is_none() && self.probe_rx.is_none() && !self.online_busy();
+        let builtin_only = self.custom_media_blocked();
         card(ui, language.text("Start a puzzle"), |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(idle, egui::Button::new(language.text("Choose media…")))
-                    .clicked()
-                {
+                let choose = ui
+                    .add_enabled(
+                        idle && !builtin_only,
+                        egui::Button::new(language.text("Choose media…")),
+                    )
+                    .on_disabled_hover_text(language.text(online::BUILTIN_ONLY_MESSAGE));
+                if choose.clicked() {
                     self.choose_media(ctx);
                 }
                 if ui
-                    .add_enabled(idle, egui::Button::new(language.text("Open package…")))
+                    .add_enabled(
+                        idle && !builtin_only,
+                        egui::Button::new(language.text("Open package…")),
+                    )
+                    .on_disabled_hover_text(language.text(online::BUILTIN_ONLY_MESSAGE))
                     .clicked()
                 {
                     self.open_package(ctx);
                 }
             });
+            if builtin_only {
+                ui.weak(language.text(online::BUILTIN_ONLY_MESSAGE));
+            }
             if self.media_path.is_some()
                 && idle
                 && ui
@@ -793,34 +817,48 @@ impl PieceOffApp {
             } else {
                 ui.weak(language.text("This package keeps its saved pieces and progress."));
             }
+            self.list_publicly_checkbox(ui);
             ui.add_space(6.0);
             let label = if self.pending_snapshot.is_some() {
                 language.text("Create room from package")
             } else {
                 language.text("Create room")
             };
-            if primary_button(ui, self.network.is_none(), label).clicked() {
+            let media_allowed = !builtin_only || self.chosen_media_builtin();
+            if !media_allowed {
+                ui.colored_label(WARNING, language.text(online::BUILTIN_ONLY_MESSAGE));
+            }
+            if primary_button(ui, idle && media_allowed, label).clicked() {
                 self.create_room();
             }
         });
         ui.add_space(8.0);
+        self.online_rooms_card(ui);
         self.server_card(ui);
         ui.add_space(8.0);
         card(ui, language.text("Join a room"), |ui| {
             ui.horizontal(|ui| {
-                let code = ui.add(
-                    egui::TextEdit::singleline(&mut self.invite_code)
-                        .hint_text(language.text("Invite code"))
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(120.0),
-                );
+                let code = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.invite_code)
+                            .hint_text(language.text("Code or invite link"))
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(150.0),
+                    )
+                    .on_hover_text(
+                        language.text("Type a room code, or paste a pieceoff.app/join link"),
+                    );
+                if code.changed() {
+                    self.absorb_invite_paste();
+                }
                 let submitted =
                     code.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let can_join = self.network.is_none() && !self.online_busy();
                 let join = ui.add_enabled(
-                    self.network.is_none() && !self.invite_code.trim().is_empty(),
+                    can_join && !self.invite_code.trim().is_empty(),
                     egui::Button::new(language.text("Join")),
                 );
-                if join.clicked() || (submitted && self.network.is_none()) {
+                if join.clicked() || (submitted && can_join) {
                     self.join_room();
                 }
             });
@@ -869,52 +907,10 @@ impl PieceOffApp {
         });
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if self.network.is_some() || self.probe_rx.is_some() {
+            if self.network.is_some() || self.probe_rx.is_some() || self.online.busy {
                 ui.spinner();
             }
             ui.weak(&self.status);
-        });
-    }
-
-    /// Where rooms are hosted and joined: this device by default, or any
-    /// `host`, `host:port` or `ws(s)://` address.
-    fn server_card(&mut self, ui: &mut egui::Ui) {
-        let language = self.settings.language;
-        card(ui, language.text("Room server"), |ui| {
-            ui.horizontal(|ui| {
-                let field = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.server_url)
-                            .hint_text("host, host:port or ws://host:port/ws")
-                            .desired_width((ui.available_width() - 70.0).max(80.0)),
-                    )
-                    .on_hover_text(format!("Source: {}", self.server_url_source));
-                if field.changed() {
-                    self.server_edit_dirty = true;
-                }
-                if field.lost_focus() {
-                    self.commit_server_url_if_edited();
-                }
-                if ui
-                    .add_enabled(
-                        self.network.is_none(),
-                        egui::Button::new(language.text("Reset")),
-                    )
-                    .on_hover_text("Use the server on this device")
-                    .clicked()
-                {
-                    self.reset_server_url();
-                }
-            });
-            match self.resolved_server_url() {
-                Ok(url) if url != self.server_url.trim() => {
-                    ui.weak(format!("Will connect to {url}"));
-                }
-                Ok(_) => {}
-                Err(message) => {
-                    ui.colored_label(WARNING, message);
-                }
-            }
         });
     }
 
@@ -1206,6 +1202,9 @@ impl PieceOffApp {
                     spectator: self.watch_only,
                     player_key: self.settings.player_key.clone(),
                 };
+                // A hosted session stays in place, so the player keeps its
+                // identity across reconnects (and the host role, unless it
+                // passed to a player who stayed, as on any room server).
                 self.connect(message);
             } else if let Some(remaining) = reconnect_at.checked_duration_since(Instant::now()) {
                 ctx.request_repaint_after(remaining);
@@ -1219,6 +1218,8 @@ impl PieceOffApp {
         }
         self.accept_dropped_files(ctx);
         self.poll_probe(ctx);
+        self.poll_online(ctx);
+        self.ensure_service_check();
         self.process_network(ctx);
         self.show_transfer_progress();
         self.poll_queue_probe();
@@ -1323,7 +1324,9 @@ impl PieceOffApp {
                     });
                 });
         }
+        self.kick_window(ctx);
         self.codec_window(ctx);
+        self.link_window(ctx);
         if self.help_open {
             self.help_window(ctx);
         }

@@ -38,12 +38,32 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   cleanup, and Turnstile, rate limits, origin checks and socket caps. The
   worker has unit and integration tests against a local `wrangler dev`
   (`scripts/worker-test.sh`). Setup and endpoints: [DEPLOYMENT.md](DEPLOYMENT.md).
-- **On hold: go-live.** Needs the owner: create the R2 bucket `pieceoff-media`,
-  the Turnstile widget and secret, and wire the rooms Worker into the connected
-  GitHub to Cloudflare Workers Builds path (no direct `wrangler deploy`).
-  Nothing has been deployed.
+- **Done (desktop client, 2026-11-10): online play.** Section 3 of the
+  online-play design: Online as the default server with Local or LAN beside
+  it, `/api/info` detection, device linking through `pieceoff.app/link` with a
+  stored per-device key, HTTP room creation then join with the resume token,
+  hosted multipart media behind a `MediaTransport` trait, invite links, the
+  Online rooms lobby with Quick match, and public listing for built-in rooms.
+  Uploads to the hosted service stay off at launch (`uploads` in
+  `/api/info`), so online rooms use built-in puzzles. Waiting on the Worker
+  side (registry, device keys, lobby) and moderation before the lobby is
+  turned on publicly.
+- **Done (branch `feature/online-worker`): PieceOff Online Worker
+  additions** (spec `2026-11-10-online-play-design.md`, section 2):
+  `/api/info`, device linking with revocable per-device keys (`RegistryDO`),
+  device-key room creation with daily caps, a crash-safe global R2 budget,
+  the public lobby (`LobbyDO`, `GET /api/lobby`) with CORS for the site, and
+  `worker/ci-build.sh` so Workers Builds can build the Rust core. Hosted
+  uploads are off at launch (`MEDIA_UPLOADS_ENABLED=0`, built-in loops only).
+- **Go-live status.** `pieceoff-rooms` exists on `rooms.pieceoff.app` from
+  the one-time initial create; later deploys come only from Workers Builds
+  (settings in [DEPLOYMENT.md](DEPLOYMENT.md)). Still needs the owner: the
+  Turnstile widget and `TURNSTILE_SECRET` (until then linking and creation
+  are refused), `ADMIN_TOKEN`, and the Workers Builds connection. The lobby
+  stays unannounced until moderation exists; uploads stay off until abuse
+  contact, takedown and a hash blocklist exist.
 - **Next: Plan 1C media lifecycle.** The earlier protocol v9 sketch is stale;
-  the current wire protocol is v14. Decide the schema change for `seed_sha256`,
+  the current wire protocol is v15. Decide the schema change for `seed_sha256`,
   `still_sha256`, owner and source fields; completion still and release of the
   finished video so a solved
   room keeps only a still; restart of a released item accepted only if the

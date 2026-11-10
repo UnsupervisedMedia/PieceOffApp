@@ -61,6 +61,11 @@ platform accessibility APIs. These crates are built into the app; they add no
 separately bundled executable. The normal
 generated dependency notices must include them in release packages.
 
+Online play adds no dependency. Its HTTP requests use the `reqwest` client
+already used for media transfer, and **Open browser** goes through egui's
+`ctx.open_url`, which eframe's `egui-winit` hands to the `webbrowser` crate
+(MIT or Apache-2.0) already in the tree.
+
 The project name and logo, if added, are not granted as a trademark by the
 Apache-2.0 license. Do not imply endorsement or affiliation when redistributing
 modified builds.

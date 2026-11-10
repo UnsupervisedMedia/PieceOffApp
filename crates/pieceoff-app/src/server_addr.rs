@@ -1,8 +1,11 @@
 //! The room server address the client connects to: what the player may type,
 //! and which source (saved setting, environment, built-in default) wins.
+//! The built-in default is PieceOff Online (`online::ONLINE_SERVER_URL`);
+//! "Local or LAN" uses an axum server, by default the one on this device.
 
 pub(crate) const DEFAULT_PORT: u16 = 28878;
-pub(crate) const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:28878/ws";
+/// The room server on this device.
+pub(crate) const LOCAL_SERVER_URL: &str = "ws://127.0.0.1:28878/ws";
 
 /// Turn what a player typed into a `ws://` or `wss://` URL.
 ///
@@ -106,8 +109,12 @@ fn bracketed(address: &str) -> Result<String, String> {
 }
 
 /// The server address to start with and where it came from. A saved choice
-/// wins over the environment, which wins over the built-in default.
-pub(crate) fn initial_server_url(saved: Option<&str>, env: Option<&str>) -> (String, &'static str) {
+/// wins over the environment, which wins over the built-in `default`.
+pub(crate) fn initial_server_url(
+    saved: Option<&str>,
+    env: Option<&str>,
+    default: &str,
+) -> (String, &'static str) {
     let usable = |value: Option<&str>| {
         value
             .map(str::trim)
@@ -119,7 +126,7 @@ pub(crate) fn initial_server_url(saved: Option<&str>, env: Option<&str>) -> (Str
     } else if let Some(url) = usable(env) {
         (url, "PIECEOFF_SERVER_URL")
     } else {
-        (DEFAULT_SERVER_URL.to_owned(), "built-in default")
+        (default.to_owned(), "built-in default")
     }
 }
 
@@ -191,20 +198,20 @@ mod tests {
 
     #[test]
     fn saved_choice_beats_environment_beats_default() {
-        let (url, source) = initial_server_url(Some("ws://saved:1/ws"), Some("ws://env:2/ws"));
+        let online = crate::online::ONLINE_SERVER_URL;
+        let (url, source) =
+            initial_server_url(Some("ws://saved:1/ws"), Some("ws://env:2/ws"), online);
         assert_eq!((url.as_str(), source), ("ws://saved:1/ws", "saved setting"));
-        let (url, source) = initial_server_url(None, Some("ws://env:2/ws"));
+        let (url, source) = initial_server_url(None, Some("ws://env:2/ws"), online);
         assert_eq!(
             (url.as_str(), source),
             ("ws://env:2/ws", "PIECEOFF_SERVER_URL")
         );
-        let (url, source) = initial_server_url(None, None);
-        assert_eq!(
-            (url.as_str(), source),
-            (DEFAULT_SERVER_URL, "built-in default")
-        );
+        let (url, source) = initial_server_url(None, None, online);
+        assert_eq!((url.as_str(), source), (online, "built-in default"));
+        assert_eq!(normalize_server_url(online).unwrap(), online);
         // An empty saved value is not a choice.
-        let (_, source) = initial_server_url(Some("  "), None);
+        let (_, source) = initial_server_url(Some("  "), None, online);
         assert_eq!(source, "built-in default");
     }
 }
