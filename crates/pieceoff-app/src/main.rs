@@ -315,7 +315,11 @@ impl Default for PieceOffApp {
             load_settings(&settings_path())
         };
         settings.mouse = settings.mouse.clone().sanitized();
-        settings.device_key = std::mem::take(&mut settings.device_key).sanitized();
+        let had_legacy_key = settings.device_key.is_set();
+        settings.tidy_device_keys();
+        if had_legacy_key && !cfg!(test) {
+            save_settings(&settings_path(), &settings);
+        }
         if !valid_player_key(&settings.player_key) {
             settings.player_key = new_player_key();
             if !cfg!(test) && !settings.player_key.is_empty() {

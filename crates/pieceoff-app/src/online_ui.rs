@@ -70,6 +70,8 @@ pub(crate) struct LinkFlow {
     pub(crate) reason: Option<&'static str>,
     cancel: Arc<AtomicBool>,
     url: String,
+    /// The origin asked for the key; the key is stored under it alone.
+    origin: String,
 }
 
 impl Drop for LinkFlow {
@@ -108,6 +110,10 @@ pub(crate) struct OnlineState {
     pub(crate) quick_match_create: bool,
     /// The recent room picked for rejoining: its code and resume token.
     pub(crate) recent_resume: Option<(String, String)>,
+    /// Tests run stub servers without TLS; real builds never allow keys on
+    /// a plaintext origin.
+    #[cfg(test)]
+    pub(crate) allow_plaintext_keys: bool,
 }
 
 impl Default for OnlineState {
@@ -127,6 +133,8 @@ impl Default for OnlineState {
             list_publicly: false,
             quick_match_create: false,
             recent_resume: None,
+            #[cfg(test)]
+            allow_plaintext_keys: false,
         }
     }
 }
@@ -144,6 +152,22 @@ impl PieceOffApp {
             tx: self.online.tx.clone(),
             repaint: self.repaint.clone(),
         }
+    }
+
+    /// The origin whose device key applies to `url`, if keys may be used there.
+    pub(crate) fn device_key_origin(&self, url: &str) -> Result<String, String> {
+        #[cfg(test)]
+        let allow_plaintext = self.online.allow_plaintext_keys;
+        #[cfg(not(test))]
+        let allow_plaintext = false;
+        crate::online::key_origin(url, allow_plaintext)
+    }
+
+    /// The selected server's origin has a device key.
+    pub(crate) fn current_device_linked(&self) -> bool {
+        self.resolved_server_url()
+            .and_then(|url| self.device_key_origin(&url))
+            .is_ok_and(|origin| self.settings.device_keys.contains_key(&origin))
     }
 
     /// Something online is in progress that a new create or join would race.
@@ -350,42 +374,55 @@ impl PieceOffApp {
             self.status = problem;
             return;
         }
-        if !self.settings.device_key.is_set() {
+        // A key goes only to the exact TLS origin that issued it.
+        let origin = match self.device_key_origin(&url) {
+            Ok(origin) => origin,
+            Err(error) => {
+                self.online.quick_match_create = false;
+                self.media_uploading = false;
+                self.status = error;
+                return;
+            }
+        };
+        let Some(key) = self.settings.device_keys.get(&origin).cloned() else {
             self.online.pending = Some((url.clone(), PendingAction::Create(message)));
             self.start_link(url, None);
-            return;
-        }
-        let Ok(base) = crate::online::http_base(&url) else {
-            self.status = "Invalid room server address".into();
             return;
         };
         self.online.pending = Some((url.clone(), PendingAction::Create(message.clone())));
         self.online.busy = true;
         self.status = "Creating your room on PieceOff Online…".into();
-        let key = self.settings.device_key.clone();
         let tx = self.online_sender();
         thread::spawn(move || {
-            let result = crate::online::create_room(&base, &key, &message);
+            let result = crate::online::create_room(&origin, &key, &message);
             let _ = tx.send(OnlineEvent::Created { url, info, result });
         });
     }
 
     /// Show the link window and ask the service for a code to approve.
     pub(crate) fn start_link(&mut self, url: String, reason: Option<&'static str>) {
+        // Keys come only from a TLS origin's own link flow, stored under it.
+        let origin = match self.device_key_origin(&url) {
+            Ok(origin) => origin,
+            Err(error) => {
+                self.online.pending = None;
+                self.online.busy = false;
+                self.online.quick_match_create = false;
+                self.media_uploading = false;
+                self.status = error;
+                return;
+            }
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         self.online.link = Some(LinkFlow {
             stage: LinkStage::Starting,
             reason,
             cancel: cancel.clone(),
             url: url.clone(),
+            origin: origin.clone(),
         });
         self.status = "Link this computer to PieceOff Online to create rooms.".into();
-        let Ok(base) = crate::online::http_base(&url) else {
-            if let Some(link) = &mut self.online.link {
-                link.stage = LinkStage::Failed("Invalid room server address".into());
-            }
-            return;
-        };
+        let base = origin;
         let tx = self.online_sender();
         thread::spawn(move || run_link(&base, &cancel, &tx));
     }
@@ -409,9 +446,14 @@ impl PieceOffApp {
         self.status = "Linking cancelled. Joining rooms works without it.".into();
     }
 
-    /// Forget this computer's PieceOff Online key.
+    /// Forget this computer's key for the selected server.
     pub(crate) fn unlink_device(&mut self) {
-        self.settings.device_key.clear();
+        if let Ok(origin) = self
+            .resolved_server_url()
+            .and_then(|url| self.device_key_origin(&url))
+        {
+            self.settings.device_keys.remove(&origin);
+        }
         self.persist_settings();
         self.status = "This computer is no longer linked to PieceOff Online.".into();
     }
@@ -628,7 +670,9 @@ impl PieceOffApp {
                 self.connect(message);
             }
             Ok(CreateOutcome::Relink) => {
-                self.settings.device_key.clear();
+                if let Ok(origin) = self.device_key_origin(&url) {
+                    self.settings.device_keys.remove(&origin);
+                }
                 self.persist_settings();
                 self.start_link(
                     url,
@@ -663,8 +707,9 @@ impl PieceOffApp {
             LinkEvent::Expired => link.stage = LinkStage::Expired,
             LinkEvent::Failed(error) => link.stage = LinkStage::Failed(error),
             LinkEvent::Approved(key) => {
+                let origin = link.origin.clone();
                 self.online.link = None;
-                self.settings.device_key = key;
+                self.settings.device_keys.insert(origin, key);
                 self.persist_settings();
                 self.status = "This computer is linked to PieceOff Online.".into();
                 if let Some((url, PendingAction::Create(message))) = self.online.pending.take() {
@@ -789,7 +834,7 @@ impl PieceOffApp {
             Some(ServiceKind::Hosted(info)) => {
                 if let Some(problem) = info.version_problem() {
                     ui.colored_label(WARNING, problem);
-                } else if self.settings.device_key.is_set() {
+                } else if self.current_device_linked() {
                     ui.horizontal_wrapped(|ui| {
                         status_dot(ui, SUCCESS);
                         ui.weak(language.text("PieceOff Online · this computer is linked"));

@@ -200,6 +200,9 @@ fn api_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(5).min(timeout))
         .timeout(timeout)
+        // Secrets (device keys, poll secrets) must never follow a redirect
+        // to another origin.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())
 }
@@ -281,10 +284,6 @@ impl DeviceKey {
         !self.0.is_empty()
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.0.clear();
-    }
-
     /// Drop anything that is not a well-formed key (a hand-edited file).
     pub(crate) fn sanitized(self) -> Self {
         Self::parse(&self.0).unwrap_or_default()
@@ -293,6 +292,36 @@ impl DeviceKey {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.0)
     }
+}
+
+/// The origin that issues PieceOff Online device keys today.
+pub(crate) const OFFICIAL_ORIGIN: &str = "https://rooms.pieceoff.app";
+
+pub(crate) const INSECURE_SERVER_MESSAGE: &str =
+    "Creating rooms on this server needs a secure (wss://) address. Joining works without it.";
+
+/// The origin (`https://host[:port]`, lower-cased, default port dropped) a
+/// device key for this room server belongs to. Keys are issued and used per
+/// origin and only over TLS: a plaintext server never gets or receives one,
+/// unless `allow_plaintext` (tests only).
+pub(crate) fn key_origin(ws_url: &str, allow_plaintext: bool) -> Result<String, String> {
+    let base = http_base(ws_url)?;
+    let (scheme, authority) = base
+        .split_once("://")
+        .ok_or("Invalid room server address")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && !(allow_plaintext && scheme == "http") {
+        return Err(INSECURE_SERVER_MESSAGE.into());
+    }
+    let mut authority = authority.to_ascii_lowercase();
+    let default_port = if scheme == "https" { ":443" } else { ":80" };
+    if let Some(stripped) = authority.strip_suffix(default_port) {
+        authority = stripped.to_owned();
+    }
+    if authority.is_empty() {
+        return Err("Invalid room server address".into());
+    }
+    Ok(format!("{scheme}://{authority}"))
 }
 
 /// `POST /api/links`: a code to approve in the browser. The poll secret is
@@ -453,14 +482,16 @@ pub(crate) fn classify_create(status: u16, body: &str) -> Result<CreateOutcome, 
     }
 }
 
+/// Create a room at `origin` with the key that origin issued. The request
+/// goes to exactly `origin`, which callers take from `key_origin`.
 pub(crate) fn create_room(
-    base: &str,
+    origin: &str,
     key: &DeviceKey,
     message: &ClientMessage,
 ) -> Result<CreateOutcome, String> {
     let body = serde_json::to_string(message).map_err(|error| error.to_string())?;
     let response = api_client(Duration::from_secs(20))?
-        .post(format!("{base}/api/rooms"))
+        .post(format!("{origin}/api/rooms"))
         .header(reqwest::header::AUTHORIZATION, key.bearer())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
@@ -658,6 +689,7 @@ impl HostedMedia {
             .connect_timeout(TransferTimeouts::DEFAULT.connect)
             .tcp_keepalive(Duration::from_secs(30))
             .timeout(None)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())
     }
@@ -1045,6 +1077,41 @@ mod tests {
         let stored: DeviceKey =
             serde_json::from_str("\"pok_<script>alert(1)</script>xxxx\"").unwrap();
         assert!(!stored.sanitized().is_set());
+    }
+
+    #[test]
+    fn device_keys_belong_to_exact_tls_origins() {
+        assert_eq!(
+            key_origin(ONLINE_SERVER_URL, false).unwrap(),
+            OFFICIAL_ORIGIN
+        );
+        assert_eq!(
+            key_origin("wss://Rooms.PieceOff.app:443/ws", false).unwrap(),
+            OFFICIAL_ORIGIN
+        );
+        assert_eq!(
+            key_origin("wss://rooms.pieceoff.app:8443/ws", false).unwrap(),
+            "https://rooms.pieceoff.app:8443"
+        );
+        assert_eq!(
+            key_origin("wss://evil.example/ws", false).unwrap(),
+            "https://evil.example"
+        );
+        for plaintext in [
+            "ws://rooms.pieceoff.app/ws",
+            "ws://127.0.0.1:8787/ws",
+            "ws://x:443/ws",
+        ] {
+            assert_eq!(
+                key_origin(plaintext, false).unwrap_err(),
+                INSECURE_SERVER_MESSAGE,
+                "{plaintext}"
+            );
+        }
+        assert_eq!(
+            key_origin("ws://127.0.0.1:80/ws", true).unwrap(),
+            "http://127.0.0.1"
+        );
     }
 
     #[test]

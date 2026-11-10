@@ -5008,7 +5008,12 @@ fn a_refused_device_key_is_cleared_and_relinking_resumes_the_create() {
         startup_media: None,
         ..PieceOffApp::default()
     };
-    app.settings.device_key = online::DeviceKey::parse(TEST_DEVICE_KEY).unwrap();
+    app.online.allow_plaintext_keys = true;
+    let origin = app.device_key_origin(&url).unwrap();
+    app.settings.device_keys.insert(
+        origin.clone(),
+        online::DeviceKey::parse(TEST_DEVICE_KEY).unwrap(),
+    );
     app.online
         .remember_service(&url, online::ServiceKind::Hosted(info));
     app.media_path = Some(PathBuf::from("Slow Orbit.webp"));
@@ -5024,14 +5029,14 @@ fn a_refused_device_key_is_cleared_and_relinking_resumes_the_create() {
             .is_some_and(|link| link.reason.is_some())
     });
     assert!(
-        !app.settings.device_key.is_set(),
+        !app.settings.device_keys.contains_key(&origin),
         "the refused key is forgotten"
     );
     pump_online(&mut app, &ctx, |app| app.online.session.is_some());
     assert!(app.online.link.is_none());
     assert_eq!(
-        app.settings.device_key,
-        online::DeviceKey::parse("pok_NEWKEYabcdefghijklmnopqrstuvwxyz0123456789").unwrap()
+        app.settings.device_keys.get(&origin),
+        online::DeviceKey::parse("pok_NEWKEYabcdefghijklmnopqrstuvwxyz0123456789").as_ref()
     );
     let session = app.online.session.clone().unwrap();
     assert_eq!(session.code, "WXYZ6789");
@@ -5110,4 +5115,146 @@ fn public_listing_needs_a_hosted_lobby_and_built_in_media() {
     app.begin_create(app.create_request());
     assert_eq!(app.status, online::BUILTIN_ONLY_MESSAGE);
     assert!(app.network.is_none());
+}
+
+/// An app on a hosted stub at `url` with a built-in puzzle ready to create.
+fn hosted_app_with_builtin(url: &str) -> PieceOffApp {
+    let info: online::ServiceInfo = serde_json::from_str(
+        &HOSTED_INFO.replace("15", &pieceoff_core::PROTOCOL_VERSION.to_string()),
+    )
+    .unwrap();
+    let mut app = PieceOffApp {
+        server_url: url.to_owned(),
+        startup_media: None,
+        ..PieceOffApp::default()
+    };
+    app.online
+        .remember_service(url, online::ServiceKind::Hosted(info));
+    app.media_path = Some(PathBuf::from("Slow Orbit.webp"));
+    app.media_hash = pieceoff_core::BUILTIN_MEDIA_SHA256[0].0.into();
+    app.media_extension = "webp".into();
+    app.media_size = (64, 48);
+    app
+}
+
+#[test]
+fn a_device_key_is_never_sent_to_another_origin_and_a_new_link_is_stored_under_its_own() {
+    // Server B has never issued a key: creating there must link B, not
+    // present the key that origin A issued.
+    let (url, server) = http_stub(3, |request| {
+        let key_a = TEST_DEVICE_KEY.to_ascii_lowercase();
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|header| !header.contains(&key_a)),
+            "origin A's key reached B: {}",
+            request.line
+        );
+        assert!(
+            !request
+                .body
+                .windows(TEST_DEVICE_KEY.len())
+                .any(|w| w == TEST_DEVICE_KEY.as_bytes())
+        );
+        if request.line.starts_with("POST /api/rooms") {
+            assert_eq!(
+                request.header("authorization"),
+                Some("bearer pok_keyforbabcdefghijklmnopqrstuvwxyz0123456"),
+                "B's own key creates the room"
+            );
+        } else {
+            assert!(
+                request
+                    .header("authorization")
+                    .is_none_or(|value| !value.contains("pok_")),
+                "no device key before B issued one: {}",
+                request.line
+            );
+        }
+        match request.line.as_str() {
+            "POST /api/links HTTP/1.1" => (
+                200,
+                String::new(),
+                br#"{"link_code":"ABCD2345","poll_secret":"poll-b","url":"https://pieceoff.app/link?c=ABCD2345","expires_in":600}"#.to_vec(),
+            ),
+            "GET /api/links/ABCD2345 HTTP/1.1" => (
+                200,
+                String::new(),
+                br#"{"status":"approved","device_key":"pok_KEYFORBabcdefghijklmnopqrstuvwxyz0123456"}"#.to_vec(),
+            ),
+            line => {
+                assert_eq!(line, "POST /api/rooms HTTP/1.1");
+                (
+                    200,
+                    String::new(),
+                    br#"{"code":"WXYZ6789","client_id":"host","resume_token":"creator-secret"}"#.to_vec(),
+                )
+            }
+        }
+    });
+    let ctx = egui::Context::default();
+    let mut app = hosted_app_with_builtin(&url);
+    app.online.allow_plaintext_keys = true;
+    let key_a = online::DeviceKey::parse(TEST_DEVICE_KEY).unwrap();
+    app.settings
+        .device_keys
+        .insert("https://a.example".into(), key_a.clone());
+    let origin_b = app.device_key_origin(&url).unwrap();
+    app.begin_create(app.create_request());
+    assert!(app.online.link.is_some(), "B needs its own link");
+    pump_online(&mut app, &ctx, |app| app.online.session.is_some());
+    assert_eq!(
+        app.settings.device_keys.get("https://a.example"),
+        Some(&key_a)
+    );
+    assert_eq!(
+        app.settings.device_keys.get(&origin_b),
+        online::DeviceKey::parse("pok_KEYFORBabcdefghijklmnopqrstuvwxyz0123456").as_ref()
+    );
+    app.leave_room();
+    // The third request created the room with B's key (checked by the stub
+    // never seeing A's), and nothing else was asked.
+    let seen = server.join().unwrap();
+    assert_eq!(seen.len(), 3);
+}
+
+#[test]
+fn a_plaintext_server_never_gets_or_receives_a_device_key() {
+    // Nothing listens here: any request at all would fail the test's
+    // expectations below (a link window or a create in flight).
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/ws", closed.local_addr().unwrap());
+    drop(closed);
+    let mut app = hosted_app_with_builtin(&url);
+    // Even a key stored under the plaintext origin is not used.
+    app.settings.device_keys.insert(
+        format!(
+            "http://{}",
+            url.trim_start_matches("ws://").trim_end_matches("/ws")
+        ),
+        online::DeviceKey::parse(TEST_DEVICE_KEY).unwrap(),
+    );
+    app.begin_create(app.create_request());
+    assert_eq!(app.status, online::INSECURE_SERVER_MESSAGE);
+    assert!(app.online.link.is_none(), "no link flow on plaintext");
+    assert!(!app.online.busy && app.network.is_none());
+    app.start_link(url.clone(), None);
+    assert!(app.online.link.is_none());
+    assert_eq!(app.status, online::INSECURE_SERVER_MESSAGE);
+}
+
+#[test]
+fn a_legacy_device_key_moves_to_the_official_origin_only() {
+    let mut settings: Settings = serde_json::from_str(&format!(
+        r#"{{"device_key":"{TEST_DEVICE_KEY}","device_keys":{{"http://plain.example":"{TEST_DEVICE_KEY}","https://ok.example":"nonsense"}}}}"#
+    ))
+    .unwrap();
+    settings.tidy_device_keys();
+    assert_eq!(
+        settings.device_keys.keys().collect::<Vec<_>>(),
+        [online::OFFICIAL_ORIGIN]
+    );
+    let saved = serde_json::to_string(&settings).unwrap();
+    assert!(!saved.contains("\"device_key\""), "{saved}");
 }

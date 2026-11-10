@@ -82,9 +82,33 @@ pub(crate) struct Settings {
     pub(crate) player_key: String,
     /// The last "Local or LAN" server, kept while PieceOff Online is chosen.
     pub(crate) lan_server_url: Option<String>,
-    /// This computer's PieceOff Online key for creating rooms; empty until
-    /// the device is linked. Never logged.
+    /// Device keys for creating rooms on hosted servers, by the exact TLS
+    /// origin that issued each (`https://host[:port]`). A key is only ever
+    /// sent back to its own origin. Never logged.
+    pub(crate) device_keys: std::collections::BTreeMap<String, crate::online::DeviceKey>,
+    /// The single key earlier builds kept; read once and moved to
+    /// `device_keys` under the official origin, never written again.
+    #[serde(skip_serializing)]
     pub(crate) device_key: crate::online::DeviceKey,
+}
+
+impl Settings {
+    /// Move a legacy key to the official origin and drop malformed entries.
+    pub(crate) fn tidy_device_keys(&mut self) {
+        let legacy = std::mem::take(&mut self.device_key).sanitized();
+        if legacy.is_set() {
+            self.device_keys
+                .entry(crate::online::OFFICIAL_ORIGIN.to_owned())
+                .or_insert(legacy);
+        }
+        let keys = std::mem::take(&mut self.device_keys);
+        self.device_keys = keys
+            .into_iter()
+            .filter(|(origin, _)| origin.starts_with("https://") && origin.len() <= 256)
+            .map(|(origin, key)| (origin, key.sanitized()))
+            .filter(|(_, key)| key.is_set())
+            .collect();
+    }
 }
 
 /// Whether `key` looks like a key `new_player_key` made.

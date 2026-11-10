@@ -84,7 +84,8 @@ The app starts on **Online**: rooms run on PieceOff Online
 - **Linking this computer.** The first time you create a room online, the app
   shows a code and an **Open browser** button. Approve the code on
   `pieceoff.app/link` (a quick anti-spam check) and the app carries on; it
-  keeps a private device key in its settings. Joining never needs this. If the
+  keeps a private device key in its settings, which it only ever sends back
+  to the secure (`wss://`) server that issued it. Joining never needs this. If the
   key is revoked the app asks you to link again. **Unlink** in the Room server
   card forgets it.
 - **Your own files.** PieceOff Online uses the built-in puzzles for now. To
