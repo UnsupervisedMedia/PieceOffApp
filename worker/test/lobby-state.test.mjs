@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { entryChanged, expired, lobbyAction, normalizeEntry, sanitizeText, sortLobby } from "../src/lobby-state.ts";
+import { entryChanged, expired, lobbyAction, lobbyCheckTime, normalizeEntry, sanitizeText, sortLobby } from "../src/lobby-state.ts";
 
 const entry = (over = {}) => ({
   code: "ABCDEFGH", title: "Slow Orbit", host_name: "Host", players: 1, max_players: 8,
@@ -55,6 +55,20 @@ describe("lobby timing", () => {
     assert.equal(lobbyAction({ ...base, lastSentAt: 30_000 }), "upsert");
     assert.equal(lobbyAction({ ...base, wanted: false, lastSentAt: 99_999 }), "remove");
     assert.equal(lobbyAction({ ...base, wanted: false, listed: false }), "none");
+  });
+  it("looks again as soon as a throttled upsert may go out, not a whole period later", () => {
+    const checked = (over) => {
+      const input = { ...base, ...over };
+      return lobbyCheckTime({ ...input, action: lobbyAction(input) });
+    };
+    // Relisted (or changed) 5 s after the last upsert: due at 105 000, not 110 000.
+    assert.equal(checked({ listed: false }), 95_000);
+    assert.equal(checked({ dirty: true }), 95_000);
+    // Sent, removed, or nothing due: the next look is a period from now.
+    assert.equal(checked({ listed: false, lastSentAt: 0 }), 100_000);
+    assert.equal(checked({}), 100_000);
+    assert.equal(checked({ wanted: false }), 100_000);
+    assert.equal(checked({ wanted: false, listed: false }), 100_000);
   });
   it("expires entries with no heartbeat for the expiry period", () => {
     assert.equal(expired(0, 149_999, 150_000), false);

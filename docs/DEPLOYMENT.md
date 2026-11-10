@@ -363,6 +363,12 @@ lobby listing, updates, removal and expiry with built-in titles, the
 listed-room built-in rule, and the uploads-off refusals). Nothing is deployed
 by it.
 
+`scripts/online-e2e.sh` plays the desktop app against that Worker: it starts
+`wrangler dev --local` with the production settings (uploads off, Turnstile
+required) and a loopback Turnstile stand-in, then runs the ignored test
+`e2e::online::` (see [TESTING.md](TESTING.md)). About a minute; nothing is
+deployed.
+
 ## Limits
 
 - One process, one machine, local disk. A second server is a separate

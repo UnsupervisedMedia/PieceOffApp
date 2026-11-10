@@ -88,7 +88,7 @@ export function expired(heartbeatAt: number, now: number, expiryMs: number): boo
  * What a room should do about the lobby now: send an upsert, send a remove,
  * or nothing. Upserts are throttled; a remove is never delayed.
  */
-export function lobbyAction(input: {
+export interface LobbyTiming {
   /** The entry the room would show, or null if it should not be listed. */
   wanted: boolean;
   /** The lobby currently has (or may have) this room. */
@@ -99,9 +99,23 @@ export function lobbyAction(input: {
   lastSentAt: number;
   throttleMs: number;
   heartbeatMs: number;
-}): "upsert" | "remove" | "none" {
+}
+
+export function lobbyAction(input: LobbyTiming): "upsert" | "remove" | "none" {
   if (!input.wanted) return input.listed ? "remove" : "none";
   const since = input.now - input.lastSentAt;
   if (!input.listed || input.dirty) return since >= input.throttleMs ? "upsert" : "none";
   return since >= input.heartbeatMs ? "upsert" : "none";
+}
+
+/**
+ * The time to record as a room's last lobby check (rooms look at most once
+ * per throttle period between joins and leaves). An upsert that is due but
+ * held back by the throttle may go out at `lastSentAt + throttleMs`, so the
+ * next look must not wait a whole period from now: that would delay, say, a
+ * room relisted after a brief empty spell by up to twice the throttle.
+ */
+export function lobbyCheckTime(input: LobbyTiming & { action: "upsert" | "remove" | "none" }): number {
+  const held = input.action === "none" && input.wanted && (!input.listed || input.dirty);
+  return held ? Math.min(input.now, input.lastSentAt) : input.now;
 }

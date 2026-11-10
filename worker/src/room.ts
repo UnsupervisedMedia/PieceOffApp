@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Room, UPLOADS_OFF_ERROR, builtinTitle, uploadsEnabled } from "./core.ts";
 import type { Env } from "./env";
 import { numVar } from "./http.ts";
-import { type LobbyEntry, MAX_HOST_NAME, lobbyAction, sanitizeText } from "./lobby-state.ts";
+import { type LobbyEntry, MAX_HOST_NAME, lobbyAction, lobbyCheckTime, sanitizeText } from "./lobby-state.ts";
 import type { Reserved } from "./registry.ts";
 import {
   type Failure,
@@ -1268,10 +1268,9 @@ export class RoomDO extends DurableObject<Env> {
       const quietFor = now - this.lobbySentAt;
       if (this.lobbyListed && !this.lobbyDirty && quietFor < heartbeatMs) return;
     }
-    this.lobbyCheckedAt = now;
     const snapshot = this.lobbySnapshot();
     const entry = this.lobbyEntry(snapshot, now);
-    const action = lobbyAction({
+    const timing = {
       wanted: entry !== null,
       listed: this.lobbyListed,
       dirty: this.lobbyDirty,
@@ -1279,7 +1278,9 @@ export class RoomDO extends DurableObject<Env> {
       lastSentAt: this.lobbySentAt,
       throttleMs,
       heartbeatMs,
-    });
+    };
+    const action = lobbyAction(timing);
+    this.lobbyCheckedAt = lobbyCheckTime({ ...timing, action });
     try {
       if (action === "upsert" && entry !== null) {
         await this.lobbyStub().upsert(entry);

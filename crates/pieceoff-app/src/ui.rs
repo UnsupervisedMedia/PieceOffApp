@@ -1196,7 +1196,8 @@ impl PieceOffApp {
                     player_key: self.settings.player_key.clone(),
                 };
                 // A hosted session stays in place, so the player keeps its
-                // identity (and the host role) across reconnects.
+                // identity across reconnects (and the host role, unless it
+                // passed to a player who stayed, as on any room server).
                 self.connect(message);
             } else if let Some(remaining) = reconnect_at.checked_duration_since(Instant::now()) {
                 ctx.request_repaint_after(remaining);

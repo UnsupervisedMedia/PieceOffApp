@@ -3,12 +3,11 @@
 // local `wrangler dev`.
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import http from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { connect, delay, freePort, joinMessage, ofType, rawRequest, startServer } from "./helpers.mjs";
+import { connect, delay, fakeTurnstile, freePort, joinMessage, ofType, rawRequest, startServer } from "./helpers.mjs";
 
 const SITE = "https://pieceoff.app";
 const SLOW_ORBIT = "f50f079590abeae947fc87405072a1e8f75cfc8d64694726a75cc5d612f8db80";
@@ -32,22 +31,11 @@ async function boot(vars) {
   return port;
 }
 
-/** Stand-in for Turnstile siteverify: token "good-<action>" passes for that action. */
+/** Stand-in for Turnstile siteverify (see `fakeTurnstile` in helpers). */
 async function fakeVerifier() {
-  const port = await freePort();
-  const server = http.createServer((req, res) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      const token = new URLSearchParams(data).get("response") ?? "";
-      const action = token.startsWith("good-") ? token.slice(5).replace("-", "_") : "";
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: action !== "", hostname: "pieceoff.app", action }));
-    });
-  });
-  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
-  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
-  return `http://127.0.0.1:${port}/verify`;
+  const verifier = await fakeTurnstile();
+  cleanups.push(verifier.close);
+  return verifier.url;
 }
 
 const roomBody = (over = {}) => JSON.stringify({

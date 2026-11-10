@@ -175,3 +175,27 @@ export const createBody = JSON.stringify({
   columns: 4,
   duration_ms: 5000,
 });
+
+/**
+ * Stand-in for Turnstile siteverify on a loopback port: token "good-<action>"
+ * (dashes for underscores, e.g. "good-link-device") passes for that action
+ * on hostname pieceoff.app; anything else fails.
+ */
+export async function fakeTurnstile() {
+  const port = await freePort();
+  const server = http.createServer((req, res) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => {
+      const token = new URLSearchParams(data).get("response") ?? "";
+      const action = token.startsWith("good-") ? token.slice(5).replace("-", "_") : "";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ success: action !== "", hostname: "pieceoff.app", action }));
+    });
+  });
+  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${port}/verify`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}

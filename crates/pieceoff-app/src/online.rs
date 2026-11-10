@@ -475,9 +475,12 @@ pub(crate) fn classify_create(status: u16, body: &str) -> Result<CreateOutcome, 
             Ok(CreateOutcome::Created(CreatedRoom { code, ..created }))
         }
         401 => Ok(CreateOutcome::Relink),
-        403 => Err(json_error(body)
-            .map(|error| format!("PieceOff Online refused to create the room: {error}"))
-            .unwrap_or_else(|| "PieceOff Online refused to create the room.".into())),
+        403 => Err(match json_error(body) {
+            // Already a sentence about the service (uploads off, for one).
+            Some(error) if error.starts_with("PieceOff Online") => error,
+            Some(error) => format!("PieceOff Online refused to create the room: {error}"),
+            None => "PieceOff Online refused to create the room.".into(),
+        }),
         status => Err(describe_http_failure(status, body)),
     }
 }
@@ -1170,6 +1173,11 @@ mod tests {
             classify_create(403, r#"{"error":"Verification failed"}"#)
                 .unwrap_err()
                 .contains("Verification failed")
+        );
+        let uploads_off = format!(r#"{{"error":"{BUILTIN_ONLY_MESSAGE}"}}"#);
+        assert_eq!(
+            classify_create(403, &uploads_off).unwrap_err(),
+            BUILTIN_ONLY_MESSAGE
         );
     }
 
