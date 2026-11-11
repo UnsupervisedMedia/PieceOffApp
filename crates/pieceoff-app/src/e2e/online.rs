@@ -648,3 +648,174 @@ fn two_desktop_apps_play_together_on_the_rooms_worker() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Against the LIVE service (default `wss://rooms.pieceoff.app/ws`): the real
+/// Turnstile on the real /link page, over TLS. Prints the link page and writes
+/// it to `$PIECEOFF_LIVE_LINK_FILE` (if set), then waits up to five minutes for
+/// a person to approve it in a browser. The room is listed briefly, then
+/// delisted and left. Run by hand only:
+/// `cargo test -p pieceoff-app --bin pieceoff-app live_service -- --ignored --nocapture`
+#[test]
+#[ignore = "talks to the live service and needs a person to pass Turnstile"]
+fn live_service_link_create_join_and_play() {
+    let _serial = serial();
+    let server = env_or("PIECEOFF_LIVE_URL", "wss://rooms.pieceoff.app/ws");
+    let root = scratch("live");
+    let mut host = Player::new("LiveHost", &server, &root);
+    let mut guest = Player::new("LiveGuest", &server, &root);
+
+    host.app.ensure_service_check();
+    pump(
+        &mut [&mut host],
+        Duration::from_secs(30),
+        "the server check",
+        |p| p[0].app.current_service().is_some(),
+    );
+    let info = host
+        .app
+        .current_hosted()
+        .cloned()
+        .unwrap_or_else(|| panic!("not detected as hosted: {}", host.app.status));
+    assert_eq!(info.protocol, u32::from(pieceoff_core::PROTOCOL_VERSION));
+    assert!(info.has_feature("lobby") && info.has_feature("device_keys"));
+
+    let (title, _, filename, bytes) = crate::library_ui::BUILT_INS
+        .into_iter()
+        .find(|built_in| built_in.0 == SLOW_ORBIT)
+        .unwrap();
+    let ctx = host.ctx.clone();
+    host.app.open_builtin(title, filename, bytes, &ctx);
+    pump(
+        &mut [&mut host],
+        Duration::from_secs(20),
+        "the built-in loop",
+        |p| p[0].app.media_path.is_some() && p[0].app.media_size.0 > 0,
+    );
+    (host.app.rows, host.app.columns) = (3, 4);
+    host.app.online.list_publicly = true;
+    host.app.create_room();
+
+    pump(
+        &mut [&mut host],
+        Duration::from_secs(30),
+        "a link code",
+        |p| {
+            p[0].app
+                .online
+                .link
+                .as_ref()
+                .is_some_and(|link| matches!(link.stage, LinkStage::Waiting { .. }))
+        },
+    );
+    let link_page = match &host.app.online.link.as_ref().unwrap().stage {
+        LinkStage::Waiting { url, .. } => url.clone(),
+        _ => unreachable!(),
+    };
+    println!("LIVE LINK PAGE: {link_page}");
+    if let Ok(path) = std::env::var("PIECEOFF_LIVE_LINK_FILE") {
+        std::fs::write(path, &link_page).unwrap();
+    }
+
+    pump(
+        &mut [&mut host],
+        Duration::from_secs(300),
+        "approval and the hosted room",
+        |p| p[0].in_room() && p[0].app.media_ready,
+    );
+    assert!(host.app.current_device_linked());
+    assert!(host.app.is_host());
+    assert!(!host.app.status.contains("pok_"));
+    let code = host.snapshot().invite_code.clone();
+    println!("LIVE ROOM: {code}");
+    assert!(host.snapshot().listed);
+
+    let rooms = lobby_until(
+        &mut [&mut host, &mut guest],
+        1,
+        Duration::from_secs(40),
+        "the room in the live lobby",
+        |rooms| entry(rooms, &code).is_some(),
+    );
+    assert_eq!(entry(&rooms, &code).unwrap().title, SLOW_ORBIT);
+
+    guest.app.invite_code = online::invite_link(info.share_url(), &code);
+    guest.app.join_room();
+    pump(
+        &mut [&mut guest, &mut host],
+        Duration::from_secs(60),
+        "the guest to join",
+        |p| p[0].in_room() && p[0].app.media_ready,
+    );
+    assert_eq!(guest.snapshot().invite_code, code);
+
+    let (cw, ch) = (
+        guest.snapshot().cell_width(),
+        guest.snapshot().cell_height(),
+    );
+    let piece = guest.snapshot().pieces[5].clone();
+    let (x, y) = (f32::from(piece.column) * cw, f32::from(piece.row) * ch);
+    guest.app.send(ClientMessage::DragStartSelection {
+        piece_ids: vec![piece.id],
+    });
+    guest.app.send(ClientMessage::MoveSelection {
+        anchor_piece_id: piece.id,
+        x: x + 40.0,
+        y: y + 40.0,
+    });
+    guest.app.send(ClientMessage::DragEndSelection {
+        anchor_piece_id: piece.id,
+        x,
+        y,
+    });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(20),
+        "the piece to snap for both",
+        |p| {
+            p.iter().all(|player| {
+                player
+                    .snapshot()
+                    .pieces
+                    .iter()
+                    .any(|p| p.id == piece.id && p.placed)
+            })
+        },
+    );
+
+    host.app
+        .send(ClientMessage::SetChatEnabled { enabled: true });
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(20),
+        "chat on",
+        |p| p[1].snapshot().chat_enabled,
+    );
+    guest.app.chat.draft = "live hello".into();
+    guest.app.send_chat();
+    pump(
+        &mut [&mut host, &mut guest],
+        Duration::from_secs(20),
+        "the chat line on the host",
+        |p| {
+            p[0].app
+                .chat
+                .entries
+                .iter()
+                .any(|e| matches!(e, ChatEntry::Line(l) if l.text == "live hello"))
+        },
+    );
+
+    host.app.send(ClientMessage::SetListed { listed: false });
+    lobby_until(
+        &mut [&mut host, &mut guest],
+        1,
+        Duration::from_secs(40),
+        "the room to leave the lobby",
+        |rooms| entry(rooms, &code).is_none(),
+    );
+    guest.app.leave_room();
+    host.app.leave_room();
+    run_for(&mut [&mut host, &mut guest], Duration::from_millis(500));
+    println!("LIVE SMOKE PASSED: room {code}");
+    let _ = std::fs::remove_dir_all(root);
+}
