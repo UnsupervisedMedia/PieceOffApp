@@ -158,8 +158,10 @@ DEST="$INSTALL_ROOT/versions/$VERSION"
 mkdir -p "$INSTALL_ROOT/versions" "$BIN_DIR"
 mkdir -p "$DEST"
 cp -R "$PACKAGE/." "$DEST/"
-ln -sfn "$DEST" "$INSTALL_ROOT/current.new"
-mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+# `current` is a symlink to a directory, so `mv current.new current` would move
+# the new link *into* the old version instead of replacing it. `ln -sfn` swaps
+# the link itself (unlink + symlink; not atomic, but portable to macOS).
+ln -sfn "$DEST" "$INSTALL_ROOT/current"
 cat >"$INSTALL_ROOT/pieceoff.new" <<'LAUNCHER'
 #!/bin/sh
 set -eu
