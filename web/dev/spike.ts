@@ -8,6 +8,9 @@ import { buildMesh, strideFor, type Mesh } from '../src/gl/mesh';
 import { BoardRenderer, type FrameInfo } from '../src/gl/renderer';
 import { FLAG_HELD, FLAG_PLACED, FLAG_SELECTED } from '../src/gl/shaders';
 import { devSnapshot, tableBounds } from './fixture';
+import { hitTest, type PieceGeom } from '../src/input/hit';
+import { GestureMachine, type Rect } from '../src/input/gestures';
+import { attachPointerEvents } from '../src/input/pointer';
 
 const q = new URLSearchParams(location.search);
 const PIECES = Math.max(4, Math.min(2000, Number(q.get('pieces') ?? 400) || 400));
@@ -46,12 +49,14 @@ interface Stats {
   videoReadyState: number;
   bench: boolean;
   errors: string[];
+  pings: [number, number][];
+  rubberBand: Rect | null;
 }
 
 const stats: Stats = {
   frames: 0, avgMs: 0, p95Ms: 0, pctOver20: 0, jsMs: 0, rendersPerSec: 0, videoFps: 0,
   glRenderer: '', dpr: 1, pieces: 0, cut: CUT, cap: CAP_PARAM, stride: 1, vertices: 0, triangles: 0,
-  meshBuildMs: 0, contextLost: false, videoPaused: true, videoReadyState: 0, bench, errors: [],
+  meshBuildMs: 0, contextLost: false, videoPaused: true, videoReadyState: 0, bench, errors: [], pings: [], rubberBand: null,
 };
 addEventListener('error', (e) => stats.errors.push(String(e.message)));
 addEventListener('unhandledrejection', (e) => stats.errors.push(String(e.reason)));
@@ -171,117 +176,117 @@ async function main(): Promise<void> {
   };
   tick();
 
-  // ---- input (simple: the full gesture machine is Task 6) ----
-  const pointers = new Map<number, { x: number; y: number }>();
-  let drag: { i: number; dx: number; dy: number; pointer: number } | null = null;
-  let pinch: { dist: number; cx: number; cy: number } | null = null;
-  let lastTouched = -1;
-
-  const pick = (sx: number, sy: number): number => {
-    const [tx, ty] = cam.toTable(sx, sy);
-    let best = -1;
-    let bestDepth = -Infinity;
-    const hx = cw / 2;
-    const hy = ch / 2;
-    const pts = outline.points;
+  // ---- input: the gesture machine (src/input) ----
+  const geoms: PieceGeom[] = snap.pieces.map((p, i) => ({
+    id: outline.ids[i], x: px[i], y: py[i], rotation: 0, pivotX: cw / 2, pivotY: ch / 2, depth: 0,
+    points: outline.points.subarray(outline.offsets[i], outline.offsets[i + 1]),
+  }));
+  const indexOf = new Map<number, number>();
+  outline.ids.forEach((id, i) => indexOf.set(id, i));
+  const pickId = (sx: number, sy: number, tolPx: number): number | null => {
     for (let i = 0; i < n; i++) {
-      // Into piece-local space: undo position, then the quarter turn about the cell centre.
-      let lx = tx - px[i] - hx;
-      let ly = ty - py[i] - hy;
-      for (let r = 0; r < rot[i]; r++) [lx, ly] = [ly, -lx];
-      lx += hx;
-      ly += hy;
-      if (lx < -cw || ly < -ch || lx > 2 * cw || ly > 2 * ch) continue;
-      let inside = false;
-      const a = outline.offsets[i];
-      const b = outline.offsets[i + 1];
-      for (let k = a, j = b - 2; k < b; j = k, k += 2) {
-        const xi = pts[k], yi = pts[k + 1], xj = pts[j], yj = pts[j + 1];
-        if (yi > ly !== yj > ly && lx < ((xj - xi) * (ly - yi)) / (yj - yi) + xi) inside = !inside;
-      }
-      if (!inside) continue;
-      const d = renderer.pieceDepth(snap.pieces[i].id);
-      if (d > bestDepth) ((bestDepth = d), (best = i));
+      const g = geoms[i];
+      g.x = px[i];
+      g.y = py[i];
+      g.rotation = rot[i];
+      g.depth = renderer.pieceDepth(g.id);
     }
-    return best;
+    const [tx, ty] = cam.toTable(sx, sy);
+    return hitTest(geoms, tx, ty, tolPx / cam.scale);
+  };
+  /** Snapshot piece index under screen point (sx, sy), or -1. */
+  const pick = (sx: number, sy: number): number => {
+    const id = pickId(sx, sy, 0);
+    return id === null ? -1 : (indexOf.get(id) ?? -1);
   };
   const push = (i: number) => renderer.setPiece(snap.pieces[i].id, px[i], py[i], rot[i], flags[i]);
+  const view = () => {
+    maybeRebuild();
+    renderer.requestRender();
+  };
 
-  canvas.addEventListener('pointerdown', (e) => {
-    if (video.paused && !userPaused) video.play().catch(() => undefined);
-    canvas.setPointerCapture(e.pointerId);
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pointers.size === 1) {
-      const i = pick(e.clientX, e.clientY);
-      if (i >= 0) {
-        const [tx, ty] = cam.toTable(e.clientX, e.clientY);
-        drag = { i, dx: tx - px[i], dy: ty - py[i], pointer: e.pointerId };
-        if (lastTouched >= 0 && lastTouched !== i) ((flags[lastTouched] &= ~FLAG_SELECTED), push(lastTouched));
-        lastTouched = i;
-        flags[i] = (flags[i] | FLAG_HELD | FLAG_SELECTED) & ~FLAG_PLACED;
-        push(i);
-      }
-    } else if (pointers.size === 2) {
-      if (drag) endDrag();
-      const [p1, p2] = [...pointers.values()];
-      pinch = { dist: Math.hypot(p1.x - p2.x, p1.y - p2.y), cx: (p1.x + p2.x) / 2, cy: (p1.y + p2.y) / 2 };
-    }
-  });
-  canvas.addEventListener('pointermove', (e) => {
-    const prev = pointers.get(e.pointerId);
-    if (!prev) return;
-    const cur = { x: e.clientX, y: e.clientY };
-    pointers.set(e.pointerId, cur);
-    if (pinch && pointers.size === 2) {
-      const [p1, p2] = [...pointers.values()];
-      const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
-      const cx = (p1.x + p2.x) / 2;
-      const cy = (p1.y + p2.y) / 2;
-      cam.panBy(cx - pinch.cx, cy - pinch.cy);
-      if (pinch.dist > 0) cam.zoomAt(cx, cy, dist / pinch.dist);
-      pinch = { dist, cx, cy };
-      maybeRebuild();
-      renderer.requestRender();
-    } else if (drag && drag.pointer === e.pointerId) {
-      const [tx, ty] = cam.toTable(cur.x, cur.y);
+  let drag: { i: number; dx: number; dy: number; x0: number; y0: number; flags0: number } | null = null;
+  let lastTouched = -1;
+  const setSelected = (i: number, on: boolean) => {
+    flags[i] = on ? flags[i] | FLAG_SELECTED : flags[i] & ~FLAG_SELECTED;
+    push(i);
+  };
+  const machine = new GestureMachine({
+    hit: pickId,
+    toTable: (sx, sy) => cam.toTable(sx, sy),
+    dragStart(id, tx, ty) {
+      const i = indexOf.get(id);
+      if (i === undefined) return;
+      drag = { i, dx: tx - px[i], dy: ty - py[i], x0: px[i], y0: py[i], flags0: flags[i] };
+      lastTouched = i;
+      flags[i] = (flags[i] | FLAG_HELD) & ~FLAG_PLACED;
+      push(i);
+    },
+    dragMove(tx, ty) {
+      if (!drag) return;
       px[drag.i] = tx - drag.dx;
       py[drag.i] = ty - drag.dy;
       push(drag.i);
-    } else if (pointers.size === 1) {
-      cam.panBy(cur.x - prev.x, cur.y - prev.y);
-      renderer.requestRender();
-    }
-  });
-  const endDrag = () => {
-    if (!drag) return;
-    const i = drag.i;
-    const p = snap.pieces[i];
-    flags[i] &= ~FLAG_HELD;
-    if (rot[i] === 0 && Math.abs(px[i] - p.column * cw) < cw * 0.3 && Math.abs(py[i] - p.row * ch) < ch * 0.3) {
-      px[i] = p.column * cw;
-      py[i] = p.row * ch;
-      flags[i] = FLAG_PLACED;
-    }
-    push(i);
-    drag = null;
-  };
-  const up = (e: PointerEvent) => {
-    pointers.delete(e.pointerId);
-    if (drag && drag.pointer === e.pointerId) endDrag();
-    if (pointers.size < 2) pinch = null;
-  };
-  canvas.addEventListener('pointerup', up);
-  canvas.addEventListener('pointercancel', up);
-  canvas.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault();
-      cam.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015));
-      maybeRebuild();
-      renderer.requestRender();
     },
-    { passive: false },
-  );
+    dragEnd() {
+      if (!drag) return;
+      const i = drag.i;
+      const p = snap.pieces[i];
+      flags[i] &= ~FLAG_HELD;
+      if (rot[i] === 0 && Math.abs(px[i] - p.column * cw) < cw * 0.3 && Math.abs(py[i] - p.row * ch) < ch * 0.3) {
+        px[i] = p.column * cw;
+        py[i] = p.row * ch;
+        flags[i] = (flags[i] & FLAG_SELECTED) | FLAG_PLACED;
+      }
+      push(i);
+      drag = null;
+    },
+    dragCancel() {
+      if (!drag) return;
+      px[drag.i] = drag.x0;
+      py[drag.i] = drag.y0;
+      flags[drag.i] = drag.flags0;
+      push(drag.i);
+      drag = null;
+    },
+    pan(dx, dy) {
+      cam.panBy(dx, dy);
+      view();
+    },
+    pinch(cx, cy, f) {
+      cam.zoomAt(cx, cy, f);
+      view();
+    },
+    toggleSelect(id) {
+      const i = indexOf.get(id);
+      if (i === undefined) return;
+      lastTouched = i;
+      setSelected(i, (flags[i] & FLAG_SELECTED) === 0);
+    },
+    rubberBand(rect) {
+      stats.rubberBand = rect;
+    },
+    selectRect(r, additive) {
+      for (let i = 0; i < n; i++) {
+        const x = px[i] + cw / 2;
+        const y = py[i] + ch / 2;
+        const inside = x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h;
+        if (inside) setSelected(i, true);
+        else if (!additive && flags[i] & FLAG_SELECTED) setSelected(i, false);
+      }
+    },
+    ping(tx, ty) {
+      stats.pings.push([tx, ty]);
+    },
+    wheelZoom(sx, sy, f) {
+      cam.zoomAt(sx, sy, f);
+      view();
+    },
+  });
+  attachPointerEvents(canvas, machine, cam);
+  canvas.addEventListener('pointerdown', () => {
+    if (video.paused && !userPaused) video.play().catch(() => undefined);
+  });
 
   const turn = () => {
     if (lastTouched < 0) return;
