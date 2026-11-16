@@ -40,7 +40,7 @@ pub use timelapse::{
     MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
 };
 
-pub const PROTOCOL_VERSION: u16 = 17;
+pub const PROTOCOL_VERSION: u16 = 18;
 /// The most pieces one room may hold, and the most rows or columns.
 pub const MAX_PIECES: u32 = 1000;
 pub const MAX_GRID_SIDE: u16 = 50;
@@ -208,6 +208,10 @@ pub struct MediaItem {
     pub owner: String,
     #[serde(default)]
     pub source: MediaSource,
+    /// The video was released by the host's timer, not by a person (protocol
+    /// v18): the room cannot replay it and must start a new game.
+    #[serde(default)]
+    pub auto_released: bool,
 }
 
 impl MediaItem {
@@ -612,6 +616,7 @@ impl RoomSnapshot {
                 still_sha256: String::new(),
                 owner: String::new(),
                 source: Default::default(),
+                auto_released: false,
                 sha256: self.media_sha256.clone(),
                 extension: self.media_extension.clone(),
                 title: self.title.clone(),
@@ -693,6 +698,7 @@ impl RoomSnapshot {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: media_sha256.clone(),
             extension: media_extension.clone(),
             title: title.clone(),
@@ -1188,6 +1194,10 @@ pub enum ClientMessage {
         extension: String,
         width: u32,
         height: u32,
+        /// Released by the host's cleanup timer (protocol v18); the room then
+        /// refuses a restart, since the video it would replay is gone.
+        #[serde(default)]
+        automatic: bool,
     },
     /// Put a released item's video back (host only): the hash must be the
     /// original's, and the host uploads the video again.
@@ -1756,6 +1766,13 @@ impl RoomRuntime {
         if snapshot.host_id != client_id {
             return Err("Only the host can restart the puzzle".into());
         }
+        if snapshot
+            .queue
+            .get(snapshot.current)
+            .is_some_and(|item| item.auto_released)
+        {
+            return Err("The video was removed to save space. Start a new game.".into());
+        }
         snapshot.pieces = scattered_pieces(
             snapshot.cut_style,
             &snapshot.id,
@@ -2238,6 +2255,8 @@ impl RoomRuntime {
     /// layer) must already hold the still's bytes: this changes the room only.
     /// Returns the new snapshot and the video's `(sha256, extension)` so the
     /// host can delete it and free quota.
+    // Mirrors the wire message, like `set_playback`.
+    #[allow(clippy::too_many_arguments)]
     pub fn release_to_still(
         &mut self,
         client_id: &str,
@@ -2246,6 +2265,7 @@ impl RoomRuntime {
         extension: &str,
         width: u32,
         height: u32,
+        automatic: bool,
     ) -> Result<(RoomSnapshot, (String, String)), String> {
         // Releasing deletes the video, like any queue change: host only.
         let snapshot = self.queue_guard(client_id)?;
@@ -2270,6 +2290,7 @@ impl RoomRuntime {
         }
         let freed = (item.sha256.clone(), item.extension.clone());
         item.seed_sha256 = std::mem::take(&mut item.sha256);
+        item.auto_released = automatic;
         item.sha256 = still.clone();
         item.still_sha256 = still;
         item.extension = still_extension.to_owned();
@@ -2320,6 +2341,7 @@ impl RoomRuntime {
         }
         let video = std::mem::take(&mut item.seed_sha256);
         item.still_sha256.clear();
+        item.auto_released = false;
         item.sha256 = video;
         item.extension = extension;
         item.width = width;
@@ -2545,6 +2567,7 @@ mod tests {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: tag.repeat(32),
             extension: "mp4".into(),
             title: tag.into(),
@@ -2785,6 +2808,7 @@ mod tests {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: "ef".repeat(32),
             extension: "mp4".into(),
             title: "B".into(),
@@ -4182,7 +4206,7 @@ mod cut_style_tests {
         let video = room.snapshot.as_ref().unwrap().queue[0].sha256.clone();
         let before_seed = room.snapshot.as_ref().unwrap().effective_shape_seed();
         let (snapshot, freed) = room
-            .release_to_still("host", 0, &still_hash(), "webp", 640, 360)
+            .release_to_still("host", 0, &still_hash(), "webp", 640, 360, false)
             .unwrap();
         assert_eq!(freed, (video.clone(), "mp4".to_string()));
         let item = &snapshot.queue[0];
@@ -4205,57 +4229,57 @@ mod cut_style_tests {
         let mut open = queue_room();
         open.names.insert("host".into(), "Host".into());
         assert!(
-            open.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+            open.release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
                 .is_err()
         );
 
         let mut room = finished_room();
         room.names.insert("guest".into(), "Guest".into());
         assert!(
-            room.release_to_still("guest", 0, &still_hash(), "webp", 64, 48)
+            room.release_to_still("guest", 0, &still_hash(), "webp", 64, 48, false)
                 .is_err(),
             "a player who is not the host cannot release the video"
         );
         assert!(
-            room.release_to_still("nobody", 0, &still_hash(), "webp", 64, 48)
+            room.release_to_still("nobody", 0, &still_hash(), "webp", 64, 48, false)
                 .is_err()
         );
         assert!(
-            room.release_to_still("host", 9, &still_hash(), "webp", 64, 48)
+            room.release_to_still("host", 9, &still_hash(), "webp", 64, 48, false)
                 .is_err()
         );
         assert!(
-            room.release_to_still("host", 0, &still_hash(), "gif", 64, 48)
+            room.release_to_still("host", 0, &still_hash(), "gif", 64, 48, false)
                 .is_err()
         );
         assert!(
-            room.release_to_still("host", 0, &still_hash(), "mp4", 64, 48)
+            room.release_to_still("host", 0, &still_hash(), "mp4", 64, 48, false)
                 .is_err()
         );
         assert!(
-            room.release_to_still("host", 0, "short", "webp", 64, 48)
+            room.release_to_still("host", 0, "short", "webp", 64, 48, false)
                 .is_err()
         );
         assert!(
-            room.release_to_still("host", 0, &still_hash(), "webp", 0, 48)
+            room.release_to_still("host", 0, &still_hash(), "webp", 0, 48, false)
                 .is_err()
         );
         let same = room.snapshot.as_ref().unwrap().queue[0].sha256.clone();
         assert!(
-            room.release_to_still("host", 0, &same, "webp", 64, 48)
+            room.release_to_still("host", 0, &same, "webp", 64, 48, false)
                 .is_err()
         );
         room.snapshot.as_mut().unwrap().queue[0].available = false;
         assert!(
-            room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+            room.release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
                 .is_err()
         );
         room.snapshot.as_mut().unwrap().queue[0].available = true;
 
-        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
             .unwrap();
         assert!(
-            room.release_to_still("host", 0, &"6b".repeat(32), "webp", 64, 48)
+            room.release_to_still("host", 0, &"6b".repeat(32), "webp", 64, 48, false)
                 .is_err(),
             "a released item has no video left to release"
         );
@@ -4264,9 +4288,33 @@ mod cut_style_tests {
         picture.snapshot.as_mut().unwrap().queue[0].extension = "png".into();
         assert!(
             picture
-                .release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+                .release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_automatic_release_cannot_be_replayed_until_the_video_is_back() {
+        let mut manual = finished_room();
+        manual
+            .release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
+            .unwrap();
+        assert!(
+            manual.restart("host", 7).is_ok(),
+            "a manual release may replay the picture"
+        );
+
+        let mut room = finished_room();
+        let video = room.snapshot.as_ref().unwrap().queue[0].sha256.clone();
+        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48, true)
+            .unwrap();
+        assert!(room.snapshot.as_ref().unwrap().queue[0].auto_released);
+        let err = room.restart("host", 7).unwrap_err();
+        assert!(err.contains("Start a new game"), "{err}");
+        room.restore_video("host", 0, &video, "mp4", 64, 48, 9000)
+            .unwrap();
+        assert!(!room.snapshot.as_ref().unwrap().queue[0].auto_released);
+        assert!(room.restart("host", 7).is_ok());
     }
 
     #[test]
@@ -4278,7 +4326,7 @@ mod cut_style_tests {
                 .is_err(),
             "an unreleased item still has its video"
         );
-        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48, false)
             .unwrap();
         assert!(
             room.restore_video("host", 0, &"7c".repeat(32), "mp4", 64, 48, 9000)
@@ -4317,6 +4365,7 @@ mod cut_style_tests {
                     extension: "webp".into(),
                     width: 64,
                     height: 48,
+                    automatic: false,
                 },
                 0,
             )

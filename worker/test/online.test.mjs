@@ -92,7 +92,7 @@ describe("device links, device-key rooms and the lobby", () => {
     assert.equal(response.status, 200);
     assert.equal(response.headers["cache-control"], "no-store");
     assert.deepEqual(JSON.parse(response.text), {
-      service: "pieceoff-rooms", protocol: 17, hosted: true,
+      service: "pieceoff-rooms", protocol: 18, hosted: true,
       link_url: "https://pieceoff.app/link", share_url: "https://pieceoff.app/join",
       features: ["device_keys", "lobby"], uploads: true,
     });

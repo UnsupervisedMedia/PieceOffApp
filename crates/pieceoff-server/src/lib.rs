@@ -994,6 +994,7 @@ async fn release_still(
     extension: &str,
     width: u32,
     height: u32,
+    automatic: bool,
 ) -> Result<(), String> {
     let extension = valid_still_extension(extension)
         .ok_or("A completion still must be a JPEG, PNG or WebP image")?;
@@ -1036,6 +1037,7 @@ async fn release_still(
             extension,
             width,
             height,
+            automatic,
         )?;
         let _ = room.events.send(ServerMessage::Snapshot { snapshot });
         freed
@@ -1543,12 +1545,12 @@ async fn handle_socket(
                         }
                         None => {}
                     }
-                    if let ClientMessage::ReleaseToStill { index, sha256, extension, width, height } = &message {
+                    if let ClientMessage::ReleaseToStill { index, sha256, extension, width, height, automatic } = &message {
                         if spectator {
                             let _ = send(&mut socket, &ServerMessage::Error { message: "Spectators cannot change the room".into() }).await;
                             continue;
                         }
-                        if let Err(message) = release_still(&state, &room, &client_id, *index, sha256, extension, *width, *height).await {
+                        if let Err(message) = release_still(&state, &room, &client_id, *index, sha256, extension, *width, *height, *automatic).await {
                             let _ = send(&mut socket, &ServerMessage::Error { message }).await;
                         }
                         continue;
@@ -3362,7 +3364,7 @@ mod tests {
 
         let room = room_with_finished_video(&state, "DONE01", &video, true).await;
         // Releasing before the still is stored is refused and keeps the video.
-        let early = release_still(&state, &room, "host", 0, &still, "png", 32, 24).await;
+        let early = release_still(&state, &room, "host", 0, &still, "png", 32, 24, false).await;
         assert!(early.unwrap_err().contains("Upload the still"));
         assert!(media_path(&data_dir, &video, "mp4").is_file());
 
@@ -3416,7 +3418,7 @@ mod tests {
         );
 
         let mut events = room.events.subscribe();
-        release_still(&state, &room, "host", 0, &still, "png", 32, 24)
+        release_still(&state, &room, "host", 0, &still, "png", 32, 24, false)
             .await
             .unwrap();
         let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
@@ -3453,7 +3455,7 @@ mod tests {
             StatusCode::CREATED
         );
         // The file is on disk, but room B never uploaded it.
-        let adopted = release_still(&state, &second, "host", 0, &still, "jpg", 32, 24).await;
+        let adopted = release_still(&state, &second, "host", 0, &still, "jpg", 32, 24, false).await;
         assert!(adopted.is_err());
         assert!(media_path(&data_dir, &video_b, "mp4").is_file());
         // A player who is not the host cannot release room A's video either.
@@ -3463,10 +3465,11 @@ mod tests {
             .await
             .names
             .insert("guest".into(), "Guest".into());
-        let by_guest = release_still(&state, &first, "guest", 0, &still, "jpg", 32, 24).await;
+        let by_guest =
+            release_still(&state, &first, "guest", 0, &still, "jpg", 32, 24, false).await;
         assert!(by_guest.is_err());
         assert!(media_path(&data_dir, &video_a, "mp4").is_file());
-        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24)
+        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24, false)
             .await
             .unwrap();
         let _ = fs::remove_dir_all(&data_dir);
@@ -3488,7 +3491,7 @@ mod tests {
             put_still(&state, "secret-ONE001", &still, "jpg", still_bytes).await,
             StatusCode::CREATED
         );
-        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24)
+        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24, false)
             .await
             .unwrap();
         assert!(
@@ -4213,6 +4216,7 @@ mod tests {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: sha.into(),
             extension: "png".into(),
             title: "x".into(),
@@ -4255,6 +4259,7 @@ mod tests {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: hash_b.clone(),
             extension: "png".into(),
             title: "B".into(),
@@ -4534,6 +4539,7 @@ mod tests {
             still_sha256: String::new(),
             owner: String::new(),
             source: Default::default(),
+            auto_released: false,
             sha256: "b2".repeat(32),
             extension: "png".into(),
             title: "B".into(),

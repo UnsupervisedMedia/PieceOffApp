@@ -76,7 +76,7 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   **Still to do:** the hosted Worker
   releasing videos in R2 with the registry budget (uploads are off at launch
   and built-in loops are not videos, so nothing needs it yet); the
-  `completed_cleanup_minutes` timer that releases automatically. Ephemeral
+  hosted equivalent of the automatic release. The desktop host's app releases a video an hour after the puzzle finishes (protocol v18, `automatic`), which removes replay in favour of **New game**. Ephemeral
   cursors, chat and pings pass through shared Rust relay validation in the
   Durable Object, with host-side rate limits and in-memory chat history.
 - **Later: Plan 1D, web client.** egui compiled to WASM sharing the desktop board

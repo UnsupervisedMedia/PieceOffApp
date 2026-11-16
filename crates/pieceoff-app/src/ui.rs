@@ -716,7 +716,26 @@ impl PieceOffApp {
                 ui.close();
                 self.restart_video_decoder(ctx);
             }
+            let replay_gone = self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .queue
+                    .get(snapshot.current)
+                    .is_some_and(|item| item.auto_released)
+            });
             if is_host
+                && replay_gone
+                && ui
+                    .button("New game")
+                    .on_hover_text(
+                        "The video was removed to save space, so this puzzle cannot be replayed",
+                    )
+                    .clicked()
+            {
+                ui.close();
+                self.leave_room();
+            }
+            if is_host
+                && !replay_gone
                 && ui
                     .button("Restart puzzle…")
                     .on_hover_text("Scatter all pieces and start over")
@@ -1279,6 +1298,7 @@ impl PieceOffApp {
         self.show_transfer_progress();
         self.poll_queue_probe();
         self.poll_still_release();
+        self.auto_release_finished_video();
         self.poll_restore();
         self.hold_at_item_end();
         self.poll_library_jobs();

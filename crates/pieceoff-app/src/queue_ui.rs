@@ -279,7 +279,7 @@ impl PieceOffApp {
             self.send(ClientMessage::SetVideoLock { locked });
         }
         if release {
-            self.release_video_to_still();
+            self.release_video_to_still(false);
         }
         if let Some(index) = restore {
             self.restore_released_video(index);
