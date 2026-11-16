@@ -69,6 +69,18 @@ pub fn valid_still_extension(extension: &str) -> Option<&'static str> {
         .find(|supported| *supported == extension)
 }
 
+/// Whether `head` (the first bytes of a file) is what a still of this
+/// extension starts with. Hosts cannot decode video or images cheaply, so
+/// this magic-byte check, the size cap and the dimensions are all they verify.
+pub fn still_magic_ok(extension: &str, head: &[u8]) -> bool {
+    match extension {
+        "jpg" | "jpeg" => head.starts_with(&[0xff, 0xd8, 0xff]),
+        "png" => head.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+        "webp" => head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 pub fn valid_media_extension(extension: &str) -> Option<&'static str> {
     SUPPORTED_MEDIA_EXTENSIONS
         .iter()
@@ -4192,30 +4204,63 @@ mod cut_style_tests {
     fn release_is_refused_unless_it_is_a_valid_finished_available_video() {
         let mut open = queue_room();
         open.names.insert("host".into(), "Host".into());
-        assert!(open.release_to_still("host", 0, &still_hash(), "webp", 64, 48).is_err());
+        assert!(
+            open.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+                .is_err()
+        );
 
         let mut room = finished_room();
-        assert!(room.release_to_still("nobody", 0, &still_hash(), "webp", 64, 48).is_err());
-        assert!(room.release_to_still("host", 9, &still_hash(), "webp", 64, 48).is_err());
-        assert!(room.release_to_still("host", 0, &still_hash(), "gif", 64, 48).is_err());
-        assert!(room.release_to_still("host", 0, &still_hash(), "mp4", 64, 48).is_err());
-        assert!(room.release_to_still("host", 0, "short", "webp", 64, 48).is_err());
-        assert!(room.release_to_still("host", 0, &still_hash(), "webp", 0, 48).is_err());
+        assert!(
+            room.release_to_still("nobody", 0, &still_hash(), "webp", 64, 48)
+                .is_err()
+        );
+        assert!(
+            room.release_to_still("host", 9, &still_hash(), "webp", 64, 48)
+                .is_err()
+        );
+        assert!(
+            room.release_to_still("host", 0, &still_hash(), "gif", 64, 48)
+                .is_err()
+        );
+        assert!(
+            room.release_to_still("host", 0, &still_hash(), "mp4", 64, 48)
+                .is_err()
+        );
+        assert!(
+            room.release_to_still("host", 0, "short", "webp", 64, 48)
+                .is_err()
+        );
+        assert!(
+            room.release_to_still("host", 0, &still_hash(), "webp", 0, 48)
+                .is_err()
+        );
         let same = room.snapshot.as_ref().unwrap().queue[0].sha256.clone();
-        assert!(room.release_to_still("host", 0, &same, "webp", 64, 48).is_err());
+        assert!(
+            room.release_to_still("host", 0, &same, "webp", 64, 48)
+                .is_err()
+        );
         room.snapshot.as_mut().unwrap().queue[0].available = false;
-        assert!(room.release_to_still("host", 0, &still_hash(), "webp", 64, 48).is_err());
+        assert!(
+            room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+                .is_err()
+        );
         room.snapshot.as_mut().unwrap().queue[0].available = true;
 
-        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48).unwrap();
+        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+            .unwrap();
         assert!(
-            room.release_to_still("host", 0, &"6b".repeat(32), "webp", 64, 48).is_err(),
+            room.release_to_still("host", 0, &"6b".repeat(32), "webp", 64, 48)
+                .is_err(),
             "a released item has no video left to release"
         );
         // A picture is not a video.
         let mut picture = finished_room();
         picture.snapshot.as_mut().unwrap().queue[0].extension = "png".into();
-        assert!(picture.release_to_still("host", 0, &still_hash(), "webp", 64, 48).is_err());
+        assert!(
+            picture
+                .release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4223,14 +4268,27 @@ mod cut_style_tests {
         let mut room = finished_room();
         let video = room.snapshot.as_ref().unwrap().queue[0].sha256.clone();
         assert!(
-            room.restore_video("host", 0, &video, "mp4", 64, 48, 9000).is_err(),
+            room.restore_video("host", 0, &video, "mp4", 64, 48, 9000)
+                .is_err(),
             "an unreleased item still has its video"
         );
-        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48).unwrap();
-        assert!(room.restore_video("host", 0, &"7c".repeat(32), "mp4", 64, 48, 9000).is_err());
-        assert!(room.restore_video("guest", 0, &video, "mp4", 64, 48, 9000).is_err());
-        assert!(room.restore_video("host", 0, &video, "mp4", 0, 48, 9000).is_err());
-        let snapshot = room.restore_video("host", 0, &video, "mp4", 64, 48, 9000).unwrap();
+        room.release_to_still("host", 0, &still_hash(), "webp", 64, 48)
+            .unwrap();
+        assert!(
+            room.restore_video("host", 0, &"7c".repeat(32), "mp4", 64, 48, 9000)
+                .is_err()
+        );
+        assert!(
+            room.restore_video("guest", 0, &video, "mp4", 64, 48, 9000)
+                .is_err()
+        );
+        assert!(
+            room.restore_video("host", 0, &video, "mp4", 0, 48, 9000)
+                .is_err()
+        );
+        let snapshot = room
+            .restore_video("host", 0, &video, "mp4", 64, 48, 9000)
+            .unwrap();
         let item = &snapshot.queue[0];
         assert_eq!(item.sha256, video);
         assert_eq!(item.extension, "mp4");

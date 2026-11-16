@@ -239,7 +239,13 @@ impl RoomRuntime {
                 duration_ms,
             } => {
                 let snapshot = self.restore_video(
-                    client_id, index, &sha256, &extension, width, height, duration_ms,
+                    client_id,
+                    index,
+                    &sha256,
+                    &extension,
+                    width,
+                    height,
+                    duration_ms,
                 )?;
                 (ServerMessage::Snapshot { snapshot }, true)
             }
