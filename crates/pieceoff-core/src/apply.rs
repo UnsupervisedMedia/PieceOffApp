@@ -171,6 +171,10 @@ impl RoomRuntime {
                 duration_ms,
             } => {
                 let item = MediaItem {
+                    seed_sha256: String::new(),
+                    still_sha256: String::new(),
+                    owner: String::new(),
+                    source: Default::default(),
                     sha256: sha256.to_ascii_lowercase(),
                     extension: clean_media_extension(&extension)?,
                     title: clean_title(&title),
@@ -219,6 +223,24 @@ impl RoomRuntime {
             }
             ClientMessage::SetChatEnabled { enabled } => {
                 let snapshot = self.set_chat_enabled(client_id, enabled)?;
+                (ServerMessage::Snapshot { snapshot }, true)
+            }
+            // Releasing a video deletes its file, which only the host can do
+            // (and only once the still is stored): hosts call `release_to_still`.
+            ClientMessage::ReleaseToStill { .. } => {
+                return Err("Releasing a video is handled by the host".into());
+            }
+            ClientMessage::RestoreVideo {
+                index,
+                sha256,
+                extension,
+                width,
+                height,
+                duration_ms,
+            } => {
+                let snapshot = self.restore_video(
+                    client_id, index, &sha256, &extension, width, height, duration_ms,
+                )?;
                 (ServerMessage::Snapshot { snapshot }, true)
             }
             // Removing a player closes sockets, which only the host can do:

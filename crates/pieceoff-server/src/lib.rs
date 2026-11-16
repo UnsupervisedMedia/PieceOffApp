@@ -3764,6 +3764,10 @@ mod tests {
             .unwrap(),
         );
         let item = |sha: &str, width: u32| pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: sha.into(),
             extension: "png".into(),
             title: "x".into(),
@@ -3802,6 +3806,10 @@ mod tests {
         )
         .unwrap();
         snapshot.queue.push(pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: hash_b.clone(),
             extension: "png".into(),
             title: "B".into(),
@@ -4073,6 +4081,10 @@ mod tests {
         snapshot.queue[0].available = true;
         snapshot.queue[0].duration_ms = 100;
         snapshot.queue.push(pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: "b2".repeat(32),
             extension: "png".into(),
             title: "B".into(),

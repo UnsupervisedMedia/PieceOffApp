@@ -77,6 +77,7 @@ impl RoomSnapshot {
         for item in &mut self.queue {
             if is_builtin_media(&item.sha256) {
                 item.available = true;
+                item.source = crate::MediaSource::Curated;
             }
         }
         self.sync_current_mirror();

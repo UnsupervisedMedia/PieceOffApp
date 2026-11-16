@@ -3270,6 +3270,10 @@ fn switching_items_loads_the_cached_file_and_keeps_the_room_title() {
     )
     .unwrap();
     snapshot.queue.push(pieceoff_core::MediaItem {
+        seed_sha256: String::new(),
+        still_sha256: String::new(),
+        owner: String::new(),
+        source: Default::default(),
         sha256: second_meta.sha256.clone(),
         extension: "png".into(),
         title: "second".into(),
@@ -3340,6 +3344,10 @@ fn package_carries_every_queued_item_and_single_item_packages_still_read() {
     )
     .unwrap();
     snapshot.queue.push(pieceoff_core::MediaItem {
+        seed_sha256: String::new(),
+        still_sha256: String::new(),
+        owner: String::new(),
+        source: Default::default(),
         sha256: second_hash.clone(),
         extension: "png".into(),
         title: "b".into(),
@@ -3557,6 +3565,10 @@ fn queue_controls_are_for_the_unlocked_host_only() {
 fn queue_shortcuts_step_the_room_and_cycle_repeat() {
     let (mut app, mut outgoing_rx, mut snapshot) = queue_ui_app();
     snapshot.queue.push(pieceoff_core::MediaItem {
+        seed_sha256: String::new(),
+        still_sha256: String::new(),
+        owner: String::new(),
+        source: Default::default(),
         sha256: "b".repeat(64),
         extension: "png".into(),
         title: "b".into(),
@@ -3610,6 +3622,10 @@ fn uploads_only_use_files_known_by_their_hash() {
     )
     .unwrap();
     snapshot.queue.push(pieceoff_core::MediaItem {
+        seed_sha256: String::new(),
+        still_sha256: String::new(),
+        owner: String::new(),
+        source: Default::default(),
         sha256: "b".repeat(64),
         extension: "png".into(),
         title: "b".into(),
