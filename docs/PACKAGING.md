@@ -48,6 +48,30 @@ list in [TESTING.md](TESTING.md) before tagging.
 Bundles include a basic FFmpeg and its corresponding source; see [FFMPEG.md](FFMPEG.md). Run the workflow manually
 (`workflow_dispatch`) to build bundles without publishing.
 
+## Web client release asset
+
+Besides the native bundles, each release carries the browser play client as `pieceoff-web-<version>.tar.gz` (`<version>` from `crates/pieceoff-app/Cargo.toml`, the same as the tag). The pieceoff.app site vendors it; see [web/README.md](../web/README.md).
+
+Build it locally (needs the wasm toolchain, see `web/build-wasm.sh`, and Node):
+
+```sh
+web/build-wasm.sh && (cd web && npm ci)
+scripts/web-check.sh                 # gate; also packs and verifies the tarball
+web/pack.sh                          # -> dist/pieceoff-web-<version>.tar.gz
+```
+
+The tarball root is the site's `public/play-app/`: `play.js`, `chunks/*.js` (the lazy board chunk and shared code: ship the whole folder), `play.css`, `pieceoff_web_wasm_bg.wasm` (the glue is inside `play.js`), `builtin/` (puzzle loops, posters, `manifest.json`), `play-app.json` (`version`, `protocol`, `entry`, `css`, `wasm`, and a sha256 for every file), `SHA256SUMS`, `LICENSE` (Apache-2.0) and `THIRD_PARTY_NOTICES.txt` (the Rust crates in the wasm and the npm packages in the bundle, from `scripts/third-party-notices.py --web`). No sourcemaps or dev/test files. Output is reproducible: entries sorted, owner 0, fixed mtime, `gzip -n`, so a second pack gives identical bytes. Path-independent: web/build-wasm.sh remaps the cargo home, checkout and sysroot paths, and check-pack.mjs fails if any file contains /home/, $HOME or the checkout path. Same toolchain, Cargo.lock, npm lockfile and cargo registry layout (crates.io index hash dir) are assumed; verified across a different checkout path and target dir, not across CARGO_HOME or rustc versions.
+
+Attach it to a release by hand (the release workflow does not build it: that needs the wasm target, `wasm-bindgen-cli` and Node on the runner, and the publish job's checksums and provenance attestation cover only `dist/*` from the native bundles, so adding it there is more than a small change to a job that handles signing and the publish token):
+
+```sh
+git checkout v<version>   # the tag; the tarball must come from the tagged tree
+scripts/web-check.sh && web/pack.sh
+gh release upload v<version> dist/pieceoff-web-<version>.tar.gz --repo UnsupervisedMedia/PieceOffApp
+```
+
+The asset is not in the release's `SHA256SUMS.txt` or attestation; it carries its own `SHA256SUMS`, and the uploaded file's sha256 should be noted in the release text. Native users never need it.
+
 ## Assemble a release bundle
 
 ```sh

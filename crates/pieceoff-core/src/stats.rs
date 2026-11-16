@@ -13,6 +13,7 @@ pub const MAX_SOLVE_PLAYERS: usize = 32;
 /// How long the current run has taken and how many pieces each player
 /// brought into the picture. Saved with the room, reset by a restart.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct SolveStats {
     /// Solving time banked before `running_since_ms`.
@@ -31,6 +32,7 @@ pub struct SolveStats {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PlayerSolveStats {
     pub name: String,
     pub pieces: u32,

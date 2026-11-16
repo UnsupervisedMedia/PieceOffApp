@@ -239,7 +239,7 @@ Secrets (dashboard → Worker → Settings → Variables and Secrets, type
 
 | Secret | Needed for |
 | --- | --- |
-| `TURNSTILE_SECRET` | Link approvals and browser room creation. Without it both are refused, so no device can be linked. The live Worker has none yet. |
+| `TURNSTILE_SECRET` | Link approvals and browser room creation. Without it both are refused, so no device can be linked. Set on the live Worker since 2026-11-10 (Turnstile widget `pieceoff-online`). |
 | `ADMIN_TOKEN` | `POST /api/admin/devices/revoke` and `GET /api/admin/usage`. Without it both answer 404. Use a long random value. |
 
 Test-only, never set in production: `DEV_ALLOW_UNVERIFIED_CREATE=1` (skips
@@ -330,6 +330,17 @@ Objects live at `room/<room id>/<sha256>` in R2. All parts but the last must be
 the declared part size (R2 needs 5 MiB minimum, up to 10,000 parts). The upload
 token goes only to the host over the socket. The full-file hash is not checked
 by the worker; clients verify it after download.
+
+### Web client (browser play on pieceoff.app)
+
+The browser client (`web/`, vendored into the site as `/play-app/`) calls the Worker from the page origin `https://pieceoff.app`, so the Worker needs these:
+
+- **CORS for the site origin.** `POST /api/rooms` answers `OPTIONS` (204, `Allow-Methods: POST`, `Allow-Headers: x-turnstile-token, content-type`) and returns `Access-Control-Allow-Origin: <SITE_ORIGIN>` on every answer, refusals included, and the `/ws` refusals answered before the room's Durable Object (403 origin, 429 lookup budget, 503 paused) carry it too. A browser hides the status of a failed WebSocket upgrade, so the client re-asks with a plain `GET /ws` and needs that header to read why. The header is only ever the exact `SITE_ORIGIN` (never `*`), and only when the request's `Origin` equals it. **None of this is live until the Worker is deployed** (Workers Builds on a push to the Worker's branch, see above); until then the client works only where the browser sees no cross-origin refusal, and a refused create or join shows a generic failure.
+- **`SITE_ORIGIN` must be in `ALLOWED_ORIGINS`.** The `/ws` origin check (`originAllowed`) accepts the Worker's own host or an origin listed in `ALLOWED_ORIGINS`; the site is a different host. The `/ws` upgrade, the media routes and room creation from the browser therefore depend on `ALLOWED_ORIGINS` containing `https://pieceoff.app` (and any other origin that serves the client, such as a preview). `SITE_ORIGIN` alone only sets the CORS answer; it does not allow the socket. It is set in `worker/wrangler.jsonc` (`"ALLOWED_ORIGINS": "https://pieceoff.app"`, comma separated exact origins; a preview origin must be added there too), and `worker/test/create-cors.test.mjs` boots the checked-in vars and checks that `POST /api/rooms` and the `/ws` upgrade from `https://pieceoff.app` pass the origin check while other origins get 403 `Origin not allowed`. Like the rest, it is live only once the Worker is deployed. The create preflight always answers `Vary: Origin`, since only the site gets the CORS header.
+- **A resume token replaces its player's live socket.** A phone that slept or a network cut can leave the Worker holding a half-open socket for up to the 90 s idle sweep. A join with a valid resume token whose player is still attached no longer gets "That player is already connected": the old socket is dropped as a close would be (its leases released, `peer_left`, host handed on only if someone else is present), told "This name was opened in another window…" and closed 1008 `replaced`, and the join proceeds with the same identity (and host role). Security: holding the token already lets its bearer take that identity once the sweep drops the old socket, so this only removes the wait (and the piece that stayed held meanwhile). An invalid token still gets a fresh identity and displaces no one; the same `player_key` under a new identity still replaces the old window. Clients ignore events from a socket they have already replaced, so the old socket's `replaced` close causes no reconnect ping-pong (`worker/test/resume.test.mjs`, `web/src/net/socket.test.ts`).
+- **Turnstile hostname.** Browser room creation verifies a widget token (action `create_room`) and checks its hostname against `TURNSTILE_HOSTNAME` (default `pieceoff.app`). The widget (`pieceoff-online`, the site key in `PIECEOFF_WEB_CONFIG`) must list `pieceoff.app` as an allowed domain, and the `TURNSTILE_SECRET` secret must be set, or creation is refused. A preview host needs its own widget or domain entry and a matching `TURNSTILE_HOSTNAME`.
+
+The client and the Worker must speak the same protocol version (`GET /api/info` `protocol`; the vendored `play-app.json` carries the client's). Deploy the Worker first when the protocol moves.
 
 ### Device keys
 

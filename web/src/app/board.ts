@@ -1,0 +1,909 @@
+// The board screen (lazy chunk): WebGL pieces, Canvas 2D table/overlays, the
+// gesture machine, and the room's messages, wired the way the desktop board is
+// (crates/pieceoff-app/src/board.rs, cursors.rs; ARCHITECTURE.md "Multiplayer
+// model"). The server is the authority: the client shows its own drag at once
+// (RoomState's optimistic overlay) and otherwise draws what `welcome`,
+// `snapshot` and `pieces_changed` say.
+//
+// Decisions (see the Task 9 report):
+// - Drags: a piece that is not part of a multi-selection uses drag_start /
+//   move_piece / drag_end (the server moves its whole group); dragging a piece
+//   of a selection of two or more uses the _selection variants with the
+//   selected ids, and the local prediction moves every loose piece of the
+//   selected groups, like the desktop. Moves go through RoomSocket, which caps
+//   them at 30/s and lets the drop carry the final spot.
+// - Cancel (second finger, pointercancel, window blur, page hidden, destroy): the protocol has no
+//   drag-abort, and a lease must not stay held, so the client drops the piece
+//   where it started: drag_end(_selection) at the anchor's pre-drag position.
+//   Locally the piece goes back there at once and waits for the drop.
+// - Errors carry no correlation id, so an `error` never ends a drag. One that
+//   arrives before the server has granted the lease pauses it: RoomState drops
+//   the unconfirmed overlay (the piece snaps back), and moves stop going out.
+//   A later grant (`held_by` = us) revives it (overlay back, moves resume).
+//   The release always sends the drop; for a pickup that was really refused
+//   the server answers "You do not hold ..." without changing anything, and
+//   that one expected reply is not toasted (the refusal itself is). Only a
+//   dropped connection or a reconnect's welcome ends a drag without a drop:
+//   the server released the lease when the socket closed.
+//   Server errors show verbatim in a short toast.
+// - Turned pieces (rotation rooms, v16): while a granted piece is held, the
+//   turn buttons, E / Q and the wheel turn it a quarter turn (rotate_selection),
+//   as on the desktop; the local overlay turns at once (RoomState.turnDrag).
+//   Turns wait for the grant, so a refused pickup is never answered with a
+//   second "You do not hold a piece selection". The web client has no hint
+//   UI (reference image, ghost, edge filter), so no-hints rooms need nothing.
+// - Placed pieces and pieces someone else holds are not grabbable: pressing
+//   them pans (touch) or rubber-bands (mouse) instead of asking for a refusal.
+// - Cursors: own pointer sent as `cursor` while over the table (RoomSocket
+//   throttles to 15/s and drops repeats), `cursor_hidden` on leaving the canvas
+//   or the window; remote ones expire 3 s after their last update. Pings: a
+//   double-tap sends `ping`; the server echoes it to everyone, and each shows 3 s.
+// - Solve clock ticks locally from `stats` against the server clock offset.
+// - Media: the current queue item's built-in loop as a muted, looping,
+//   inline <video> (poster first and on any failure), kept on the room clock by
+//   MediaSync (seek when more than 300 ms off).
+import { board_layout, piece_outlines } from '../../wasm/pieceoff_web_wasm.js';
+import { Camera } from '../gl/camera';
+import { defaultMatchMedia, watchDpr, type MatchMedia } from '../gl/dpr';
+import { LodPolicy } from '../gl/lod';
+import { buildMesh, type Mesh, type OutlineSource } from '../gl/mesh';
+import { OverlayLayers, OverlayModel, type BoardLayout } from '../gl/overlays';
+import { BoardRenderer, type BoardMedia } from '../gl/renderer';
+import { FLAG_HELD, FLAG_PLACED, FLAG_SELECTED } from '../gl/shaders';
+import { GestureMachine, type GestureOptions, type Rect } from '../input/gestures';
+import { hitTest, type PieceGeom } from '../input/hit';
+import { attachPointerEvents } from '../input/pointer';
+import { builtinAssets, type BuiltinAssets } from '../media/builtin';
+import { MediaSync } from '../media/sync';
+import type { RoomState } from '../net/roomState';
+import type { FatalReason, SocketState } from '../net/socket';
+import type { ClientMessage, RoomSnapshot, ServerMessage } from '../protocol';
+import { SolveClock } from '../ui/clock';
+import { button, h } from '../ui/dom';
+import { mountToolbar } from '../ui/toolbar';
+import type { BoardModule } from './loadBoard';
+
+/** Wheel travel (CSS px) per quarter turn of a held piece: one mouse notch
+ *  (about 100 px) is one turn; trackpad deltas add up. Toward the user
+ *  (deltaY > 0) turns clockwise, as on the desktop. */
+export const WHEEL_PX_PER_TURN = 50;
+
+const typing = (t: EventTarget | null): boolean =>
+  t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+
+/** How long a server error stays on screen. */
+export const TOAST_MS = 4000;
+
+/** What the board needs of RoomSocket. */
+export interface BoardSocket {
+  send(m: ClientMessage): boolean;
+  onState(cb: (s: SocketState, why?: FatalReason) => void): () => void;
+}
+
+/** What the board needs of BoardRenderer (tests inject a fake). */
+export interface RendererLike {
+  readonly camera: Camera;
+  readonly contextLost: boolean;
+  setPuzzle(mesh: Mesh, snapshot: RoomSnapshot): void;
+  setPiece(id: number, x: number, y: number, rotation: number, flags: number): void;
+  pieceDepth(id: number): number;
+  requestRender(): void;
+  onContextLost(cb: (lost: boolean) => void): void;
+  resize(): void;
+  dispose(): void;
+}
+
+export interface Timers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+export interface BoardDeps {
+  /** The joined room's socket (drag/cursor throttling lives there). */
+  socket: BoardSocket;
+  /** Fed by the socket (`RoomState.attach`); the board only reads it and drives the local drag. */
+  state: RoomState;
+  /** Where the built-in loops are served: `${assetBase}builtin/`. `assets` overrides the lookup. */
+  media: { assetBase: string; assets?: (sha256: string) => BuiltinAssets | null };
+  /** The camera shared by renderer, overlays and input; one is made if omitted. */
+  camera?: Camera;
+  /** Watching: no drags, cursors or pings are sent (default: the welcome's). */
+  spectator?: boolean;
+  /** Called with the select toggle's new state (the toolbar mirrors it). */
+  onSelectModeChange?: (on: boolean) => void;
+  /** A "Leave room" button is shown when given. */
+  leave?: () => void;
+  // ---- seams (tests) ----
+  createRenderer?: (canvas: HTMLCanvasElement, media: BoardMedia, camera: Camera) => RendererLike;
+  outlines?: (snapshot: RoomSnapshot) => OutlineSource;
+  layout?: (snapshot: RoomSnapshot) => BoardLayout;
+  now?: () => number;
+  timers?: Timers;
+  raf?: (cb: FrameRequestCallback) => number;
+  caf?: (h: number) => void;
+  matchMedia?: MatchMedia | null;
+  gestures?: Partial<GestureOptions>;
+  context2d?: (c: HTMLCanvasElement) => CanvasRenderingContext2D | null;
+}
+
+export interface BoardHandle {
+  destroy(): void;
+  readonly camera: Camera;
+  /** Selected piece ids (read-only view). */
+  readonly selection: ReadonlySet<number>;
+  setSelectMode(on: boolean): void;
+  /** Subscribe to select-mode changes (toolbar). Returns the unsubscribe. */
+  onSelectModeChange(cb: (on: boolean) => void): () => void;
+  /** The board's section; `body` holds the stage (and the toolbar's side panel), `hud` the bottom bar. */
+  readonly el: HTMLElement;
+  readonly body: HTMLElement;
+  readonly hud: HTMLElement;
+  /** The room's solve clock (the HUD shows it; the players panel too). */
+  readonly clock: SolveClock;
+  /** Local mute: these names' cursors and pings are not drawn (compared without case). */
+  setMuted(names: Iterable<string>): void;
+}
+
+// The solve clock lives in ui/clock.ts (shared with the players panel).
+export { formatClock, solveElapsedMs } from '../ui/clock';
+
+// ---- geometry ----------------------------------------------------------------
+
+function parseLayout(snapshot: RoomSnapshot): BoardLayout {
+  return JSON.parse(board_layout(JSON.stringify(snapshot))) as BoardLayout;
+}
+
+function wasmOutlines(snapshot: RoomSnapshot): OutlineSource {
+  const out = piece_outlines(JSON.stringify(snapshot));
+  const copy = { ids: out.ids, offsets: out.offsets, points: out.points };
+  out.free();
+  return copy;
+}
+
+/** What identifies one puzzle's shapes: a change means new outlines and mesh. */
+function puzzleKey(s: RoomSnapshot): string {
+  return `${s.media_sha256}|${s.width}x${s.height}|${s.rows}x${s.columns}|${s.cut_style}|${s.shape_seed}|${s.pieces.length}`;
+}
+
+function currentSha(s: RoomSnapshot): string {
+  return s.queue[s.current]?.sha256 ?? s.media_sha256;
+}
+
+// ---- the board -----------------------------------------------------------------
+
+export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
+  const { socket, state } = deps;
+  const now = deps.now ?? (() => Date.now());
+  const timers: Timers = deps.timers ?? {
+    set: (fn, ms) => setTimeout(fn, ms),
+    clear: (hd) => clearTimeout(hd as ReturnType<typeof setTimeout>),
+  };
+  const raf = deps.raf ?? ((cb: FrameRequestCallback) => requestAnimationFrame(cb));
+  const caf = deps.caf ?? ((hd: number) => cancelAnimationFrame(hd));
+  const mm = deps.matchMedia === undefined ? defaultMatchMedia() : deps.matchMedia;
+  const spectator = () => deps.spectator ?? state.spectator;
+  const cleanups: (() => void)[] = [];
+  const listen = (t: EventTarget, type: string, fn: EventListener, o?: AddEventListenerOptions) => {
+    t.addEventListener(type, fn, o);
+    cleanups.push(() => t.removeEventListener(type, fn, o));
+  };
+
+  // ---- DOM ----
+  const under = h('canvas', { class: 'po-board-under', 'aria-hidden': 'true' }) as HTMLCanvasElement;
+  const glCanvas = h('canvas', { class: 'po-board-gl', 'aria-label': 'Puzzle board' }) as HTMLCanvasElement;
+  const over = h('canvas', { class: 'po-board-over', 'aria-hidden': 'true' }) as HTMLCanvasElement;
+  const poster = h('img', { class: 'po-board-poster', alt: '' }) as HTMLImageElement;
+  poster.hidden = true;
+  const video = h('video', { class: 'po-board-video', 'aria-hidden': 'true' }) as HTMLVideoElement;
+  video.muted = true;
+  video.defaultMuted = true;
+  video.loop = true;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('muted', '');
+  video.preload = 'auto';
+  video.crossOrigin = 'anonymous';
+  const lostNote = h('div', { class: 'po-board-lost', role: 'status' }, 'Graphics paused. The board comes back when the browser restores it; you can keep playing.');
+  lostNote.hidden = true;
+  const stage = h('div', { class: 'po-board-stage' }, under, glCanvas, over, poster, video, lostNote);
+  const clockEl = h('span', { class: 'po-board-clock', 'aria-label': 'Solve time' }, '0:00');
+  const netEl = h('span', { class: 'po-board-net', role: 'status' });
+  const selectBtn = button('Select', () => setSelectMode(!machine.selecting), { class: 'btn po-board-select', 'aria-pressed': 'false' });
+  const turnLeft = button('⟲', () => turn(-1), { class: 'btn po-board-turn', 'data-turn': '-1', 'aria-label': 'Turn left' });
+  const turnRight = button('⟳', () => turn(1), { class: 'btn po-board-turn', 'data-turn': '1', 'aria-label': 'Turn right' });
+  turnLeft.hidden = true;
+  turnRight.hidden = true;
+  const code = state.snapshot()?.invite_code ?? '';
+  const hud = h(
+    'div',
+    { class: 'po-board-hud' },
+    h('code', { class: 'po-board-code' }, code),
+    clockEl,
+    netEl,
+    h('span', { class: 'po-board-spacer' }),
+    selectBtn,
+    turnLeft,
+    turnRight,
+    deps.leave ? button('Leave', () => deps.leave!(), { class: 'btn po-board-leave' }) : null,
+  );
+  const toast = h('div', { class: 'po-board-toast', role: 'status', 'aria-live': 'polite' });
+  toast.hidden = true;
+  const body = h('div', { class: 'po-board-body' }, stage);
+  const section = h('section', { class: 'po-board', 'aria-label': 'Puzzle' }, body, hud, toast);
+  root.replaceChildren(section);
+
+  // ---- renderer, overlays ----
+  const camera = deps.camera ?? new Camera(1, 1);
+  const media: BoardMedia = { video, poster };
+  const renderer: RendererLike = deps.createRenderer
+    ? deps.createRenderer(glCanvas, media, camera)
+    : new BoardRenderer(glCanvas, media, { camera, transparent: true, raf, caf, matchMedia: mm });
+  const model = new OverlayModel();
+  let mutedLower = new Set<string>();
+  const mutedView = { has: (name: string) => mutedLower.has(name.toLowerCase()) };
+  const overlays = new OverlayLayers(under, over, camera, {
+    model,
+    cursors: () => state.cursors,
+    muted: () => mutedView,
+    now,
+    raf,
+    caf,
+    context2d: deps.context2d,
+  });
+  renderer.onContextLost((lost) => {
+    lostNote.hidden = !lost;
+  });
+
+  // ---- puzzle geometry ----
+  let key = '';
+  let snap: RoomSnapshot | null = null;
+  let outline: OutlineSource | null = null;
+  let layout: BoardLayout | null = null;
+  let geoms: PieceGeom[] = [];
+  let cw = 1;
+  let ch = 1;
+  const indexOf = new Map<number, number>();
+  let px = new Float32Array(0);
+  let py = new Float32Array(0);
+  let pr = new Uint8Array(0);
+  let pf = new Int16Array(0);
+  let lod: LodPolicy | null = null;
+  let fitted = false;
+  let userMoved = false;
+  let holdersRef: unknown = null;
+  const selection = new Set<number>();
+
+  const fit = () => {
+    if (!snap) return;
+    let minX = 0, minY = 0, maxX = snap.width, maxY = snap.height;
+    if (layout) {
+      const t = layout.tray;
+      const p = layout.tray_pad;
+      minX = Math.min(minX, t.x - p);
+      minY = Math.min(minY, t.y - p);
+      maxX = Math.max(maxX, t.x + t.width + p);
+      maxY = Math.max(maxY, t.y + t.height + p);
+    }
+    for (const p of snap.pieces) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + cw);
+      maxY = Math.max(maxY, p.y + ch);
+    }
+    const m = Math.max(cw, ch) * 0.5;
+    camera.fit(maxX - minX + 2 * m, maxY - minY + 2 * m, minX - m, minY - m);
+    viewChanged();
+  };
+
+  const build = (maxSamples: number) => {
+    if (!outline || !snap) return;
+    const mesh = buildMesh(outline, snap, { maxSamples });
+    renderer.setPuzzle(mesh, snap);
+    lod?.built(mesh.strides[0] ?? 1);
+  };
+
+  const loadPuzzle = (s: RoomSnapshot) => {
+    key = puzzleKey(s);
+    snap = s;
+    outline = (deps.outlines ?? wasmOutlines)(s);
+    layout = (deps.layout ?? parseLayout)(s);
+    cw = s.width / s.columns;
+    ch = s.height / s.rows;
+    const n = outline.ids.length;
+    indexOf.clear();
+    outline.ids.forEach((id, i) => indexOf.set(id, i));
+    px = new Float32Array(n).fill(Number.NaN);
+    py = new Float32Array(n).fill(Number.NaN);
+    pr = new Uint8Array(n);
+    pf = new Int16Array(n).fill(-1);
+    const pts = outline.points;
+    const offs = outline.offsets;
+    geoms = Array.from(outline.ids, (id, i) => ({
+      id, x: 0, y: 0, rotation: 0, pivotX: cw / 2, pivotY: ch / 2, depth: 0,
+      points: pts.subarray(offs[i], offs[i + 1]),
+    }));
+    lod?.dispose();
+    const samples0 = n > 0 ? (offs[1] - offs[0]) / 2 : 1;
+    lod = new LodPolicy({ samples0, cellW: cw, cellH: ch, timers, rebuild: (max) => build(max) });
+    selection.clear();
+    overlays.setScene({ layout, boardW: s.width, boardH: s.height });
+    if (!fitted) {
+      fitted = true;
+      fit();
+    }
+    build(lod.samplesAt(camera.scale));
+    loadMedia(s);
+  };
+
+  /** Push every piece whose drawn state changed. */
+  const pushPieces = () => {
+    if (!snap) return;
+    const drag = state.localDrag();
+    const dragging = drag ? new Set(drag.pieceIds) : null;
+    for (const p of state.pieces()) {
+      const i = indexOf.get(p.id);
+      if (i === undefined) continue;
+      if ((p.placed || (p.held_by !== null && p.held_by !== state.clientId)) && selection.has(p.id)) selection.delete(p.id);
+      let flags = 0;
+      if (p.placed) flags |= FLAG_PLACED;
+      if (p.held_by !== null || dragging?.has(p.id)) flags |= FLAG_HELD;
+      if (selection.has(p.id)) flags |= FLAG_SELECTED;
+      const rot = p.rotation & 3;
+      if (px[i] !== p.x || py[i] !== p.y || pr[i] !== rot || pf[i] !== flags) {
+        px[i] = p.x;
+        py[i] = p.y;
+        pr[i] = rot;
+        pf[i] = flags;
+        renderer.setPiece(p.id, p.x, p.y, rot, flags);
+      }
+    }
+    updateTurnButtons();
+  };
+
+  // ---- media ----
+  let mediaSha = '';
+  const sync = new MediaSync(video, { serverNow: () => state.serverNow(), timers });
+  const loadMedia = (s: RoomSnapshot) => {
+    const sha = currentSha(s);
+    if (sha === mediaSha) return;
+    mediaSha = sha;
+    const assets = deps.media.assets ? deps.media.assets(sha) : builtinAssets(sha, `${deps.media.assetBase}builtin/`);
+    if (!assets) {
+      video.removeAttribute('src');
+      poster.removeAttribute('src');
+      showToast('This picture is not a built-in loop; the web client cannot show it yet.');
+      return;
+    }
+    poster.src = assets.poster;
+    video.poster = assets.poster;
+    video.src = assets.mp4;
+    try {
+      video.load();
+    } catch {
+      // jsdom / old engines
+    }
+    sync.apply(s.playback);
+  };
+
+  // ---- solve clock ----
+  const clock = new SolveClock(state, timers);
+  clock.onTick((r) => {
+    clockEl.textContent = r.text;
+  });
+  const restartClock = () => clock.restart();
+
+  // ---- toast ----
+  let toastTimer: unknown = null;
+  const showToast = (text: string) => {
+    toast.textContent = text;
+    toast.hidden = false;
+    if (toastTimer !== null) timers.clear(toastTimer);
+    toastTimer = timers.set(() => {
+      toastTimer = null;
+      toast.hidden = true;
+    }, TOAST_MS);
+  };
+
+  // ---- view ----
+  const viewChanged = () => {
+    renderer.requestRender();
+    overlays.requestDraw();
+    lod?.viewChanged(camera.scale);
+  };
+  const moved = () => {
+    userMoved = true;
+    viewChanged();
+  };
+
+  // ---- drag ----
+  interface Drag {
+    anchor: number;
+    multi: boolean;
+    dx: number;
+    dy: number;
+    ox: number;
+    oy: number;
+    x: number;
+    y: number;
+    /** The server said we hold the anchor. */
+    confirmed: boolean;
+    /** An error came before the grant (maybe a refusal): no moves until a grant. */
+    paused: boolean;
+    /** The connection went (the server released the lease): send nothing more. */
+    dead: boolean;
+    /** Pieces the local prediction moves (undefined: the anchor's group). */
+    ids: number[] | undefined;
+  }
+  let drag: Drag | null = null;
+  /** Drops sent for paused (possibly refused) drags, whose "You do not hold ..."
+   *  reply is expected and not worth a toast; each entry expires. */
+  const expectedNotHolding: number[] = [];
+  const NOT_HOLDING_TTL_MS = 10_000;
+  const isNotHolding = (msg: string) => msg.startsWith('You do not hold');
+
+  /** Show the drag locally again (after a grant, or when RoomState dropped the
+   *  overlay over an error that was not about this drag). */
+  const revive = (d: Drag) => {
+    d.paused = false;
+    if (!state.localDrag()) {
+      state.beginDrag(d.anchor, d.ids);
+      state.dragTo(d.x, d.y);
+    }
+    socket.send(
+      d.multi
+        ? { type: 'move_selection', anchor_piece_id: d.anchor, x: d.x, y: d.y }
+        : { type: 'move_piece', piece_id: d.anchor, x: d.x, y: d.y },
+    );
+    updateTurnButtons();
+  };
+
+  const grabbable = (id: number): boolean => {
+    const p = state.piece(id);
+    return !!p && !p.placed && (p.held_by === null || p.held_by === state.clientId);
+  };
+
+  const hit = (sx: number, sy: number, tolPx: number): number | null => {
+    if (spectator() || !snap) return null;
+    const list: PieceGeom[] = [];
+    for (const p of state.pieces()) {
+      const i = indexOf.get(p.id);
+      if (i === undefined || !grabbable(p.id)) continue;
+      const g = geoms[i];
+      g.x = p.x;
+      g.y = p.y;
+      g.rotation = p.rotation & 3;
+      g.depth = renderer.pieceDepth(p.id);
+      list.push(g);
+    }
+    const [tx, ty] = camera.toTable(sx, sy);
+    return hitTest(list, tx, ty, tolPx / camera.scale);
+  };
+
+  const sendDrop = (d: Drag, x: number, y: number) => {
+    if (d.paused && !d.confirmed) expectedNotHolding.push(now() + NOT_HOLDING_TTL_MS);
+    socket.send(
+      d.multi
+        ? { type: 'drag_end_selection', anchor_piece_id: d.anchor, x, y }
+        : { type: 'drag_end', piece_id: d.anchor, x, y },
+    );
+    state.endDrag();
+  };
+
+  const finishDrag = (cancelled: boolean) => {
+    const d = drag;
+    drag = null;
+    if (!d || d.dead) return updateTurnButtons();
+    if (cancelled) {
+      // No drag-abort in the protocol: put it down where it started.
+      if (state.localDrag()) state.dragTo(d.ox, d.oy);
+      d.x = d.ox;
+      d.y = d.oy;
+      sendDrop(d, d.ox, d.oy);
+    } else {
+      sendDrop(d, d.x, d.y);
+    }
+    updateTurnButtons();
+  };
+
+  /** A held, granted, live drag in a room that turns its pieces. */
+  const canTurn = (): boolean => {
+    const d = drag;
+    return !!d && !d.dead && !d.paused && d.confirmed && !!state.localDrag() && state.snapshot()?.difficulty.rotation === true;
+  };
+
+  const turn = (turns: 1 | -1) => {
+    const d = drag;
+    if (!d || !canTurn()) return;
+    if (socket.send({ type: 'rotate_selection', anchor_piece_id: d.anchor, quarter_turns: turns })) state.turnDrag(turns);
+  };
+
+  const updateTurnButtons = () => {
+    const show = canTurn();
+    turnLeft.hidden = !show;
+    turnRight.hidden = !show;
+  };
+
+  const selectRect = (r: Rect, additive: boolean) => {
+    if (!snap) return;
+    if (!additive) selection.clear();
+    for (const p of state.pieces()) {
+      const x = p.x + cw / 2;
+      const y = p.y + ch / 2;
+      if (x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h && grabbable(p.id)) selection.add(p.id);
+    }
+    pushPieces();
+  };
+
+  const machine = new GestureMachine(
+    {
+      hit,
+      toTable: (sx, sy) => camera.toTable(sx, sy),
+      dragStart(id, tx, ty) {
+        const p = state.piece(id);
+        if (!p || spectator()) return;
+        const multi = selection.has(id) && selection.size > 1;
+        if (!selection.has(id)) selection.clear();
+        let ids: number[] | undefined;
+        let ok: boolean;
+        if (multi) {
+          const sel = [...selection].sort((a, b) => a - b);
+          const groups = new Set(sel.map((i) => state.piece(i)?.group_id));
+          ids = (state.snapshot()?.pieces ?? []).filter((q) => !q.placed && groups.has(q.group_id)).map((q) => q.id);
+          ok = socket.send({ type: 'drag_start_selection', piece_ids: sel });
+        } else {
+          ok = socket.send({ type: 'drag_start', piece_id: id });
+        }
+        drag = { anchor: id, multi, dx: tx - p.x, dy: ty - p.y, ox: p.x, oy: p.y, x: p.x, y: p.y, confirmed: false, paused: false, dead: !ok, ids };
+        if (ok) state.beginDrag(id, ids);
+        updateTurnButtons();
+      },
+      dragMove(tx, ty) {
+        const d = drag;
+        if (!d || d.dead) return;
+        d.x = tx - d.dx;
+        d.y = ty - d.dy;
+        if (d.paused) return; // remembered for a revive; nothing to the server yet
+        if (state.localDrag()) state.dragTo(d.x, d.y);
+        socket.send(
+          d.multi
+            ? { type: 'move_selection', anchor_piece_id: d.anchor, x: d.x, y: d.y }
+            : { type: 'move_piece', piece_id: d.anchor, x: d.x, y: d.y },
+        );
+      },
+      dragEnd: () => finishDrag(false),
+      dragCancel: () => finishDrag(true),
+      pan(dx, dy) {
+        camera.panBy(dx, dy);
+        moved();
+      },
+      pinch(cx, cy, f) {
+        camera.zoomAt(cx, cy, f);
+        moved();
+      },
+      wheelZoom(sx, sy, f) {
+        camera.zoomAt(sx, sy, f);
+        moved();
+      },
+      toggleSelect(id) {
+        if (!grabbable(id)) return;
+        if (selection.has(id)) selection.delete(id);
+        else selection.add(id);
+        pushPieces();
+      },
+      rubberBand: (r) => overlays.setRubber(r),
+      selectRect,
+      ping(tx, ty) {
+        if (spectator() || !inScene(tx, ty)) return;
+        socket.send({ type: 'ping', x: tx, y: ty });
+      },
+    },
+    { timers, ...deps.gestures },
+  );
+  const detachPointer = attachPointerEvents(glCanvas, machine, camera);
+
+  const selectCbs: ((on: boolean) => void)[] = [];
+  if (deps.onSelectModeChange) selectCbs.push(deps.onSelectModeChange);
+  const setSelectMode = (on: boolean) => {
+    if (machine.selecting === on) return;
+    machine.setSelectMode(on);
+    selectBtn.setAttribute('aria-pressed', String(on));
+    selectBtn.classList.toggle('is-on', on);
+    for (const cb of [...selectCbs]) cb(on);
+  };
+
+  // ---- own cursor ----
+  let cursorShown = false;
+  const inScene = (x: number, y: number) => {
+    const s = layout?.scene;
+    return !!s && Number.isFinite(x) && Number.isFinite(y) && x >= s.min_x && x <= s.max_x && y >= s.min_y && y <= s.max_y;
+  };
+  const hideCursor = () => {
+    if (!cursorShown) return;
+    cursorShown = false;
+    socket.send({ type: 'cursor_hidden' });
+  };
+  listen(glCanvas, 'pointermove', ((e: PointerEvent) => {
+    if (spectator()) return;
+    const r = glCanvas.getBoundingClientRect();
+    const [tx, ty] = camera.toTable(e.clientX - r.left, e.clientY - r.top);
+    if (inScene(tx, ty)) {
+      cursorShown = true;
+      socket.send({ type: 'cursor', x: tx, y: ty });
+    } else {
+      hideCursor();
+    }
+  }) as EventListener);
+  listen(glCanvas, 'pointerleave', hideCursor);
+  listen(window, 'blur', hideCursor);
+  // Focus or the page going away mid-drag (alt-tab, app switch, screen lock)
+  // may never deliver the pointerup: end the drag now through the gesture
+  // machine's cancel, which drops the piece where it started. Only the
+  // window's own blur counts, never an element's inside the page.
+  const endDragOnLeave = () => {
+    if (drag) machine.reset();
+  };
+  listen(window, 'blur', ((e: Event) => {
+    if (!(e.target instanceof Element)) endDragOnLeave();
+  }) as EventListener);
+  listen(document, 'visibilitychange', () => {
+    if (document.visibilityState === 'hidden') endDragOnLeave();
+  });
+  // A user gesture lets a refused autoplay start.
+  listen(glCanvas, 'pointerdown', () => sync.nudge());
+  listen(window, 'keydown', ((e: KeyboardEvent) => {
+    if (e.key === 'Escape' && selection.size && !e.defaultPrevented) {
+      selection.clear();
+      pushPieces();
+    }
+    // Desktop controls.rs: E turns clockwise, Q counter-clockwise.
+    const k = e.key.toLowerCase();
+    if ((k === 'e' || k === 'q') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented && !typing(e.target) && canTurn()) {
+      e.preventDefault();
+      turn(k === 'e' ? 1 : -1);
+    }
+  }) as EventListener);
+  // While a piece is held in a rotation room the wheel turns it instead of
+  // zooming (desktop board.rs, WHEEL_POINTS_PER_TURN). Captured on the stage,
+  // before the canvas's own wheel handler zooms.
+  let wheelCarry = 0;
+  listen(stage, 'wheel', ((e: WheelEvent) => {
+    if (!canTurn()) {
+      wheelCarry = 0;
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? Math.max(1, camera.viewH) : 1);
+    wheelCarry += px;
+    if (Math.abs(wheelCarry) >= WHEEL_PX_PER_TURN) {
+      const t: 1 | -1 = wheelCarry > 0 ? 1 : -1;
+      wheelCarry = 0;
+      turn(t);
+    }
+  }) as EventListener, { capture: true, passive: false });
+
+  // ---- size ----
+  const resize = () => {
+    renderer.resize();
+    overlays.resize(stage.clientWidth || camera.viewW, stage.clientHeight || camera.viewH);
+    if (!userMoved && fitted) fit();
+    viewChanged();
+  };
+  let observer: ResizeObserver | null = null;
+  if (typeof ResizeObserver !== 'undefined') {
+    observer = new ResizeObserver(() => resize());
+    observer.observe(stage);
+  }
+  cleanups.push(watchDpr(mm, resize));
+
+  // ---- the room ----
+  const onMessage = (m: ServerMessage | null) => {
+    const s = state.snapshot();
+    if (!s) return;
+    if (s !== snap) {
+      if (puzzleKey(s) !== key) loadPuzzle(s);
+      else {
+        snap = s;
+        loadMedia(s);
+      }
+    }
+    if (s.holders !== holdersRef) {
+      holdersRef = s.holders;
+      overlays.setHolders(s.holders);
+    }
+    pushPieces();
+    if (!m) return;
+    const d = drag;
+    let quiet = false;
+    if (m.type === 'error' && isNotHolding(m.message)) {
+      const t = now();
+      while (expectedNotHolding.length && expectedNotHolding[0] < t) expectedNotHolding.shift();
+      if (expectedNotHolding.length) {
+        expectedNotHolding.shift();
+        quiet = true; // the answer to a drop after a refused pickup
+      }
+    }
+    if (d && !d.dead) {
+      if (m.type === 'welcome') {
+        d.dead = true; // a reconnect: the old lease is gone
+        updateTurnButtons();
+      } else if (m.type === 'snapshot') {
+        // Sent mid-drag when a peer joins or leaves or the clock changes; it
+        // replaces RoomState and its overlay. Still ours: put the overlay
+        // back now. Not granted yet: the grant revives it (below).
+        const a = m.snapshot.pieces.find((p) => p.id === d.anchor);
+        if (a && a.held_by !== null && a.held_by === state.clientId) {
+          d.confirmed = true;
+          if (!d.paused) revive(d);
+        }
+      } else if (m.type === 'pieces_changed' && m.pieces.some((p) => p.id === d.anchor && p.held_by !== null && p.held_by === state.clientId)) {
+        d.confirmed = true;
+        if (d.paused || !state.localDrag()) revive(d);
+        else updateTurnButtons();
+      } else if (m.type === 'error' && !d.confirmed) {
+        if (quiet) {
+          // Not about this drag: undo RoomState's revert.
+          if (!d.paused && !state.localDrag()) {
+            state.beginDrag(d.anchor, d.ids);
+            state.dragTo(d.x, d.y);
+          }
+        } else {
+          d.paused = true;
+          updateTurnButtons();
+        }
+      }
+    }
+    switch (m.type) {
+      case 'welcome':
+      case 'snapshot':
+        sync.apply(s.playback);
+        restartClock();
+        break;
+      case 'playback_changed':
+        sync.apply(m.playback);
+        break;
+      case 'pieces_changed':
+        if (m.stats) restartClock();
+        break;
+      case 'cursor':
+      case 'cursor_hidden':
+        overlays.requestDraw('over');
+        break;
+      case 'ping':
+        model.addPing(m.name, m.x, m.y, now());
+        overlays.requestDraw('over');
+        break;
+      case 'error':
+        if (!quiet) showToast(m.message);
+        break;
+      default:
+        break;
+    }
+  };
+  cleanups.push(state.onChange(onMessage));
+  cleanups.push(
+    socket.onState((st) => {
+      if (st !== 'open' && drag) drag.dead = true; // the server expires our leases
+      netEl.textContent = st === 'open' ? '' : st === 'fatal' ? 'Disconnected' : 'Reconnecting…';
+      overlays.requestDraw('over');
+    }),
+  );
+
+  // First paint from what the room already has.
+  const first = state.snapshot();
+  if (first) {
+    loadPuzzle(first);
+    holdersRef = first.holders;
+    overlays.setHolders(first.holders);
+    pushPieces();
+    sync.apply(first.playback);
+    restartClock();
+  }
+  resize();
+
+  let destroyed = false;
+  return {
+    camera,
+    selection,
+    setSelectMode,
+    el: section,
+    body,
+    hud,
+    clock,
+    setMuted(names) {
+      mutedLower = new Set([...names].map((n) => n.toLowerCase()));
+      overlays.requestDraw('over');
+    },
+    onSelectModeChange(cb) {
+      selectCbs.push(cb);
+      return () => {
+        const i = selectCbs.indexOf(cb);
+        if (i >= 0) selectCbs.splice(i, 1);
+      };
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      // Let go of a held piece first (drag_end at its origin), while the room is still wired.
+      detachPointer();
+      machine.destroy();
+      hideCursor();
+      for (const c of cleanups.splice(0)) c();
+      observer?.disconnect();
+      observer = null;
+      clock.dispose();
+      if (toastTimer !== null) timers.clear(toastTimer);
+      toastTimer = null;
+      lod?.dispose();
+      sync.dispose();
+      overlays.dispose();
+      renderer.dispose();
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch {
+        // already gone
+      }
+      selectCbs.length = 0;
+      section.remove();
+    },
+  };
+}
+
+/** The lobby app's entry point (see loadBoard.ts): a joined room, full screen. */
+export const mountJoined: BoardModule['mountBoard'] = (root, joined, leave, config) => {
+  const board = mountBoard(root, {
+    socket: joined.socket,
+    state: joined.room,
+    media: { assetBase: config.assetBase },
+    spectator: joined.welcome.spectator,
+  });
+  const toolbar = mountToolbar(board, { state: joined.room, socket: joined.socket, site: config.site, leave });
+  const unhook = config.testHooks ? installTestProbe(board, joined.room) : null;
+  return {
+    destroy() {
+      unhook?.();
+      toolbar.destroy();
+      board.destroy();
+    },
+  };
+};
+
+/** What `window.__pieceoffTest` offers (web/e2e only, config `testHooks: true`).
+ *  Read-only: every answer is a copy, and nothing here can change the room. */
+export interface TestProbe {
+  /** A copy of the server's snapshot as this client last applied it (no local drag overlay). */
+  snapshot(): RoomSnapshot | null;
+  /** This connection's id (what `held_by` names). */
+  clientId(): string | null;
+  /** A table point in page CSS px (for `page.mouse` / touch input). */
+  toPage(tx: number, ty: number): [number, number];
+  /** The camera's current mapping, `screen = table * scale + offset`. */
+  camera(): { scale: number; ox: number; oy: number };
+  /** Selected piece ids, sorted (a copy). */
+  selection(): number[];
+}
+
+function installTestProbe(board: BoardHandle, state: RoomState): () => void {
+  const canvas = board.el.querySelector<HTMLCanvasElement>('canvas.po-board-gl');
+  const probe: TestProbe = Object.freeze({
+    snapshot: () => {
+      const s = state.snapshot();
+      return s ? (JSON.parse(JSON.stringify(s)) as RoomSnapshot) : null;
+    },
+    clientId: () => state.clientId,
+    toPage: (tx: number, ty: number): [number, number] => {
+      const r = canvas?.getBoundingClientRect();
+      const [sx, sy] = board.camera.toScreen(tx, ty);
+      return [(r?.left ?? 0) + sx, (r?.top ?? 0) + sy];
+    },
+    camera: () => ({ scale: board.camera.scale, ox: board.camera.ox, oy: board.camera.oy }),
+    selection: () => [...board.selection].sort((a, b) => a - b),
+  });
+  const w = window as unknown as { __pieceoffTest?: TestProbe };
+  w.__pieceoffTest = probe;
+  return () => {
+    if (w.__pieceoffTest === probe) delete w.__pieceoffTest;
+  };
+}

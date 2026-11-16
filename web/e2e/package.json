@@ -1,0 +1,14 @@
+{
+  "name": "pieceoff-web-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Opt-in two-client browser e2e for the web play client (scripts/web-e2e.sh)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.57.0"
+  }
+}

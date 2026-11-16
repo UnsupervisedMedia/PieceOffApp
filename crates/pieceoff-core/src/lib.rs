@@ -74,6 +74,7 @@ pub fn valid_media_dimensions(width: u32, height: u32) -> bool {
 pub struct PuzzleId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Piece {
     pub id: u32,
     pub group_id: u32,
@@ -94,6 +95,7 @@ pub struct Piece {
 /// Optional challenge settings chosen by the host when the room is created
 /// (protocol v16). Both off by default; fixed for the life of the room.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Difficulty {
     /// Pieces start turned and must be turned upright before they fit.
     #[serde(default)]
@@ -104,6 +106,7 @@ pub struct Difficulty {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PlaybackState {
     pub playing: bool,
     pub position_ms: u64,
@@ -139,6 +142,7 @@ impl Default for PlaybackState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MediaItem {
     pub sha256: String,
     #[serde(default = "default_media_extension")]
@@ -160,6 +164,7 @@ pub struct MediaItem {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
     Off,
@@ -175,6 +180,7 @@ pub fn fnv1a(text: &str) -> u32 {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RoomSnapshot {
     pub protocol_version: u16,
     pub id: String,
@@ -853,6 +859,7 @@ fn tray_slot_position(
 
 /// How loose pieces are laid back into the tray.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TrayArrangement {
     /// Corners, then other edge pieces, then interior pieces, each group in
@@ -1040,6 +1047,7 @@ fn catmull_rom(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     CreateRoom {
@@ -1238,6 +1246,7 @@ pub enum ClientMessage {
 /// One line of room chat as the server relays it. Kept in the room's memory
 /// for players who join later, never in the saved snapshot.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ChatLine {
     /// Counts up from 1 in each room while the server runs.
     pub id: u64,
@@ -1249,6 +1258,7 @@ pub struct ChatLine {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Welcome {

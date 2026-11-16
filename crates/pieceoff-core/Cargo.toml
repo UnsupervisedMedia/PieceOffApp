@@ -5,8 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# TypeScript declarations for the wire types (ts-rs). Enabled only by the
+# web client's generator test (pieceoff-web-wasm dev-dependency), never in a
+# shipped build.
+ts = ["dep:ts-rs"]
+
 [dependencies]
 serde.workspace = true
+ts-rs = { version = "=12.0.1", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

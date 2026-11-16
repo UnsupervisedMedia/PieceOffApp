@@ -25,6 +25,9 @@ const DEFAULT_FLUSH_MS = 5_000;
 const DEFAULT_IDLE_SOCKET_MS = 90_000;
 const DEFAULT_IDLE_CLEANUP_MS = 60 * 60_000;
 const DEFAULT_UNCLAIMED_MS = 15 * 60_000;
+/** Told to a socket whose player connected again elsewhere; clients match its start (web socket.ts classifyError). */
+const REPLACED_BY_NEW_CONNECTION = "This name was opened in another window or on another device using the same settings";
+
 /** Clients ping about this often; the sweep runs at most this far apart. */
 const MAX_SWEEP_MS = 20_000;
 /** An alarm is never set closer than this, so a stuck deadline cannot spin. */
@@ -1023,11 +1026,24 @@ export class RoomDO extends DurableObject<Env> {
     if (typeof parsed.resume_token === "string" && parsed.resume_token.length > 0) {
       const known = this.secrets[await sha256Hex(parsed.resume_token)];
       if (known !== undefined) {
-        const inUse = this.attachments(ws).some((a) => a.joined && a.clientId === known);
-        if (inUse) {
-          this.sendError(ws, "That player is already connected");
-          ws.close(1008, "already connected");
-          return;
+        // The token's player is still attached: usually a socket the client
+        // has already given up on (a phone that slept, a cut network) but
+        // whose close never reached us. Holding the token already lets the
+        // bearer take this identity once the idle sweep drops that socket;
+        // replacing it now only removes the wait (and the leases it would
+        // keep held until then). The old socket is released exactly as a
+        // close would, then told it was replaced.
+        for (const old of this.ctx.getWebSockets()) {
+          if (old === ws) continue;
+          const a = old.deserializeAttachment() as Attachment | null;
+          if (!a?.joined || a.clientId !== known) continue;
+          await this.drop(old);
+          try {
+            this.sendError(old, REPLACED_BY_NEW_CONNECTION);
+            old.close(1008, "replaced");
+          } catch {
+            // already gone
+          }
         }
         clientId = known;
         resumeToken = parsed.resume_token;
@@ -1070,7 +1086,7 @@ export class RoomDO extends DurableObject<Env> {
         return old?.joined && old.clientId === oldId;
       });
       if (oldSocket) {
-        this.sendError(oldSocket, "This name was opened in another window or on another device using the same settings");
+        this.sendError(oldSocket, REPLACED_BY_NEW_CONNECTION);
         oldSocket.close(1008, "replaced");
       }
     }

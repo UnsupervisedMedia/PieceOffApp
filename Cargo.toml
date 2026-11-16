@@ -5,6 +5,7 @@ members = [
     "crates/pieceoff-launcher",
     "crates/pieceoff-server",
     "crates/pieceoff-room-wasm",
+    "crates/pieceoff-web-wasm",
 ]
 resolver = "3"
 

@@ -2,6 +2,12 @@
 """Collect third-party license texts and notices for the locked Cargo graph.
 
     scripts/third-party-notices.py [output-file]
+    scripts/third-party-notices.py --web META.json NODE_MODULES [output-file]
+
+With --web the notices are for the browser client release asset (web/pack.sh)
+instead: only the Rust crates compiled into pieceoff-web-wasm (normal
+dependencies for wasm32-unknown-unknown) plus the npm packages that esbuild's
+metafile (web/build/meta.json) shows inside the shipped bundle.
 
 This includes crate metadata, legal files shipped with each resolved crate,
 and the license texts for epaint's embedded default fonts. It fails if a
@@ -22,17 +28,67 @@ def legal_file(path):
     return any(token in name for token in LEGAL_NAME)
 
 
+def wasm_reachable(meta, root_name="pieceoff-web-wasm"):
+    """Ids of the packages the web wasm links: normal deps of root_name, transitively."""
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    root = next(p["id"] for p in meta["packages"] if p["name"] == root_name)
+    seen, todo = set(), [root]
+    while todo:
+        cur = todo.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for dep in nodes[cur]["deps"]:
+            if any(k.get("kind") is None for k in dep["dep_kinds"]):
+                todo.append(dep["pkg"])
+    return seen
+
+
+def bundled_npm(meta_path, node_modules):
+    """(name, version, license, [(rel, path)]) for npm packages inside the shipped bundle."""
+    with open(meta_path, encoding="utf-8") as f:
+        outputs = json.load(f)["outputs"]
+    roots = set()
+    for out in outputs.values():
+        for src in out.get("inputs", {}):
+            parts = src.replace("\\", "/").split("/")
+            if "node_modules" in parts:
+                i = len(parts) - 1 - parts[::-1].index("node_modules")
+                n = 2 if parts[i + 1].startswith("@") else 1
+                roots.add("/".join(parts[i + 1:i + 1 + n]))
+    found = []
+    for name in sorted(roots):
+        root = os.path.join(node_modules, name)
+        with open(os.path.join(root, "package.json"), encoding="utf-8") as f:
+            pj = json.load(f)
+        lic = pj.get("license") or ""
+        paths = [(n, os.path.join(root, n)) for n in sorted(os.listdir(root))
+                 if legal_file(n) and os.path.isfile(os.path.join(root, n))]
+        found.append((name, pj["version"], lic, paths, pj.get("author")))
+    return found
+
+
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "-"
-    meta = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--format-version", "1", "--locked"], text=True
-    ))
+    args = sys.argv[1:]
+    web = None
+    if args[:1] == ["--web"]:
+        if len(args) < 3:
+            sys.stderr.write(__doc__)
+            return 2
+        web = (args[1], args[2])
+        args = args[3:]
+    out = args[0] if args else "-"
+    cmd = ["cargo", "metadata", "--format-version", "1", "--locked"]
+    if web:
+        cmd += ["--filter-platform", "wasm32-unknown-unknown"]
+    meta = json.loads(subprocess.check_output(cmd, text=True))
     workspace = set(meta["workspace_members"])
+    keep = wasm_reachable(meta) if web else None
     entries = {}
     missing = []
     packages = []
     for pkg in sorted(meta["packages"], key=lambda p: (p["name"], p["version"])):
-        if pkg["id"] in workspace:
+        if pkg["id"] in workspace or (keep is not None and pkg["id"] not in keep):
             continue
         license_expr = pkg.get("license") or ("file: " + pkg["license_file"] if pkg.get("license_file") else "")
         if not license_expr:
@@ -63,6 +119,18 @@ def main():
             key = hashlib.sha256(data).hexdigest()
             item = entries.setdefault(key, {"data": data, "refs": []})
             item["refs"].append(f"{pkg['name']} {pkg['version']} — {rel} (declared {license_expr})")
+    if web:
+        for name, version, lic, npaths, author in bundled_npm(*web):
+            if not lic or not npaths:
+                missing.append(f"npm {name} {version}: missing license or license file")
+                continue
+            a = author if isinstance(author, str) else (author or {}).get("name", "") if author else ""
+            packages.append(f"{name} {version} (npm) | {lic} | {a or 'not declared in package.json'}")
+            for rel, path in npaths:
+                with open(path, "rb") as f:
+                    data = f.read()
+                item = entries.setdefault(hashlib.sha256(data).hexdigest(), {"data": data, "refs": []})
+                item["refs"].append(f"{name} {version} (npm) — {rel} (declared {lic})")
     if missing:
         sys.stderr.write("Cannot create release notices; review these packages:\n")
         sys.stderr.write("\n".join("  " + line for line in missing) + "\n")

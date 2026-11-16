@@ -1,0 +1,793 @@
+/* PieceOff web client: lobby screens. Neutral, dark, legible; the site adds brand.
+   Phone first (portrait and landscape), 44 px touch targets, safe-area insets. */
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+.po-app {
+  --bg: #16181d;
+  --panel: #20242c;
+  --line: #3a404c;
+  --text: #eceef2;
+  --muted: #a7adb9;
+  --accent: #f2b33d;
+  --accent-ink: #1a1405;
+  --error: #ff8a80;
+  --tap: 44px;
+  box-sizing: border-box;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.po-app *,
+.po-app *::before,
+.po-app *::after {
+  box-sizing: inherit;
+}
+
+.po-main {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.po-app h1 {
+  font-size: 1.5rem;
+  line-height: 1.2;
+  margin: 0.25rem 0 1rem;
+}
+.po-app h2 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+.po-app h1:focus,
+.po-app h2:focus {
+  outline: none;
+}
+.po-app code {
+  font-family: ui-monospace, 'JetBrains Mono', Menlo, monospace;
+  letter-spacing: 0.06em;
+}
+.muted {
+  color: var(--muted);
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.screen > label,
+.screen legend,
+.code-form label {
+  font-weight: 600;
+}
+
+/* ---- controls ---- */
+.btn {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.btn:hover {
+  border-color: var(--muted);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--big {
+  min-height: 52px;
+  font-size: 1.05rem;
+}
+.btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.po-app :focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.input {
+  min-height: var(--tap);
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f1115;
+  color: var(--text);
+  font: inherit;
+  font-size: max(16px, 1rem); /* below 16 px iOS zooms on focus */
+}
+.input[aria-invalid='true'] {
+  border-color: var(--error);
+}
+.input--code {
+  text-transform: uppercase;
+  font-family: ui-monospace, Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+.field-error {
+  margin: 0;
+  min-height: 1.2em;
+  color: var(--error);
+}
+.field-error:empty {
+  min-height: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.actions--stack {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- banner ---- */
+.banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 40rem;
+  margin: 0 auto 0.75rem;
+  padding: 0.25rem 0.25rem 0.25rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #2a2f3a;
+}
+.banner[hidden] {
+  display: none;
+}
+.banner[data-tone='error'] {
+  border-color: var(--error);
+}
+.banner__text {
+  flex: 1;
+  margin: 0;
+}
+
+/* ---- lobby ---- */
+.code-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 1.25rem 0;
+}
+.lobby__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.lobby__status {
+  margin: 0.25rem 0 0.5rem;
+}
+.rooms {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+.room {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  display: grid;
+  gap: 0.5rem;
+}
+.room__title {
+  font-size: 1.05rem;
+  margin: 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.tag {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  background: #3a404c;
+}
+.room__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 1rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.room__meta div,
+.room__meta dt,
+.room__meta dd {
+  margin: 0;
+  display: inline;
+}
+.room__meta dt::after {
+  content: ': ';
+}
+.room__meta dd + dt {
+  margin-left: 0;
+}
+.room__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #0f1115;
+  overflow: hidden;
+}
+.room__bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* ---- create ---- */
+.screen fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.screen legend {
+  padding: 0;
+  margin-bottom: 0.4rem;
+}
+.puzzles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.puzzles legend {
+  grid-column: 1 / -1;
+}
+.puzzle label {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.35rem;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+  min-height: var(--tap);
+}
+.puzzle img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0f1115;
+}
+.puzzle span {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.puzzle input:checked + label {
+  border-color: var(--accent);
+}
+.puzzle input:focus-visible + label,
+.chip input:focus-visible + label {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.chips legend {
+  width: 100%;
+}
+.chip label {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0.4rem 0.85rem;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.chip input:checked + label {
+  border-color: var(--accent);
+}
+.check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  min-height: var(--tap);
+}
+.check input {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  accent-color: var(--accent);
+}
+.turnstile {
+  min-height: 65px;
+}
+
+.screen--end {
+  min-height: 60vh;
+  justify-content: center;
+}
+
+@media (min-width: 40rem) {
+  .puzzles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Landscape phones: short screens, use the width. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .po-main {
+    max-width: 56rem;
+  }
+  .puzzles {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+  .puzzle span {
+    font-size: 0.75rem;
+  }
+  .rooms {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .po-app h1 {
+    margin-bottom: 0.5rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .po-app *,
+  .po-app *::before,
+  .po-app *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- board (the lazy board chunk renders into this; styles ship with the
+   lobby so the chunk needs no stylesheet of its own) ---- */
+.po-board {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: #16181d;
+  color: var(--text);
+}
+.po-board [hidden] {
+  display: none !important;
+}
+.po-board-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+.po-board-stage canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.po-board-under,
+.po-board-over,
+.po-board-poster,
+.po-board-lost {
+  pointer-events: none;
+}
+.po-board-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.85;
+}
+/* The video is a texture source only: kept in the document (some engines stop
+   decoding detached or display:none video) but invisible. */
+.po-board-video {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+.po-board-lost {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(90%, 28rem);
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  font-size: 0.9rem;
+  text-align: center;
+}
+.po-board-hud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px max(8px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.po-board-clock {
+  font-variant-numeric: tabular-nums;
+}
+.po-board-net {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.po-board-spacer {
+  flex: 1 1 auto;
+}
+.po-board-select.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.po-board-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: min(92%, 32rem);
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(20, 22, 27, 0.95);
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+
+/* ---- room toolbar (ui/toolbar.ts): a bottom sheet on phones, a side panel
+   on wide screens and short landscape screens (SIDE_QUERY in toolbar.ts) ---- */
+.po-board-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.po-board-body > .po-board-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.btn--danger {
+  border-color: #c2453a;
+  color: #ffb4ab;
+}
+.po-hud-chat {
+  position: relative;
+}
+.po-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+}
+.po-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+  z-index: 20;
+}
+.po-panel--sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--po-kb, 0px);
+  max-height: calc(var(--po-vvh, 100dvh) * 0.72);
+  min-height: min(18rem, calc(var(--po-vvh, 100dvh) * 0.6));
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  animation: po-sheet-in 160ms ease-out;
+}
+@keyframes po-sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+.po-panel--side {
+  position: relative;
+  flex: 0 0 min(22rem, 42vw);
+  width: min(22rem, 42vw);
+  border-left: 1px solid var(--line);
+  padding-right: env(safe-area-inset-right);
+  padding-top: env(safe-area-inset-top);
+}
+.po-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.po-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+.po-tab {
+  flex: 1 1 auto;
+  min-height: var(--tap);
+  padding: 0 0.6rem;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.po-tab.is-on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.po-tab:focus-visible,
+.po-panel a:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+.po-panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.po-pane {
+  padding: 10px 12px 12px;
+}
+.po-panel-status {
+  margin: 8px 12px 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #2a2f3a;
+}
+.po-confirm {
+  margin: 8px 12px 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #c2453a;
+  border-radius: 10px;
+  background: #2a2228;
+}
+.po-confirm p {
+  margin: 0.25rem 0 0.5rem;
+}
+.po-sub {
+  margin: 0.9rem 0 0.35rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+.po-list,
+.po-credits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.po-list li,
+.po-credits li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: var(--tap);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.po-list li.is-muted .po-person-name {
+  opacity: 0.6;
+}
+.po-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.po-person-name,
+.po-credit-who {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.po-credit-n {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.po-row-actions {
+  display: flex;
+  gap: 4px;
+}
+.po-host-badge {
+  padding: 0 0.4rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.po-solve-clock {
+  margin: 0;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.po-solve-total {
+  margin: 0.1rem 0 0.4rem;
+}
+.po-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.po-chat-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.po-panel--sheet .po-chat-log {
+  max-height: calc(var(--po-vvh, 100dvh) * 0.72 - 9rem);
+}
+.po-chat-line {
+  padding: 3px 0;
+}
+.po-chat-name {
+  font-weight: 700;
+  margin-right: 0.4rem;
+}
+.po-chat-off {
+  margin: 0;
+}
+.po-chat-form,
+.po-inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.po-chat-form .input,
+.po-inline .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.po-chat-count {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.po-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.8rem;
+  margin: 0.6rem 0;
+}
+.po-facts dt {
+  color: var(--muted);
+}
+.po-facts dd {
+  margin: 0;
+}
+.po-invite-link {
+  overflow-wrap: anywhere;
+}
+.po-share p,
+.po-report {
+  margin: 0 0 0.4rem;
+}
+.po-leave {
+  margin-top: 1rem;
+}
+/* Narrow phones: the room code is in the Room tab; keep the HUD on one row. */
+@media (max-width: 430px) {
+  .po-board-code {
+    display: none;
+  }
+  .po-board-hud {
+    gap: 6px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .po-panel--sheet {
+    animation: none;
+  }
+}
+/* Visual pass: whole-row labels for the host switches (44 px), a visibly
+   disabled chat, and the chat input at the bottom of the sheet. */
+.po-panel .check label {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-height: var(--tap);
+  cursor: pointer;
+}
+.po-panel .input:disabled,
+.po-panel .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.po-panes {
+  display: flex;
+  flex-direction: column;
+}
+.po-pane:not([hidden]) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+.po-pane > .po-chat {
+  flex: 1 1 auto;
+}
+.po-pane > .po-chat > .po-chat-log {
+  flex: 1 1 auto;
+}

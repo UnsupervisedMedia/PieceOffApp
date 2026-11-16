@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>PieceOff web client (dev)</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/play-app/play.css" />
+    <script>
+      // Dev only: ?api=http://127.0.0.1:8787 points the client at a local Worker
+      // (`cd worker && npx wrangler dev --local --var DEV_ALLOW_UNVERIFIED_CREATE:1 --var SITE_ORIGIN:<this origin>`).
+      var api = new URLSearchParams(location.search).get('api');
+      window.PIECEOFF_WEB_CONFIG = { assetBase: '/play-app/' };
+      if (api) window.PIECEOFF_WEB_CONFIG.api = api;
+      // ?site=http://127.0.0.1:8099 makes invite links point at this dev server.
+      var site = new URLSearchParams(location.search).get('site');
+      if (site) window.PIECEOFF_WEB_CONFIG.site = site;
+      // Cloudflare's always-pass test key off pieceoff.app (the real key is hostname-bound).
+      if (location.hostname !== 'pieceoff.app') window.PIECEOFF_WEB_CONFIG.turnstileSiteKey = '1x00000000000000000000AA';
+    </script>
+    <script type="module" src="/play-app/play.js"></script>
+  </head>
+  <body>
+    <div id="pieceoff-play"></div>
+  </body>
+</html>

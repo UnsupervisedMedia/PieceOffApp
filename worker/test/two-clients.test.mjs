@@ -186,12 +186,8 @@ describe("room worker", () => {
     assert.equal(real.client_id, hostId);
     assert.ok(real.media_upload_token, "host receives the upload token");
 
-    // The same token cannot be used twice at once.
-    const twin = await connect(port, code);
-    twin.send(joinMessage(code, "Twin", hostToken));
-    const refused = await twin.next(ofType("error"), "duplicate resume");
-    assert.match(refused.message, /already connected/i);
-    assert.equal(await twin.waitClosed(), true);
+    // The bogus token left the real player alone.
+    assert.equal(creator.isClosed(), false, "an invalid token does not displace anyone");
     for (const socket of [guest, thief, creator]) socket.close();
   });
 
