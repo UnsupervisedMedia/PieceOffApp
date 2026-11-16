@@ -9,5 +9,6 @@
 /.venv-media/
 /web/node_modules/
 /web/dist/
+/web/build/
 /web/wasm/
 /web/dev/dist/

@@ -392,3 +392,106 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- board (the lazy board chunk renders into this; styles ship with the
+   lobby so the chunk needs no stylesheet of its own) ---- */
+.po-board {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: #16181d;
+  color: var(--text);
+}
+.po-board [hidden] {
+  display: none !important;
+}
+.po-board-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+.po-board-stage canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.po-board-under,
+.po-board-over,
+.po-board-poster,
+.po-board-lost {
+  pointer-events: none;
+}
+.po-board-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.85;
+}
+/* The video is a texture source only: kept in the document (some engines stop
+   decoding detached or display:none video) but invisible. */
+.po-board-video {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+.po-board-lost {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(90%, 28rem);
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  font-size: 0.9rem;
+  text-align: center;
+}
+.po-board-hud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px max(8px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.po-board-clock {
+  font-variant-numeric: tabular-nums;
+}
+.po-board-net {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.po-board-spacer {
+  flex: 1 1 auto;
+}
+.po-board-select.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.po-board-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: min(92%, 32rem);
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(20, 22, 27, 0.95);
+  border: 1px solid var(--line);
+  pointer-events: none;
+}

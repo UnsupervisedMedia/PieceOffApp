@@ -1,13 +1,17 @@
-// The board (WebGL renderer, gestures, overlays) is a separate chunk so the
-// lobby entry stays small. Task 9 replaces `./boardStub` with the real board
-// module and turns on esbuild code splitting; until then this placeholder is
-// NOT IMPLEMENTED: it shows who joined and a way out, nothing more.
+// The board (WebGL renderer, gestures, overlays) is a separate lazy chunk
+// (esbuild code splitting) so the lobby entry stays small: nothing in the
+// entry may import ./board statically.
 import type { Joined } from './join';
 
 export interface BoardModule {
-  mountBoard(root: HTMLElement, joined: Joined & { spectatorBecauseFull: boolean }, leave: () => void): { destroy(): void };
+  mountBoard(
+    root: HTMLElement,
+    joined: Joined & { spectatorBecauseFull: boolean },
+    leave: () => void,
+    config: { assetBase: string },
+  ): { destroy(): void };
 }
 
 export function loadBoard(): Promise<BoardModule> {
-  return import('./boardStub');
+  return import('./board').then((m) => ({ mountBoard: m.mountJoined }));
 }

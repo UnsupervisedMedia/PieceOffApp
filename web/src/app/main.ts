@@ -279,7 +279,7 @@ export function startApp(d: AppDeps): App {
         (d.loadBoard ?? defaultLoadBoard)().then(
           (m) => {
             if (join.state.get() !== joined) return;
-            board = m.mountBoard(host, { ...joined, spectatorBecauseFull: joined.kind === 'room-full-spectating' }, toLobby);
+            board = m.mountBoard(host, { ...joined, spectatorBecauseFull: joined.kind === 'room-full-spectating' }, toLobby, d.config);
           },
           () => banner.show('Could not load the board. Check your connection and reload.', 'error'),
         );
