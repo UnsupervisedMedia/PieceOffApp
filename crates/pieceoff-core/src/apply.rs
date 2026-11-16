@@ -175,6 +175,7 @@ impl RoomRuntime {
                     still_sha256: String::new(),
                     owner: String::new(),
                     source: Default::default(),
+                    auto_released: false,
                     sha256: sha256.to_ascii_lowercase(),
                     extension: clean_media_extension(&extension)?,
                     title: clean_title(&title),

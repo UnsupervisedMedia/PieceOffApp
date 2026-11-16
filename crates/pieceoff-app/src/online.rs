@@ -1039,7 +1039,7 @@ mod tests {
 
     #[test]
     fn hosted_servers_are_told_apart_from_axum() {
-        let body = r#"{"service":"pieceoff-rooms","protocol":17,"hosted":true,
+        let body = r#"{"service":"pieceoff-rooms","protocol":18,"hosted":true,
             "link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join",
             "features":["device_keys","lobby"]}"#;
         let ServiceKind::Hosted(info) = classify_service(200, body) else {
@@ -1050,7 +1050,7 @@ mod tests {
         assert!(!info.uploads, "uploads are off unless the service says so");
         let ServiceKind::Hosted(open) = classify_service(
             200,
-            r#"{"service":"pieceoff-rooms","protocol":17,"hosted":true,"uploads":true}"#,
+            r#"{"service":"pieceoff-rooms","protocol":18,"hosted":true,"uploads":true}"#,
         ) else {
             panic!("hosted");
         };

@@ -5,6 +5,9 @@
 use super::*;
 use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 
+/// How long a finished puzzle keeps its video before the host's app releases it.
+pub(crate) const AUTO_RELEASE_AFTER: Duration = Duration::from_secs(60 * 60);
+
 /// JPEG qualities to try, best first, until the still fits the server's cap.
 const STILL_QUALITIES: [u8; 4] = [92, 85, 75, 60];
 
@@ -50,7 +53,7 @@ impl PieceOffApp {
 
     /// Capture the frame, upload it on a worker thread, then
     /// `poll_still_release` sends `ReleaseToStill`.
-    pub(crate) fn release_video_to_still(&mut self) {
+    pub(crate) fn release_video_to_still(&mut self, automatic: bool) {
         if !self.can_release_video() {
             return;
         }
@@ -79,6 +82,7 @@ impl PieceOffApp {
                     extension: "jpg".into(),
                     width: frame.size[0] as u32,
                     height: frame.size[1] as u32,
+                    automatic,
                 })
             });
             let _ = tx.send(result);
@@ -86,6 +90,22 @@ impl PieceOffApp {
                 repaint.request_repaint();
             }
         });
+    }
+
+    /// Once the puzzle has stood finished for `AUTO_RELEASE_AFTER`, the host's
+    /// app releases the video on its own, marked automatic so the room cannot
+    /// replay a video that is gone. Anyone who finishes then starts a new game.
+    pub(crate) fn auto_release_finished_video(&mut self) {
+        let finished =
+            self.is_host() && self.snapshot.as_ref().is_some_and(RoomSnapshot::completed);
+        if !finished {
+            self.finished_since = None;
+            return;
+        }
+        let since = *self.finished_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= AUTO_RELEASE_AFTER && self.can_release_video() {
+            self.release_video_to_still(true);
+        }
     }
 
     pub(crate) fn poll_still_release(&mut self) {

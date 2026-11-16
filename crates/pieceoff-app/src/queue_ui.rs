@@ -147,7 +147,6 @@ impl PieceOffApp {
         let mut remove = None;
         let mut swap = None;
         let mut add = false;
-        let mut release = false;
         let mut restore = None;
         let mut repeat = snapshot.repeat;
         let mut locked = snapshot.video_lock;
@@ -231,7 +230,7 @@ impl PieceOffApp {
                         )
                         .clicked()
                     {
-                        release = true;
+                        self.confirm_release = true;
                     }
                 }
                 ui.add_space(6.0);
@@ -277,9 +276,6 @@ impl PieceOffApp {
         }
         if locked != snapshot.video_lock {
             self.send(ClientMessage::SetVideoLock { locked });
-        }
-        if release {
-            self.release_video_to_still();
         }
         if let Some(index) = restore {
             self.restore_released_video(index);

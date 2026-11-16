@@ -3274,6 +3274,7 @@ fn switching_items_loads_the_cached_file_and_keeps_the_room_title() {
         still_sha256: String::new(),
         owner: String::new(),
         source: Default::default(),
+        auto_released: false,
         sha256: second_meta.sha256.clone(),
         extension: "png".into(),
         title: "second".into(),
@@ -3348,6 +3349,7 @@ fn package_carries_every_queued_item_and_single_item_packages_still_read() {
         still_sha256: String::new(),
         owner: String::new(),
         source: Default::default(),
+        auto_released: false,
         sha256: second_hash.clone(),
         extension: "png".into(),
         title: "b".into(),
@@ -3569,6 +3571,7 @@ fn queue_shortcuts_step_the_room_and_cycle_repeat() {
         still_sha256: String::new(),
         owner: String::new(),
         source: Default::default(),
+        auto_released: false,
         sha256: "b".repeat(64),
         extension: "png".into(),
         title: "b".into(),
@@ -3626,6 +3629,7 @@ fn uploads_only_use_files_known_by_their_hash() {
         still_sha256: String::new(),
         owner: String::new(),
         source: Default::default(),
+        auto_released: false,
         sha256: "b".repeat(64),
         extension: "png".into(),
         title: "b".into(),
@@ -4859,7 +4863,7 @@ fn http_stub(
     (format!("ws://{address}/ws"), handle)
 }
 
-const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":17,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
+const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":18,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
 const TEST_DEVICE_KEY: &str = "pok_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 
 #[test]
@@ -5591,4 +5595,34 @@ fn bringing_the_video_back_needs_the_original_file() {
         other => panic!("unexpected message {other:?}"),
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn the_host_releases_a_finished_video_only_after_the_timer() {
+    let (mut app, _rx, mut snapshot) = queue_ui_app();
+    snapshot.queue[0].extension = "mp4".into();
+    snapshot.queue[0].available = true;
+    for piece in &mut snapshot.pieces {
+        piece.placed = true;
+    }
+    app.snapshot = Some(snapshot);
+    app.host_upload_token = Some("token".into());
+    app.last_video_frame = Some(ColorImage::new([4, 4], vec![egui::Color32::GRAY; 16]));
+
+    app.auto_release_finished_video();
+    assert!(
+        app.finished_since.is_some(),
+        "the timer starts at completion"
+    );
+    assert!(app.still_rx.is_none(), "nothing is released at once");
+
+    app.finished_since = Instant::now().checked_sub(crate::still::AUTO_RELEASE_AFTER);
+    app.auto_release_finished_video();
+    assert!(app.still_rx.is_some(), "the timer released the video");
+
+    // Not finished: the timer resets.
+    app.still_rx = None;
+    app.snapshot.as_mut().unwrap().pieces[0].placed = false;
+    app.auto_release_finished_video();
+    assert!(app.finished_since.is_none());
 }

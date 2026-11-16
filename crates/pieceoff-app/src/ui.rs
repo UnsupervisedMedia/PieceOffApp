@@ -716,7 +716,26 @@ impl PieceOffApp {
                 ui.close();
                 self.restart_video_decoder(ctx);
             }
+            let replay_gone = self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .queue
+                    .get(snapshot.current)
+                    .is_some_and(|item| item.auto_released)
+            });
             if is_host
+                && replay_gone
+                && ui
+                    .button("New game")
+                    .on_hover_text(
+                        "The video was removed to save space, so this puzzle cannot be replayed",
+                    )
+                    .clicked()
+            {
+                ui.close();
+                self.leave_room();
+            }
+            if is_host
+                && !replay_gone
                 && ui
                     .button("Restart puzzle…")
                     .on_hover_text("Scatter all pieces and start over")
@@ -1279,6 +1298,7 @@ impl PieceOffApp {
         self.show_transfer_progress();
         self.poll_queue_probe();
         self.poll_still_release();
+        self.auto_release_finished_video();
         self.poll_restore();
         self.hold_at_item_end();
         self.poll_library_jobs();
@@ -1377,6 +1397,28 @@ impl PieceOffApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.confirm_restart = false;
+                        }
+                    });
+                });
+        }
+        if self.confirm_release {
+            egui::Window::new("Free the video?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label("The video is deleted from the server and replaced by a picture of the finished puzzle. You can bring it back only with the exact original file.");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Free the video").color(DANGER))
+                            .clicked()
+                        {
+                            self.confirm_release = false;
+                            self.release_video_to_still(false);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_release = false;
                         }
                     });
                 });
