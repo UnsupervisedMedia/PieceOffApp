@@ -150,6 +150,38 @@ pub fn board_layout(snapshot_json: &str) -> Result<String, JsError> {
         .map_err(|e| JsError::new(&e))
 }
 
+/// A new holder of core's default size (`HOLDER_DEFAULT_CELLS`) at the free
+/// spot nearest `(near_x, near_y)` (core `free_holder_spot`), or `None` when
+/// the table has no room for one.
+fn new_holder_rect_from_json(
+    snapshot_json: &str,
+    near_x: f32,
+    near_y: f32,
+) -> Result<Option<RectJson>, String> {
+    let snapshot: RoomSnapshot = serde_json::from_str(snapshot_json).map_err(|e| e.to_string())?;
+    let (cells_w, cells_h) = pieceoff_core::HOLDER_DEFAULT_CELLS;
+    let width = cells_w * snapshot.cell_width();
+    let height = cells_h * snapshot.cell_height();
+    Ok(snapshot
+        .free_holder_spot(width, height, near_x, near_y)
+        .map(|(x, y)| RectJson {
+            x,
+            y,
+            width,
+            height,
+        }))
+}
+
+/// `{"x","y","width","height"}` for a new default-size holder near the given
+/// board point, or `null` when the table is full. The geometry (size, the
+/// board, tray and holder clearances) is core's; the server still decides.
+#[wasm_bindgen]
+pub fn new_holder_rect(snapshot_json: &str, near_x: f32, near_y: f32) -> Result<String, JsError> {
+    new_holder_rect_from_json(snapshot_json, near_x, near_y)
+        .map(|rect| serde_json::to_string(&rect).unwrap_or_else(|_| "null".into()))
+        .map_err(|e| JsError::new(&e))
+}
+
 /// Every `type` tag a serde internally tagged enum accepts, in declaration
 /// order. Serde keeps no public list of variants, but it names them all when
 /// refusing an unknown one, so this asks it to refuse one.
@@ -304,10 +336,61 @@ mod tests {
             // Every freshly scattered piece starts inside the drawn tray.
             for piece in &snap.pieces {
                 assert!(piece.x >= got.tray.x - got.tray_pad, "{style:?}");
-                assert!(piece.y >= got.tray.y - got.tray_pad - snap.cell_height(), "{style:?}");
+                assert!(
+                    piece.y >= got.tray.y - got.tray_pad - snap.cell_height(),
+                    "{style:?}"
+                );
             }
         }
         assert!(board_layout_from_json("{").is_err());
+    }
+
+    #[test]
+    fn new_holder_rect_is_a_free_default_holder_core_accepts() {
+        for style in CutStyle::ALL {
+            let mut snap = snapshot(style);
+            let json = serde_json::to_string(&snap).unwrap();
+            let got = new_holder_rect_from_json(&json, 400.0, 300.0)
+                .unwrap()
+                .unwrap();
+            let (cw, ch) = (snap.cell_width(), snap.cell_height());
+            assert_eq!(got.width, pieceoff_core::HOLDER_DEFAULT_CELLS.0 * cw);
+            assert_eq!(got.height, pieceoff_core::HOLDER_DEFAULT_CELLS.1 * ch);
+            assert_eq!(
+                Some((got.x, got.y)),
+                snap.free_holder_spot(got.width, got.height, 400.0, 300.0)
+            );
+            assert_eq!(
+                snap.check_holder_rect(got.x, got.y, got.width, got.height, None),
+                Ok(())
+            );
+            // With that one taken, the next lands elsewhere and is valid too.
+            snap.holders.push(pieceoff_core::PieceHolder {
+                id: 1,
+                owner: "Ann".into(),
+                label: "Holder 1".into(),
+                x: got.x,
+                y: got.y,
+                width: got.width,
+                height: got.height,
+                owner_away_since_ms: None,
+            });
+            let json = serde_json::to_string(&snap).unwrap();
+            let next = new_holder_rect_from_json(&json, 400.0, 300.0)
+                .unwrap()
+                .unwrap();
+            assert_ne!((next.x, next.y), (got.x, got.y));
+            assert_eq!(
+                snap.check_holder_rect(next.x, next.y, next.width, next.height, None),
+                Ok(())
+            );
+            assert!(
+                new_holder_rect_from_json(&json, f32::NAN, 0.0)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(new_holder_rect_from_json("{", 0.0, 0.0).is_err());
     }
 
     #[test]
