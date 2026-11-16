@@ -1,0 +1,394 @@
+/* PieceOff web client: lobby screens. Neutral, dark, legible; the site adds brand.
+   Phone first (portrait and landscape), 44 px touch targets, safe-area insets. */
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+.po-app {
+  --bg: #16181d;
+  --panel: #20242c;
+  --line: #3a404c;
+  --text: #eceef2;
+  --muted: #a7adb9;
+  --accent: #f2b33d;
+  --accent-ink: #1a1405;
+  --error: #ff8a80;
+  --tap: 44px;
+  box-sizing: border-box;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.po-app *,
+.po-app *::before,
+.po-app *::after {
+  box-sizing: inherit;
+}
+
+.po-main {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.po-app h1 {
+  font-size: 1.5rem;
+  line-height: 1.2;
+  margin: 0.25rem 0 1rem;
+}
+.po-app h2 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+.po-app h1:focus,
+.po-app h2:focus {
+  outline: none;
+}
+.po-app code {
+  font-family: ui-monospace, 'JetBrains Mono', Menlo, monospace;
+  letter-spacing: 0.06em;
+}
+.muted {
+  color: var(--muted);
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.screen > label,
+.screen legend,
+.code-form label {
+  font-weight: 600;
+}
+
+/* ---- controls ---- */
+.btn {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.btn:hover {
+  border-color: var(--muted);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--big {
+  min-height: 52px;
+  font-size: 1.05rem;
+}
+.btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.po-app :focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.input {
+  min-height: var(--tap);
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f1115;
+  color: var(--text);
+  font: inherit;
+  font-size: max(16px, 1rem); /* below 16 px iOS zooms on focus */
+}
+.input[aria-invalid='true'] {
+  border-color: var(--error);
+}
+.input--code {
+  text-transform: uppercase;
+  font-family: ui-monospace, Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+.field-error {
+  margin: 0;
+  min-height: 1.2em;
+  color: var(--error);
+}
+.field-error:empty {
+  min-height: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.actions--stack {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- banner ---- */
+.banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 40rem;
+  margin: 0 auto 0.75rem;
+  padding: 0.25rem 0.25rem 0.25rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #2a2f3a;
+}
+.banner[hidden] {
+  display: none;
+}
+.banner[data-tone='error'] {
+  border-color: var(--error);
+}
+.banner__text {
+  flex: 1;
+  margin: 0;
+}
+
+/* ---- lobby ---- */
+.code-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 1.25rem 0;
+}
+.lobby__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.lobby__status {
+  margin: 0.25rem 0 0.5rem;
+}
+.rooms {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+.room {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  display: grid;
+  gap: 0.5rem;
+}
+.room__title {
+  font-size: 1.05rem;
+  margin: 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.tag {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  background: #3a404c;
+}
+.room__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 1rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.room__meta div,
+.room__meta dt,
+.room__meta dd {
+  margin: 0;
+  display: inline;
+}
+.room__meta dt::after {
+  content: ': ';
+}
+.room__meta dd + dt {
+  margin-left: 0;
+}
+.room__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #0f1115;
+  overflow: hidden;
+}
+.room__bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* ---- create ---- */
+.screen fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.screen legend {
+  padding: 0;
+  margin-bottom: 0.4rem;
+}
+.puzzles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.puzzles legend {
+  grid-column: 1 / -1;
+}
+.puzzle label {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.35rem;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+  min-height: var(--tap);
+}
+.puzzle img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0f1115;
+}
+.puzzle span {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.puzzle input:checked + label {
+  border-color: var(--accent);
+}
+.puzzle input:focus-visible + label,
+.chip input:focus-visible + label {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.chips legend {
+  width: 100%;
+}
+.chip label {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0.4rem 0.85rem;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.chip input:checked + label {
+  border-color: var(--accent);
+}
+.check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  min-height: var(--tap);
+}
+.check input {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  accent-color: var(--accent);
+}
+.turnstile {
+  min-height: 65px;
+}
+
+.screen--end {
+  min-height: 60vh;
+  justify-content: center;
+}
+
+@media (min-width: 40rem) {
+  .puzzles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Landscape phones: short screens, use the width. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .po-main {
+    max-width: 56rem;
+  }
+  .puzzles {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+  .puzzle span {
+    font-size: 0.75rem;
+  }
+  .rooms {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .po-app h1 {
+    margin-bottom: 0.5rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .po-app *,
+  .po-app *::before,
+  .po-app *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

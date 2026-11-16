@@ -7,7 +7,11 @@ let ready: Promise<unknown> | null = null;
  *  glue fetches by URL; hand it the bytes instead). Idempotent. */
 export function initWasm(): Promise<unknown> {
   ready ??= init({
-    module_or_path: readFileSync(new URL('../wasm/pieceoff_web_wasm_bg.wasm', import.meta.url)),
+    // A plain path, not a URL: under jsdom the global URL is jsdom's, which
+    // node:fs rejects (and which resolves file: URLs differently).
+    module_or_path: readFileSync(
+      decodeURIComponent(import.meta.url.replace(/^file:\/\//, '').replace(/[^/]*$/, '')) + '../wasm/pieceoff_web_wasm_bg.wasm',
+    ),
   });
   return ready;
 }
