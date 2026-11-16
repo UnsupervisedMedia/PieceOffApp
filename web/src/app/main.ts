@@ -180,9 +180,12 @@ export function startApp(d: AppDeps): App {
           (made) => {
             const name = cleanName(v.name);
             saveName(storage, name);
-            // The creator's secret: a reload of this tab resumes as host.
-            saveResume(storage, made.code, { token: made.resumeToken, name, spectator: false });
-            startJoin(made.code, { listed: v.listed });
+            // The creator's secret, handed over in memory so the first join is
+            // the host even without sessionStorage; stored too, so a reload of
+            // this tab resumes as host where storage works.
+            const resume = { token: made.resumeToken, name, spectator: false };
+            saveResume(storage, made.code, resume);
+            startJoin(made.code, { listed: v.listed, resume });
           },
           (e: unknown) => {
             if (form !== cf) return;

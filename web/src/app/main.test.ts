@@ -5,7 +5,7 @@ import { FakeSocket, FakeVisibility, welcome } from '../net/testkit';
 import { DEFAULT_CONFIG } from './config';
 import { BUILTIN_MEDIA } from './create';
 import { startApp, type App } from './main';
-import { memoryStorage } from './names';
+import { memoryStorage, type AppStorage } from './names';
 import type { TurnstileApi } from './turnstile';
 
 let V: number;
@@ -37,7 +37,7 @@ const lobbyRoom = (code: string, players: number) => ({
   created_at: 1,
 });
 
-function setup(o: { search?: string; rooms?: unknown[]; create?: () => Response; storage?: { local: Storage; session: Storage } } = {}) {
+function setup(o: { search?: string; rooms?: unknown[]; create?: () => Response; storage?: AppStorage } = {}) {
   const root = document.createElement('div');
   document.body.append(root);
   const sockets: FakeSocket[] = [];
@@ -187,6 +187,57 @@ describe('app', () => {
     b.sockets[0]!.open();
     expect(b.sockets[0]!.ofType('join_room')[0]).toMatchObject({ name: 'Hostie', resume_token: 'welcome-secret' });
   });
+
+  const throwing = () =>
+    ({
+      length: 0,
+      key: () => null,
+      clear: () => undefined,
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+      setItem: () => {
+        throw new Error('QuotaExceededError');
+      },
+      removeItem: () => {
+        throw new Error('SecurityError');
+      },
+    }) as unknown as Storage;
+
+  for (const [label, storage] of [
+    ['create_without_session_storage_joins_as_host', { local: null, session: null }],
+    ['create_with_throwing_storage_joins_as_host', { local: throwing(), session: throwing() }],
+  ] as const) {
+    it(label, async () => {
+      const a = setup({ storage: storage as AppStorage });
+      click(a.root, 'Create room');
+      await flush();
+      a.root.querySelector<HTMLInputElement>('input[name=name]')!.value = 'Hostie';
+      a.token();
+      submit(a.root);
+      await flush();
+      expect(a.posts).toHaveLength(1);
+      // No name prompt: straight into the room with the creator's secret.
+      expect(a.root.querySelector('input[name=name]')).toBeNull();
+      expect(a.sockets).toHaveLength(1);
+      a.sockets[0]!.open();
+      const join = a.sockets[0]!.ofType('join_room')[0]!;
+      expect(join).toMatchObject({ invite_code: 'NEWR2345', name: 'Hostie', resume_token: 'creator-secret' });
+      expect(join.player_key).toMatch(/^[0-9a-f]{32}$/);
+      // The server adopts the creator's id, which is the room's host.
+      const w = welcome(V, { client_id: 'host-id', name: 'Hostie' }, 'next-secret');
+      w.snapshot.host_id = 'host-id';
+      a.sockets[0]!.receive(w);
+      await flush();
+      const s = app!.join.state.get();
+      expect(s.kind).toBe('joined-player');
+      if (s.kind === 'joined-player') {
+        expect(s.room.snapshot()!.host_id).toBe(s.room.clientId);
+        expect(s.socket.resumeToken).toBe('next-secret');
+      }
+      expect(a.root.textContent).toContain('board NEWR2345 Hostie');
+    });
+  }
 
   it('create_429_shows_message_resets_check_and_cools_down', async () => {
     const { root, posts, ts, token } = setup({ create: () => json(429, { error: 'Too many rooms created. Try again later.' }) });

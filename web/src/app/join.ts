@@ -24,6 +24,7 @@ import {
   saveName,
   saveResume,
   type AppStorage,
+  type ResumeEntry,
 } from './names';
 import { Store, type Observable } from './observable';
 import { public_name_allowed } from '../../wasm/pieceoff_web_wasm.js';
@@ -105,6 +106,9 @@ export interface StartOptions {
   listed?: boolean;
   /** Watch instead of play. */
   spectator?: boolean;
+  /** A resume token in hand (the creator's, from POST /api/rooms). Used ahead of
+   *  sessionStorage, which may be unavailable; storage only carries it across reloads. */
+  resume?: ResumeEntry;
 }
 
 export interface JoinDeps {
@@ -130,6 +134,13 @@ export function joinFlow(deps: JoinDeps): JoinFlow {
   let socket: RoomSocket | null = null;
   let generation = 0;
   let listed = false;
+  // Resume tokens held for this page's life, so identity (and host) never
+  // depends on sessionStorage working. Storage is best-effort, for reloads.
+  const held = new Map<string, ResumeEntry>();
+  const forget = (code: string) => {
+    held.delete(code);
+    clearResume(storage, code);
+  };
 
   const drop = () => {
     generation++;
@@ -170,7 +181,11 @@ export function joinFlow(deps: JoinDeps): JoinFlow {
       if (m.type === 'welcome') {
         joined = true;
         const kind = m.spectator ? (fullSwitch ? 'room-full-spectating' : 'joined-spectator') : 'joined-player';
-        if (s.resumeToken) saveResume(storage, code, { token: s.resumeToken, name: m.name, spectator: m.spectator });
+        if (s.resumeToken) {
+          const entry = { token: s.resumeToken, name: m.name, spectator: m.spectator };
+          held.set(code, entry);
+          saveResume(storage, code, entry);
+        }
         if (!m.spectator) saveName(storage, m.name);
         // A reconnect's welcome only refreshes the token; the state stands.
         if (store.get().kind === 'checking') store.set({ kind, code, name: m.name, socket: s, room, welcome: m });
@@ -212,11 +227,11 @@ export function joinFlow(deps: JoinDeps): JoinFlow {
         return;
       }
       if (why === 'room-gone' && !joined) {
-        clearResume(storage, code);
+        forget(code);
         store.set({ kind: 'room-not-found', code, invalid: false });
         return;
       }
-      if (why === 'kicked' || why === 'banned' || why === 'room-gone') clearResume(storage, code);
+      if (why === 'kicked' || why === 'banned' || why === 'room-gone') forget(code);
       store.set({ kind: 'fatal', code, reason: why });
     });
   };
@@ -232,7 +247,8 @@ export function joinFlow(deps: JoinDeps): JoinFlow {
         return;
       }
       listed = o.listed === true;
-      const resume = loadResume(storage, code);
+      if (o.resume) held.set(code, o.resume);
+      const resume = o.resume ?? held.get(code) ?? loadResume(storage, code);
       if (resume) {
         connect(code, resume.name, resume.spectator, resume.token, false);
         return;
@@ -262,13 +278,14 @@ export function joinFlow(deps: JoinDeps): JoinFlow {
         });
         return;
       }
-      connect(cur.code, name, cur.spectator, null, false);
+      // A token held in memory (say the creator's) keeps its identity under the new name.
+      connect(cur.code, name, cur.spectator, held.get(cur.code)?.token ?? null, false);
     },
 
     leave() {
       const cur = store.get();
       drop();
-      if ('code' in cur && cur.code) clearResume(storage, cur.code);
+      if ('code' in cur && cur.code) forget(cur.code);
       store.set({ kind: 'idle' });
     },
   };

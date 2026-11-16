@@ -284,6 +284,35 @@ describe('join flow', () => {
     expect(saved.token).toBe('next-secret');
   });
 
+  it('creator_token_held_in_memory_without_session_storage', () => {
+    const storage = { local: null, session: null };
+    const { flow, sockets, joins } = setup({ storage });
+    flow.start(CODE, { listed: true, resume: { token: 'creator-secret', name: 'Host', spectator: false } });
+    expect(flow.state.get().kind).toBe('checking');
+    sockets[0]!.open();
+    expect(joins()[0]).toMatchObject({ name: 'Host', resume_token: 'creator-secret' });
+
+    // A name refusal re-prompts; the next join keeps the creator's identity.
+    sockets[0]!.receive({ type: 'error', message: NAME_TAKEN });
+    expect(flow.state.get().kind).toBe('name-taken');
+    flow.submitName('Host Two');
+    sockets[1]!.open();
+    expect(joins()[1]).toMatchObject({ name: 'Host Two', resume_token: 'creator-secret' });
+
+    // The welcome's token replaces it in memory, and a later start in this page uses it.
+    sockets[1]!.receive(welcome(V, { name: 'Host Two' }, 'next-secret'));
+    sockets[1]!.receive({ type: 'error', message: 'This name was opened in another window or on another device using the same settings' });
+    expect(flow.state.get()).toMatchObject({ kind: 'fatal', reason: 'opened-elsewhere' });
+    flow.start(CODE);
+    sockets[2]!.open();
+    expect(joins()[2]).toMatchObject({ name: 'Host Two', resume_token: 'next-secret' });
+
+    // Leaving forgets it.
+    flow.leave();
+    flow.start(CODE);
+    expect(flow.state.get().kind).toBe('asking-name');
+  });
+
   it('submit_name_is_ignored_while_checking', () => {
     const { flow, sockets } = setup();
     flow.start(CODE);
