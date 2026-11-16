@@ -1850,12 +1850,22 @@ mod rotation_tests {
     #[test]
     fn the_wheel_turns_one_quarter_per_notch_and_carries_the_remainder() {
         let mut carry = 0.0;
-        assert_eq!(wheel_quarter_turns(&mut carry, -50.0), 1, "wheel down is clockwise");
+        assert_eq!(
+            wheel_quarter_turns(&mut carry, -50.0),
+            1,
+            "wheel down is clockwise"
+        );
         assert_eq!(wheel_quarter_turns(&mut carry, 0.0), 0);
-        assert_eq!(wheel_quarter_turns(&mut carry, 50.0), -1, "wheel up is counter-clockwise");
+        assert_eq!(
+            wheel_quarter_turns(&mut carry, 50.0),
+            -1,
+            "wheel up is counter-clockwise"
+        );
         // Smooth scrolling adds up across frames.
         let mut carry = 0.0;
-        let steps: i8 = (0..10).map(|_| wheel_quarter_turns(&mut carry, -10.0)).sum();
+        let steps: i8 = (0..10)
+            .map(|_| wheel_quarter_turns(&mut carry, -10.0))
+            .sum();
         assert_eq!(steps, 2);
         // A hard flick is one step per call, the rest carries.
         let mut carry = 0.0;
