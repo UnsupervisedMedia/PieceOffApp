@@ -1,7 +1,7 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import init, { message_types_json, protocol_version } from '../wasm/pieceoff_web_wasm.js';
+import { message_types_json, protocol_version } from '../wasm/pieceoff_web_wasm.js';
+import { initWasm } from './test-wasm';
 import {
   CLIENT_MESSAGE_TYPES,
   PROTOCOL_VERSION,
@@ -21,10 +21,7 @@ let rust: { client: string[]; server: string[] };
 let v: number;
 
 beforeAll(async () => {
-  // wasm-bindgen's `--target web` glue fetches by URL; under node hand it the bytes.
-  await init({
-    module_or_path: readFileSync(new URL('../wasm/pieceoff_web_wasm_bg.wasm', import.meta.url)),
-  });
+  await initWasm();
   rust = JSON.parse(message_types_json());
   v = protocol_version();
 });
