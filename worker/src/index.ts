@@ -1,6 +1,6 @@
 import { UPLOADS_OFF_ERROR, builtinTitle, createRoomMedia, uploadsEnabled } from "./core.ts";
 import type { Env } from "./env";
-import { CODE_RE, bearer, json, newCode, sha256Hex } from "./http.ts";
+import { CODE_RE, DEFAULT_SITE_ORIGIN, bearer, json, newCode, sha256Hex, siteCors } from "./http.ts";
 import { LobbyDO } from "./lobby";
 import { handleMedia } from "./media";
 import {
@@ -26,11 +26,22 @@ const CODE_ATTEMPTS = 5;
 const RELINK = "This computer is not linked to PieceOff Online. Link it again.";
 
 /** Browser origins must be this site or listed; native clients send none. */
-function checkOrigin(request: Request, env: Env): Response | null {
+function checkOrigin(request: Request, env: Env, headers: Record<string, string> = {}): Response | null {
   const host = new URL(request.url).host;
   return originAllowed(request.headers.get("origin"), host, env.ALLOWED_ORIGINS ?? "")
     ? null
-    : json({ error: "Origin not allowed" }, 403);
+    : json({ error: "Origin not allowed" }, 403, headers);
+}
+
+/**
+ * CORS for the `/ws` refusals answered before the room's Durable Object (503
+ * paused, 429 lookup budget, 403 origin), so the web client on the site can
+ * read why its upgrade failed (browsers hide a failed upgrade's status; the
+ * client re-asks with a plain GET). Only for the site's own origin, never `*`.
+ */
+function socketRefusalCors(request: Request, env: Env): Record<string, string> {
+  const site = env.SITE_ORIGIN || DEFAULT_SITE_ORIGIN;
+  return request.headers.get("origin") === site ? siteCors(site) : {};
 }
 
 /**
@@ -137,7 +148,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (env.ONLINE_PLAY_ENABLED === "0") {
     if (path === "/api/lobby" && request.method === "GET") return json({ rooms: [] });
     if ((path.startsWith("/api/") && !path.startsWith("/api/admin/")) || path === "/ws") {
-      return json({ error: "PieceOff Online is paused right now. Please try again later." }, 503);
+      const cors = path === "/ws" ? socketRefusalCors(request, env) : {};
+      return json({ error: "PieceOff Online is paused right now. Please try again later." }, 503, cors);
     }
   }
   if (path === "/api/lobby" && request.method === "GET") return getLobby(request, env);
@@ -174,11 +186,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/ws") {
     const code = (url.searchParams.get("code") ?? "").trim().toUpperCase();
     if (!CODE_RE.test(code)) return json({ error: "Room code not found" }, 404);
-    const refused = checkOrigin(request, env);
+    const cors = socketRefusalCors(request, env);
+    const refused = checkOrigin(request, env, cors);
     if (refused) return refused;
     // Budget every code lookup before allocating or contacting its Durable Object.
     const { success } = await env.LOOKUP_LIMITER.limit({ key: clientIp(request) });
-    if (!success) return json({ error: "Too many lookups. Try again later." }, 429);
+    if (!success) return json({ error: "Too many lookups. Try again later." }, 429, cors);
     const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
     return stub.fetch(request);
   }

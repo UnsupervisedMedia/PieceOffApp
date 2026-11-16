@@ -14,6 +14,7 @@ import {
   REFUSED_MIN_ATTEMPT,
   RoomSocket,
   classifyError,
+  httpProbe,
   nextDelay,
   type FatalReason,
   type RoomSocketOptions,
@@ -369,6 +370,21 @@ describe('RoomSocket reconnect', () => {
     expect(sockets).toHaveLength(1);
   });
 
+  it('a join-refusal text after the welcome is an ordinary error (host listing with a blocked name)', () => {
+    for (const message of [PUBLIC_NAME_REFUSED, NAME_TAKEN, REMOVED_BY_HOST, 'This room turns its pieces. Update PieceOff to join it.']) {
+      const { rs, join, last, sockets, states, msgs } = setup();
+      join();
+      last().receive({ type: 'error', message });
+      expect(state(states)).toEqual(['open', undefined]);
+      expect(states.some(([s]) => s === 'fatal')).toBe(false);
+      expect(msgs[msgs.length - 1]).toEqual({ type: 'error', message });
+      expect(last().readyState).toBe(FakeSocket.OPEN);
+      expect(rs.send({ type: 'chat', text: 'still here' })).toBe(true);
+      vi.advanceTimersByTime(60_000);
+      expect(sockets).toHaveLength(1);
+    }
+  });
+
   it('classifyError leaves ordinary errors alone', () => {
     expect(classifyError('You are sending chat messages too quickly. Wait a moment.')).toBeNull();
     expect(classifyError("That piece is in Bo's holder")).toBeNull();
@@ -376,7 +392,7 @@ describe('RoomSocket reconnect', () => {
     expect(classifyError('PieceOff Online is paused right now. Please try again later.')).toBe('paused');
   });
 
-  it('429_and_403_do_not_retry_in_a_tight_loop', async () => {
+  it('429_and_403_do_not_retry_in_a_tight_loop (given the probe reads 429/403)', async () => {
     let n = 0;
     const statuses = [429, 403];
     const probe = vi.fn(async () => statuses[n++ % 2]!);
@@ -413,6 +429,27 @@ describe('RoomSocket reconnect', () => {
     rs.close();
   });
 
+  it('a probe whose fetch is blocked (CORS TypeError) falls back to plain backoff, no label', async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }) as unknown as typeof fetch;
+    const { sockets, created, states } = setup({
+      probe: httpProbe('wss://rooms.test/ws?code=ABCD2345', fetchFn),
+      rand: () => 0,
+    });
+    for (let t = 0; t < 2 * 60_000; t += 100) {
+      for (const s of sockets) if (s.readyState === FakeSocket.CONNECTING) s.refuse();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(fetchFn).toHaveBeenCalledWith('https://rooms.test/ws?code=ABCD2345', expect.anything());
+    const gaps = created.slice(1).map((t, i) => t - created[i]!);
+    expect(gaps.length).toBeGreaterThan(4);
+    gaps.forEach((gap, i) => expect(gap).toBeGreaterThanOrEqual(nextDelay(i, () => 0)));
+    expect(gaps[0]).toBeLessThan(nextDelay(REFUSED_MIN_ATTEMPT, () => 0)); // no refusal floor
+    expect(states.every(([s, why]) => s === 'fatal' || why === undefined)).toBe(true);
+    expect(states.some(([s]) => s === 'fatal')).toBe(false);
+  });
+
   it('plain refusals without a probe back off on the same curve', async () => {
     const { sockets, created } = setup({ rand: () => 0.5 });
     for (let t = 0; t < 3 * 60_000; t += 100) {
@@ -423,7 +460,7 @@ describe('RoomSocket reconnect', () => {
     gaps.forEach((gap, i) => expect(gap).toBeGreaterThanOrEqual(nextDelay(i, () => 0.5)));
   });
 
-  it('a 503 probe means the service is paused: fatal, no retry; retry() tries once more', async () => {
+  it('given the probe reads 503, the service is paused: fatal, no retry; retry() tries once more', async () => {
     const { sockets, states, rs } = setup({ probe: async () => 503 });
     sockets[0]!.refuse();
     await vi.advanceTimersByTimeAsync(0);

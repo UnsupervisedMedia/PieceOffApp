@@ -49,8 +49,9 @@ export interface RoomSocketOptions {
   rand?: () => number;
   /** Called when an upgrade fails before opening (browsers hide the HTTP
    *  status): resolves to the status of an equivalent plain HTTP request, or
-   *  null if unknown. See `httpProbe`. */
-  probe?: () => Promise<number | null>;
+   *  null if unknown. Defaults to `httpProbe(url)` in a browser (the Worker
+   *  sends the site's CORS header on its /ws refusals); null turns it off. */
+  probe?: (() => Promise<number | null>) | null;
   /** Raw "ping" keepalive / health check (the Worker auto-answers "pong").
    *  Turn off against the local axum server, which answers it with an error. */
   keepalive?: boolean;
@@ -192,7 +193,12 @@ export class RoomSocket {
       clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     };
     this.rand = o.rand ?? Math.random;
-    this.probe = o.probe;
+    this.probe =
+      o.probe === undefined
+        ? typeof window !== 'undefined' && typeof fetch === 'function'
+          ? httpProbe(this.url)
+          : undefined
+        : (o.probe ?? undefined);
     this.keepalive = o.keepalive ?? true;
 
     const onVisibility = () => {
@@ -388,7 +394,13 @@ export class RoomSocket {
       case 'error': {
         this.emit(m);
         const reason = classifyError(m.message);
-        if (reason) this.fatal(reason);
+        // Join refusals (name taken, public name, banned, update, paused) are
+        // only fatal before the welcome: after it the same texts answer room
+        // changes (e.g. set_listed refuses a host's blocked name with
+        // "Pick a different name for public rooms") and are ordinary errors.
+        if (reason && (!this.joined || reason === 'opened-elsewhere' || reason === 'room-gone')) {
+          this.fatal(reason);
+        }
         return;
       }
       case 'kicked':
