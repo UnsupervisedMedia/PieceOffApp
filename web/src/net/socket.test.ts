@@ -12,6 +12,7 @@ import {
   HEALTH_TIMEOUT_MS,
   HEARTBEAT_MS,
   REFUSED_MIN_ATTEMPT,
+  WELCOME_TIMEOUT_MS,
   RoomSocket,
   classifyError,
   httpProbe,
@@ -470,6 +471,76 @@ describe('RoomSocket reconnect', () => {
     rs.retry();
     expect(sockets).toHaveLength(2);
     expect(state(states)).toEqual(['connecting', undefined]);
+  });
+
+  it('an attempt with no welcome in WELCOME_TIMEOUT_MS is dropped and retried on the backoff', () => {
+    const { sockets, states, last } = setup();
+    // Stuck CONNECTING (no open, no close event).
+    vi.advanceTimersByTime(WELCOME_TIMEOUT_MS - 1);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED);
+    expect(state(states)).toEqual(['reconnecting', undefined]);
+    vi.advanceTimersByTime(nextDelay(0, () => 0));
+    expect(sockets).toHaveLength(2);
+    // Opened but the welcome never came: same.
+    last().open();
+    vi.advanceTimersByTime(WELCOME_TIMEOUT_MS);
+    expect(sockets[1]!.readyState).toBe(FakeSocket.CLOSED);
+    vi.advanceTimersByTime(nextDelay(1, () => 0));
+    expect(sockets).toHaveLength(3);
+    // A welcome in time disarms it.
+    last().open();
+    last().receive(welcome(V));
+    vi.advanceTimersByTime(WELCOME_TIMEOUT_MS * 3);
+    expect(sockets).toHaveLength(3);
+    expect(state(states)).toEqual(['open', undefined]);
+  });
+
+  it('a fatal stop removes the visibility listeners; retry() adds them back', async () => {
+    const { vis, sockets, rs } = setup({ probe: async () => 503 });
+    const removed = vi.spyOn(vis, 'removeEventListener');
+    const added = vi.spyOn(vis, 'addEventListener');
+    sockets[0]!.refuse();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(removed.mock.calls.map((c) => c[0]).sort()).toEqual(['pageshow', 'visibilitychange']);
+    rs.retry();
+    expect(added.mock.calls.map((c) => c[0]).sort()).toEqual(['pageshow', 'visibilitychange']);
+    sockets[1]!.readyState = FakeSocket.CLOSED;
+    vis.show(); // listening again: the dead attempt is noticed
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('error frames without a string message are dropped, not thrown', () => {
+    const { join, last, msgs, states } = setup();
+    join();
+    for (const message of [undefined, null, 42, { text: 'x' }]) {
+      expect(() => last().receive({ type: 'error', message } as Record<string, unknown>)).not.toThrow();
+    }
+    expect(msgs.map((m) => m.type)).toEqual(['welcome']);
+    expect(state(states)).toEqual(['open', undefined]);
+  });
+
+  it("the old socket's 'replaced' after a resume over it is ignored (no reconnect ping-pong)", () => {
+    // Phone wake: the old socket is dead to us but the Worker still holds it.
+    // Our resume token replaces it there, and the Worker then tells the OLD
+    // socket "opened in another window" + close 1008 "replaced".
+    const { join, sockets, last, states, vis } = setup();
+    join();
+    const old = sockets[0]!;
+    vis.hide();
+    old.readyState = FakeSocket.CLOSED; // dead; close event not delivered
+    vis.show();
+    expect(sockets).toHaveLength(2);
+    last().open();
+    expect(last().ofType('join_room')[0]!.resume_token).toBe('token-1');
+    last().receive(welcome(V, {}, 'token-2'));
+    // Late frames on the detached socket.
+    old.onmessage?.({ data: JSON.stringify({ type: 'error', message: REPLACED_WORKER }) });
+    old.onclose?.({ code: 1008, reason: 'replaced', wasClean: true });
+    expect(state(states)).toEqual(['open', undefined]);
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2);
   });
 
   it('close() stops everything', () => {

@@ -293,8 +293,17 @@ export class BoardRenderer {
     this.media.poster.removeEventListener('load', this.onPosterLoad);
     this.canvas.removeEventListener('webglcontextlost', this.handleLost);
     this.canvas.removeEventListener('webglcontextrestored', this.handleRestored);
+    const gl = this.g?.gl ?? null;
     if (this.g) deleteGl(this.g);
     this.g = null;
+    // Give the context back now: browsers cap live WebGL contexts (~16) and
+    // only reclaim a dropped one at garbage collection, so leave/rejoin would
+    // pile them up. Listeners are already off, so this loss is not "handled".
+    try {
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch {
+      // the context is already gone
+    }
     this.lostCbs.length = 0;
     this.onFrame = null;
   }

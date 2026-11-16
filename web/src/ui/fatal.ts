@@ -2,13 +2,15 @@
 import type { FatalReason } from '../net/socket';
 import { button, h } from './dom';
 
-export type EndState = FatalReason | 'room-not-found' | 'invalid-code';
+export type EndState = FatalReason | 'room-not-found' | 'invalid-code' | 'board-failed';
 
 export interface EndCopy {
   title: string;
   body: string;
   /** The main way out. */
   primary: 'reload' | 'retry' | 'lobby';
+  /** Label of the reload button (default "Reload to update"). */
+  reloadLabel?: string;
 }
 
 export const END_COPY: Record<EndState, EndCopy> = {
@@ -62,6 +64,12 @@ export const END_COPY: Record<EndState, EndCopy> = {
     body: 'You joined this room from another tab or device with the same name, so this window let go.',
     primary: 'retry',
   },
+  'board-failed': {
+    title: 'The board did not load',
+    body: 'Part of the page could not be loaded or started. Check your connection and reload, or go back to the lobby.',
+    primary: 'reload',
+    reloadLabel: 'Reload',
+  },
   'name-taken': {
     title: 'That name is taken',
     body: 'Someone in this room already uses that name.',
@@ -79,7 +87,7 @@ export function renderEnd(state: EndState, a: EndActions, code?: string): HTMLEl
   const copy = END_COPY[state];
   const actions = h('div', { class: 'actions' });
   const lobby = button('Back to the lobby', a.lobby, { class: copy.primary === 'lobby' ? 'btn btn--primary' : 'btn' });
-  if (copy.primary === 'reload') actions.append(button('Reload to update', a.reload, { class: 'btn btn--primary' }), lobby);
+  if (copy.primary === 'reload') actions.append(button(copy.reloadLabel ?? 'Reload to update', a.reload, { class: 'btn btn--primary' }), lobby);
   else if (copy.primary === 'retry') actions.append(button('Try again', a.retry, { class: 'btn btn--primary' }), lobby);
   else actions.append(lobby);
   return h(

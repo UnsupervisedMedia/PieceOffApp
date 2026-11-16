@@ -37,7 +37,9 @@ const lobbyRoom = (code: string, players: number) => ({
   created_at: 1,
 });
 
-function setup(o: { search?: string; rooms?: unknown[]; create?: () => Response; storage?: AppStorage } = {}) {
+function setup(
+  o: { search?: string; rooms?: unknown[]; create?: () => Response; storage?: AppStorage; loadBoard?: Parameters<typeof startApp>[0]['loadBoard'] } = {},
+) {
   const root = document.createElement('div');
   document.body.append(root);
   const sockets: FakeSocket[] = [];
@@ -90,12 +92,14 @@ function setup(o: { search?: string; rooms?: unknown[]; create?: () => Response;
       visibility: new FakeVisibility(),
       keepalive: false,
     },
-    loadBoard: async () => ({
-      mountBoard: (host, joined) => {
-        host.textContent = `board ${joined.code} ${joined.name}`;
-        return { destroy: () => undefined };
-      },
-    }),
+    loadBoard:
+      o.loadBoard ??
+      (async () => ({
+        mountBoard: (host, joined) => {
+          host.textContent = `board ${joined.code} ${joined.name}`;
+          return { destroy: () => undefined };
+        },
+      })),
   });
   const token = () => tsCallback?.('turnstile-ok');
   return { root, sockets, urls, storage, fetchFn, posts, ts, token, reload, loc };
@@ -122,6 +126,36 @@ describe('app', () => {
     await flush();
     expect(root.textContent).toContain('board ABCD2345 Ann');
   });
+
+  for (const [what, loadBoard] of [
+    ['the board chunk fails to load', async () => Promise.reject(new Error('chunk 404'))],
+    [
+      'the board throws while mounting',
+      async () => ({
+        mountBoard: () => {
+          throw new Error('no WebGL2');
+        },
+      }),
+    ],
+  ] as const) {
+    it(`when ${what}: an end screen with Reload, and Back leaves the room`, async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { root, sockets, reload } = setup({ search: '?c=abcd2345', loadBoard: loadBoard as never });
+      root.querySelector<HTMLInputElement>('input[name=name]')!.value = 'Ann';
+      submit(root);
+      sockets[0]!.open();
+      sockets[0]!.receive(welcome(V, { name: 'Ann' }));
+      await flush();
+      expect(root.querySelector('[data-end]')?.getAttribute('data-end')).toBe('board-failed');
+      expect(err).toHaveBeenCalled();
+      click(root, 'Reload');
+      expect(reload).toHaveBeenCalledTimes(1);
+      click(root, 'Back to the lobby');
+      expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED); // left the room: the seat is free
+      expect(root.querySelector('[data-end]')).toBeNull();
+      err.mockRestore();
+    });
+  }
 
   it('enter_code_validates_before_joining', () => {
     const { root, sockets } = setup();

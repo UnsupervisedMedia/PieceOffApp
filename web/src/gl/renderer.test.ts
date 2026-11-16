@@ -276,7 +276,8 @@ describe('BoardRenderer with a (fake) WebGL2 context', () => {
   });
 
   it('dispose_releases_frames_listeners_and_gl_objects', () => {
-    const g = fakeGl();
+    const loseContext = vi.fn();
+    const g = fakeGl({ getExtension: (name) => (name === 'WEBGL_lose_context' ? { loseContext } : null) });
     const removePoster = vi.fn();
     const f = frames();
     const c = canvas();
@@ -307,6 +308,12 @@ describe('BoardRenderer with a (fake) WebGL2 context', () => {
     }
     expect(g.named('deleteTexture')).toHaveLength(2);
     expect(g.named('deleteBuffer')).toHaveLength(5);
+    // The context itself is given back, after the GL objects.
+    expect(loseContext).toHaveBeenCalledTimes(1);
+    const order = g.calls.map((c) => c[0]);
+    expect(order.lastIndexOf('getExtension')).toBeGreaterThan(order.lastIndexOf('deleteBuffer'));
+    r.dispose();
+    expect(loseContext).toHaveBeenCalledTimes(1);
     // Nothing runs after dispose.
     r.requestRender();
     m.video.dispatchEvent(new Event('playing'));

@@ -114,7 +114,8 @@ describe('screens', () => {
       'name-taken',
       'room-not-found',
       'invalid-code',
-    ] satisfies Array<FatalReason | 'room-not-found' | 'invalid-code'>;
+      'board-failed',
+    ] satisfies Array<FatalReason | 'room-not-found' | 'invalid-code' | 'board-failed'>;
     expect(Object.keys(END_COPY).sort()).toEqual([...reasons].sort());
     const titles = new Set<string>();
     for (const r of reasons) {

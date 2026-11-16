@@ -727,6 +727,15 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       if (m.type === 'welcome') {
         d.dead = true; // a reconnect: the old lease is gone
         updateTurnButtons();
+      } else if (m.type === 'snapshot') {
+        // Sent mid-drag when a peer joins or leaves or the clock changes; it
+        // replaces RoomState and its overlay. Still ours: put the overlay
+        // back now. Not granted yet: the grant revives it (below).
+        const a = m.snapshot.pieces.find((p) => p.id === d.anchor);
+        if (a && a.held_by !== null && a.held_by === state.clientId) {
+          d.confirmed = true;
+          if (!d.paused) revive(d);
+        }
       } else if (m.type === 'pieces_changed' && m.pieces.some((p) => p.id === d.anchor && p.held_by !== null && p.held_by === state.clientId)) {
         d.confirmed = true;
         if (d.paused || !state.localDrag()) revive(d);

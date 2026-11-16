@@ -78,6 +78,8 @@ export const CURSOR_INTERVAL_MS = Math.ceil(1000 / 15);
 export const HEARTBEAT_MS = 30_000;
 /** A foreground health check that hears nothing back in this long replaces the socket. */
 export const HEALTH_TIMEOUT_MS = 4000;
+/** A connection attempt with no welcome after this long is dropped and retried on the backoff. */
+export const WELCOME_TIMEOUT_MS = 12_000;
 
 export function nextDelay(attempt: number, rand: () => number): number {
   const a = Number.isNaN(attempt) ? 0 : Math.max(0, Math.min(attempt, 30));
@@ -151,6 +153,7 @@ export class RoomSocket {
   private readonly probe?: () => Promise<number | null>;
   private readonly keepalive: boolean;
   private readonly isHidden: () => boolean;
+  private readonly listen: () => void;
   private readonly unlisten: () => void;
 
   private ws: WebSocket | null = null;
@@ -165,6 +168,7 @@ export class RoomSocket {
   private retryTimer: unknown = null;
   private heartbeatTimer: unknown = null;
   private healthTimer: unknown = null;
+  private welcomeTimer: unknown = null;
   private lastTx = 0;
   private lastRx = 0;
   private cycle = 0; // bumps on every connect so stale probe replies are ignored
@@ -206,27 +210,28 @@ export class RoomSocket {
     const onVisibility = () => {
       if (!this.isHidden()) this.healthCheck();
     };
+    let target: { doc: EventTarget; win: EventTarget } | null = null;
     if (o.visibility) {
       const v = o.visibility as EventTarget & { visibilityState?: string };
       this.isHidden = () => v.visibilityState === 'hidden';
-      v.addEventListener('visibilitychange', onVisibility);
-      v.addEventListener('pageshow', onVisibility);
+      target = { doc: v, win: v };
     } else if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       this.isHidden = () => document.visibilityState === 'hidden';
-      document.addEventListener('visibilitychange', onVisibility);
-      window.addEventListener('pageshow', onVisibility);
+      target = { doc: document, win: window };
     } else {
       this.isHidden = () => false;
     }
-    this.unlisten = () => {
-      if (o.visibility) {
-        o.visibility.removeEventListener('visibilitychange', onVisibility);
-        o.visibility.removeEventListener('pageshow', onVisibility);
-      } else if (typeof document !== 'undefined' && typeof window !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibility);
-        window.removeEventListener('pageshow', onVisibility);
-      }
+    // Removed on close() and on a fatal stop (so a dropped socket does not stay
+    // pinned by document/window listeners), added again by retry().
+    this.listen = () => {
+      target?.doc.addEventListener('visibilitychange', onVisibility);
+      target?.win.addEventListener('pageshow', onVisibility);
     };
+    this.unlisten = () => {
+      target?.doc.removeEventListener('visibilitychange', onVisibility);
+      target?.win.removeEventListener('pageshow', onVisibility);
+    };
+    this.listen();
     this.connect();
   }
 
@@ -326,6 +331,7 @@ export class RoomSocket {
     this.why = undefined;
     this.attempt = 0;
     this.lastRefused = false;
+    this.listen();
     this.setState('connecting');
     this.connect();
   }
@@ -345,6 +351,20 @@ export class RoomSocket {
     this.wsOpened = false;
     const ws = this.makeSocket(this.url);
     this.ws = ws;
+    // A CONNECTING socket can stall for minutes (captive portals, a half-dead
+    // radio) with no close event: give up on it and back off like a drop.
+    this.welcomeTimer = this.timers.set(() => {
+      this.welcomeTimer = null;
+      if (ws !== this.ws || this.joined) return;
+      this.detach();
+      try {
+        ws.close(4000, 'timeout');
+      } catch {
+        // already gone
+      }
+      this.lastRefused = false;
+      this.scheduleRetry(undefined);
+    }, WELCOME_TIMEOUT_MS);
     ws.onopen = () => {
       if (ws !== this.ws) return;
       this.wsOpened = true;
@@ -390,6 +410,7 @@ export class RoomSocket {
         if (typeof token === 'string' && token.length > 0 && token.length <= 256) this.resumeToken = token;
         this.clientId = m.client_id;
         this.joined = true;
+        this.clearTimer('welcomeTimer');
         this.attempt = 0;
         this.lastRefused = false;
         this.armHeartbeat();
@@ -398,6 +419,7 @@ export class RoomSocket {
         return;
       }
       case 'error': {
+        if (typeof m.message !== 'string') return; // malformed: nothing to show or classify
         this.emit(m);
         const reason = classifyError(m.message);
         // Join refusals (name taken, public name, banned, update, paused) are
@@ -484,6 +506,7 @@ export class RoomSocket {
     if (this.stopped) return;
     this.stopped = true;
     this.teardown();
+    this.unlisten();
     this.setState('fatal', why);
   }
 
@@ -500,6 +523,7 @@ export class RoomSocket {
     this.cursorShown = false;
     this.clearTimer('heartbeatTimer');
     this.clearTimer('healthTimer');
+    this.clearTimer('welcomeTimer');
   }
 
   private teardown(): void {
@@ -590,7 +614,7 @@ export class RoomSocket {
     for (const cb of [...this.stateCbs]) cb(s, why);
   }
 
-  private clearTimer(k: 'retryTimer' | 'heartbeatTimer' | 'healthTimer'): void {
+  private clearTimer(k: 'retryTimer' | 'heartbeatTimer' | 'healthTimer' | 'welcomeTimer'): void {
     if (this[k] !== null) this.timers.clear(this[k]);
     this[k] = null;
   }

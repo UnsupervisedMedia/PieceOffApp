@@ -493,6 +493,39 @@ describe('board', () => {
     expect(s.drags().slice(2).map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
   });
 
+  it('a_room_snapshot_mid_drag_keeps_the_drag_and_its_single_drop', () => {
+    // A peer joining sends everyone a full snapshot; it replaces RoomState.
+    const s = setup();
+    const me = s.state.clientId!;
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    const held = s.snap.pieces.map((p) => (p.id === 1 ? { ...p, held_by: me } : p));
+    s.receive({ type: 'pieces_changed', revision: 5, pieces: [held[1]!] });
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap, revision: 6, pieces: held } });
+    expect(s.state.localDrag()?.anchorId).toBe(1); // the overlay is back at once
+    s.pointer('pointermove', 1, x + 60, y);
+    expect(s.state.pieces().find((p) => p.id === 1)!.x).toBeCloseTo(s.snap.pieces[1]!.x + 60 / s.h.camera.scale, 3);
+    s.receive({ type: 'pieces_changed', revision: 7, pieces: [held[1]!] });
+    expect(s.state.localDrag()?.anchorId).toBe(1);
+    s.pointer('pointerup', 1, x + 60, y);
+    expect(s.drags().filter((m) => m.type === 'drag_end')).toHaveLength(1);
+  });
+
+  it('a_room_snapshot_before_the_grant_then_the_grant_revives_the_drag', () => {
+    const s = setup();
+    const me = s.state.clientId!;
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap, revision: 6 } }); // before our drag_start landed
+    expect(s.state.localDrag()).toBeNull();
+    s.receive({ type: 'pieces_changed', revision: 7, pieces: [{ ...s.snap.pieces[1]!, held_by: me }] });
+    expect(s.state.localDrag()?.anchorId).toBe(1);
+    s.pointer('pointerup', 1, x + 30, y);
+    expect(s.drags().filter((m) => m.type === 'drag_end')).toEqual([expect.objectContaining({ type: 'drag_end', piece_id: 1 })]);
+  });
+
   it('a_reconnect_welcome_mid_drag_ends_it_without_a_drop', () => {
     const s = setup();
     const [x, y] = s.at(1);

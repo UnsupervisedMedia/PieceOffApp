@@ -277,12 +277,31 @@ export function startApp(d: AppDeps): App {
         show(s.kind, host);
         if (s.kind === 'room-full-spectating') banner.show('This room already has 8 players, so you are watching.');
         const joined = s;
+        // A chunk that will not load, or a board that throws while mounting,
+        // must not leave an empty screen with the seat still held and no way
+        // out: show an end screen whose Back leaves the room.
+        const failed = () => {
+          if (join.state.get() !== joined) return;
+          show(
+            joined.kind,
+            renderEnd('board-failed', { reload: () => (d.reload ?? (() => location.reload()))(), retry: toLobby, lobby: toLobby }, joined.code),
+            toLobby,
+          );
+        };
         (d.loadBoard ?? defaultLoadBoard)().then(
           (m) => {
             if (join.state.get() !== joined) return;
-            board = m.mountBoard(host, { ...joined, spectatorBecauseFull: joined.kind === 'room-full-spectating' }, toLobby, d.config);
+            try {
+              board = m.mountBoard(host, { ...joined, spectatorBecauseFull: joined.kind === 'room-full-spectating' }, toLobby, d.config);
+            } catch (e) {
+              console.error('PieceOff: the board failed to start', e);
+              failed();
+            }
           },
-          () => banner.show('Could not load the board. Check your connection and reload.', 'error'),
+          (e: unknown) => {
+            console.error('PieceOff: the board did not load', e);
+            failed();
+          },
         );
         return;
       }
