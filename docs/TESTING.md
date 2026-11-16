@@ -196,6 +196,20 @@ hear the same moment (audio is off in every automated run), real network paths
 and latency between machines, real pointer and keyboard input in two windows
 (drag and snap are covered separately by `DragRig`), and Windows and macOS.
 
+## Harder modes (manual, per release)
+
+Automated tests cover the rules (core), the wire (server), the maths shared by
+client and server, picking and drawing a turned piece, and the 1000-piece frame
+cost (`cargo test --release -p pieceoff-app thousand_piece_board_frame_cost --
+--ignored --nocapture`). Still by hand, on two machines:
+
+- Create a room with **Rotate pieces**: pieces arrive turned; E / Q turns the
+  piece under the pointer or the selection, also while dragging, and the mouse wheel turns a piece you are holding (even with the view locked); a turned piece
+  dropped on its slot does not snap, an upright one does; both players see turns.
+- **No hints** room: no reference image, ghost, still-frame assist, edge filter
+  or edges-first tidy in the menus or by key.
+- An older (v15) app is refused from a rotation room with an update message.
+
 ## Web play client (`web/`)
 
 - **Unit tests and gate:** `scripts/web-check.sh` builds the core wasm, typechecks, runs the vitest suite (jsdom; the wasm is loaded for real, protocol tags are checked against the Rust enums), builds, enforces the size budget (initial JS + WASM + CSS gzip at most 400 KB; the lazy board chunk is reported), then packs the release tarball and checks it (`web/check-pack.mjs`: every file `play-app.json` and `builtin/manifest.json` name is present, both sha256 lists match, no sourcemaps/dev/spike/e2e files, relative imports resolve, budget again on the packed bytes, two packs are byte-identical). `scripts/check.sh --web` runs it, and `scripts/check.sh` does when `web/node_modules` exists.

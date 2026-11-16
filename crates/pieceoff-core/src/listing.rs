@@ -170,6 +170,7 @@ mod tests {
             player_key: String::new(),
             cut_style: Default::default(),
             listed,
+            difficulty: Default::default(),
         }
     }
 

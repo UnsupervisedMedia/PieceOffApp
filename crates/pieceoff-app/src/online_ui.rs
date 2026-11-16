@@ -357,6 +357,7 @@ impl PieceOffApp {
                 player_key,
                 ..
             } => ClientMessage::JoinRoom {
+                client_protocol: 0,
                 invite_code: code,
                 name,
                 media_sha256,
@@ -654,6 +655,7 @@ impl PieceOffApp {
             Ok(CreateOutcome::Created(room)) => {
                 self.online.pending = None;
                 let message = ClientMessage::JoinRoom {
+                    client_protocol: 0,
                     invite_code: room.code.clone(),
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),

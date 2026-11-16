@@ -292,6 +292,25 @@ impl Room {
         }
     }
 
+    /// `join_v14` plus the client's protocol, so rooms with rotation can
+    /// refuse clients that cannot render it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn join_v16(
+        &mut self,
+        client_id: &str,
+        name: &str,
+        media_sha256: &str,
+        key_hash: &str,
+        spectator: bool,
+        client_protocol: u16,
+        now_ms: f64,
+    ) -> String {
+        if let Err(message) = self.runtime.require_client_protocol(client_protocol) {
+            return err_reply(message);
+        }
+        self.join_v14(client_id, name, media_sha256, key_hash, spectator, now_ms)
+    }
+
     /// Join with protocol v14 identity and spectator semantics.
     pub fn join_v14(
         &mut self,

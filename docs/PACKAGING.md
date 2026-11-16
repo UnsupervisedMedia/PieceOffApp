@@ -24,7 +24,7 @@ a `cargo check --all-targets` for `x86_64-pc-windows-gnu`, so a change that only
 breaks Windows is caught before a push. `scripts/check.sh --bundle` also
 assembles the Windows zip, and `scripts/bundle-windows-cross.sh` does just that:
 `dist/PieceOff-<version>-win64-gnu.zip` with both `.exe` files, a cross-built
-Windows FFmpeg with its source, licenses, docs, `pieceoff.ps1` and `START-HERE.txt`. Windows
+Windows FFmpeg with its source, licenses, docs, `PieceOff.exe` (double-click launcher), `pieceoff.ps1` and `START-HERE.txt`. Windows
 artifacts build in `target/windows` (`PIECEOFF_WINDOWS_TARGET_DIR` overrides).
 
 ```sh
@@ -143,3 +143,15 @@ HTTPS, the systemd unit, reverse-proxy requirements, every `PIECEOFF_*`
 setting, backups, and security notes. For a quick trusted-network test the
 bundle's `pieceoff.sh` starts a local server on port `28878`; it has no TLS and
 no account system, so do not expose that directly to the internet.
+
+## Windows polish
+
+`PieceOff.exe` (crate `pieceoff-launcher`) starts the room server hidden on the
+first free port from 28878, starts the app against it, and stops the server
+when the app closes; if the server cannot start, the app still opens. Both
+`.exe` files embed the icon (`packaging/icon/`) and version metadata
+(`packaging/winres.rs`), and the app uses the GUI subsystem so no console
+appears. `scripts/bundle.ps1` also builds `PieceOff-<version>-win64-setup.exe`
+(per-user, Start Menu shortcut, `packaging/windows/PieceOff.iss`) when Inno
+Setup's `ISCC.exe` is available. Data lives in `%LOCALAPPDATA%\PieceOff\data`.
+Signing: [SIGNING.md](SIGNING.md). None of this has been launched on Windows.

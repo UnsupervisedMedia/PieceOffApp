@@ -26,10 +26,10 @@ $Dist = Join-Path $Root "dist"
 $Out = Join-Path $Dist $Name
 
 if (-not $SkipBuild) {
-    & cargo build --release --locked -p pieceoff-app -p pieceoff-server
+    & cargo build --release --locked -p pieceoff-app -p pieceoff-server -p pieceoff-launcher
     if ($LASTEXITCODE -ne 0) { throw "Cargo build failed with exit code $LASTEXITCODE." }
 }
-foreach ($binary in @("pieceoff-app.exe", "pieceoff-server.exe")) {
+foreach ($binary in @("PieceOff.exe", "pieceoff-app.exe", "pieceoff-server.exe")) {
     if (-not (Test-Path (Join-Path $Root "target\release\$binary"))) {
         throw "target\release\$binary is missing; build first."
     }
@@ -37,7 +37,7 @@ foreach ($binary in @("pieceoff-app.exe", "pieceoff-server.exe")) {
 
 if (Test-Path $Out) { Remove-Item -Recurse $Out }
 New-Item -ItemType Directory -Force -Path (Join-Path $Out "docs") | Out-Null
-Copy-Item target\release\pieceoff-app.exe, target\release\pieceoff-server.exe, pieceoff.ps1, README.md, LICENSE, CONTRIBUTING.md $Out
+Copy-Item target\release\PieceOff.exe, target\release\pieceoff-app.exe, target\release\pieceoff-server.exe, pieceoff.ps1, README.md, LICENSE, CONTRIBUTING.md $Out
 foreach ($doc in @("PACKAGING.md", "FFMPEG.md", "TESTING.md", "DEPLOYMENT.md", "LICENSING.md")) {
     $path = Join-Path "docs" $doc
     if (Test-Path $path) { Copy-Item $path (Join-Path $Out "docs") }
@@ -85,5 +85,19 @@ if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path $Out -DestinationPath $zip
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 "$hash  $Name.zip" | Set-Content (Join-Path $Dist "$Name.zip.sha256")
+# Installer (per-user, Start Menu shortcut). Needs Inno Setup's ISCC.exe.
+$iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+if (-not $iscc) { $iscc = Get-Item "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue }
+if ($iscc) {
+    $isccPath = if ($iscc.Source) { $iscc.Source } else { $iscc.FullName }
+    & $isccPath "/DAppVersion=$Version" "/DSourceDir=$Out" "/DOutputDir=$Dist" (Join-Path $Root "packaging\windows\PieceOff.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
+    $setup = Join-Path $Dist "PieceOff-$Version-win64-setup.exe"
+    $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+    "$setupHash  PieceOff-$Version-win64-setup.exe" | Set-Content "$setup.sha256"
+    Write-Host "Installer: dist\PieceOff-$Version-win64-setup.exe"
+} else {
+    Write-Host "ISCC.exe not found; skipping the installer (zip only)."
+}
 Write-Host "Bundle:   dist\$Name.zip"
 Write-Host "Checksum: dist\$Name.zip.sha256"

@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
     epaint::{Mesh, Vertex},
@@ -6,9 +8,9 @@ use eframe::egui::{
 use futures_util::{SinkExt, StreamExt};
 
 use pieceoff_core::{
-    ClientMessage, CutStyle, Piece, PlaybackState, REMOVED_BY_HOST, REPLACED_BY_NEW_CONNECTION,
-    RepeatMode, RoomSnapshot, ServerMessage, TrayArrangement, piece_outline,
-    valid_media_dimensions, valid_media_extension,
+    ClientMessage, CutStyle, Difficulty, Piece, PlaybackState, REMOVED_BY_HOST,
+    REPLACED_BY_NEW_CONNECTION, RepeatMode, RoomSnapshot, ServerMessage, TrayArrangement,
+    piece_outline, valid_media_dimensions, valid_media_extension,
 };
 
 use serde::{Deserialize, Serialize};
@@ -113,6 +115,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PieceOff")
             .with_app_id("pieceoff")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../packaging/icon/pieceoff.png"
+                ))
+                .expect("the bundled icon is a valid PNG"),
+            )
             .with_resizable(true)
             .with_maximize_button(true)
             .with_inner_size([1180.0, 780.0])
@@ -206,6 +214,12 @@ struct PieceOffApp {
     rows: u16,
     columns: u16,
     cut_style: CutStyle,
+    /// Harder-play options for the next room created from the start screen.
+    difficulty: Difficulty,
+    /// A rotate key press waiting for the board to apply it (quarter turns).
+    pending_rotate: Option<i8>,
+    /// Wheel movement not yet enough for a quarter turn while a piece is held.
+    wheel_turn: f32,
     dragging: Option<ActiveDrag>,
     selected_pieces: std::collections::HashSet<u32>,
     keyboard_play_open: bool,
@@ -432,6 +446,9 @@ impl Default for PieceOffApp {
             rows: 3,
             columns: 4,
             cut_style: CutStyle::Jigsaw,
+            difficulty: Difficulty::default(),
+            pending_rotate: None,
+            wheel_turn: 0.0,
             dragging: None,
             selected_pieces: std::collections::HashSet::new(),
             keyboard_play_open: false,
@@ -905,6 +922,11 @@ impl PieceOffApp {
     pub(crate) fn create_request(&self) -> ClientMessage {
         let title = clean_room_title(&self.title);
         ClientMessage::CreateRoom {
+            // A package keeps the difficulty it was made with.
+            difficulty: self
+                .pending_snapshot
+                .as_ref()
+                .map_or(self.difficulty, |snapshot| snapshot.difficulty),
             name: self.player_name.clone(),
             title: title.clone(),
             media_sha256: self.media_hash.clone(),
@@ -1068,6 +1090,7 @@ impl PieceOffApp {
             }
         }
         let message = ClientMessage::JoinRoom {
+            client_protocol: pieceoff_core::PROTOCOL_VERSION,
             invite_code: self.invite_code.clone(),
             name: self.player_name.clone(),
             media_sha256: self.media_hash.clone(),
@@ -1313,10 +1336,10 @@ fn clean_room_title(title: &str) -> String {
     }
 }
 
-const MAX_PUZZLE_PIECES: u16 = 400;
+const MAX_PUZZLE_PIECES: u16 = pieceoff_core::MAX_PIECES as u16;
 
 fn max_grid_dimension_for_other(other_dimension: u16) -> u16 {
-    (MAX_PUZZLE_PIECES / other_dimension.max(1)).clamp(2, 30)
+    (MAX_PUZZLE_PIECES / other_dimension.max(1)).clamp(2, pieceoff_core::MAX_GRID_SIDE)
 }
 
 #[cfg(test)]
