@@ -440,6 +440,7 @@ mod tests {
                 y: 0.0,
                 placed: false,
                 held_by: None,
+                rotation: 0,
             })
             .collect();
         let mut log = Timelapse::default();

@@ -118,6 +118,14 @@ impl RoomRuntime {
                     self.move_selection(client_id, anchor_piece_id, x, y, false)?;
                 (pieces_changed(pieces, revision), false)
             }
+            ClientMessage::RotateSelection {
+                anchor_piece_id,
+                quarter_turns,
+            } => {
+                let (pieces, revision) =
+                    self.rotate_selection(client_id, anchor_piece_id, quarter_turns)?;
+                (pieces_changed(pieces, revision), false)
+            }
             ClientMessage::DragEndSelection {
                 anchor_piece_id,
                 x,
@@ -375,6 +383,7 @@ mod tests {
                     media_extension: "png".into(),
                     spectator: false,
                     player_key: String::new(),
+                    client_protocol: 0,
                 },
                 0,
             )
