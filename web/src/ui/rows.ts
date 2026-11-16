@@ -18,14 +18,16 @@ export interface KeyedRow {
  */
 export function patchRows(parent: HTMLElement, rows: KeyedRow[], extra: Node[] = []): void {
   const active = document.activeElement as HTMLElement | null;
+  const wanted = new Set(rows.map((r) => r.key));
+  // Drop stale rows (and unkeyed placeholders) first, so the rows that stay
+  // are already in order and never need moving: moving a node blurs it.
   const old = new Map<string, HTMLElement>();
   for (const c of [...parent.children]) {
     const k = (c as HTMLElement).dataset.key;
-    if (k !== undefined) old.set(k, c as HTMLElement);
+    if (k !== undefined && wanted.has(k) && !old.has(k)) old.set(k, c as HTMLElement);
     else c.remove();
   }
   let refocus: { row: HTMLElement; act: string | undefined } | null = null;
-  const keep = new Set<HTMLElement>();
   let i = 0;
   for (const r of rows) {
     let el = old.get(r.key);
@@ -37,12 +39,11 @@ export function patchRows(parent: HTMLElement, rows: KeyedRow[], extra: Node[] =
       if (el) el.replaceWith(fresh);
       el = fresh;
     }
-    keep.add(el);
-    const at = parent.children[i];
-    if (at !== el) parent.insertBefore(el, at ?? null);
+    // Only a new row, or one genuinely out of position, is inserted.
+    const at = parent.children[i] ?? null;
+    if (at !== el) parent.insertBefore(el, at);
     i++;
   }
-  for (const [, el] of old) if (!keep.has(el)) el.remove();
   for (const n of extra) parent.append(n);
   if (refocus) {
     const t = (refocus.act ? refocus.row.querySelector<HTMLElement>(`[data-act="${refocus.act}"]`) : null) ?? refocus.row.querySelector<HTMLElement>('button, input, a[href]');

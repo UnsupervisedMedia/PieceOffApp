@@ -712,6 +712,55 @@ describe('toolbar', () => {
     expect([input.selectionStart, input.selectionEnd]).toEqual([4, 4]);
   });
 
+  // ---- fix round 2: a row leaving or arriving earlier in a list -----------------
+
+  it('focus_on_a_later_mute_survives_an_earlier_peer_leaving_or_joining', () => {
+    const s = setup({ welcomeOver: { peers: ['Bob', 'Cy'] } });
+    s.q<HTMLButtonElement>('[data-open=menu]').click();
+    s.tab('people');
+    const cyMute = s.q<HTMLButtonElement>('li[data-name="Cy"] [data-act=mute]');
+    cyMute.focus();
+    s.receive({ type: 'peer_left', name: 'Bob', spectator: false });
+    expect(s.q('li[data-name="Bob"]')).toBeNull();
+    expect(document.activeElement).toBe(cyMute);
+    // A newcomer is added at the end (join order); Cy keeps focus.
+    s.receive({ type: 'peer_joined', name: 'Dee', spectator: false });
+    expect(document.activeElement).toBe(cyMute);
+    expect(key(cyMute, 'Escape').defaultPrevented).toBe(true);
+    expect(s.q('.po-panel').hidden).toBe(true);
+  });
+
+  it('focus_on_a_later_mute_survives_a_row_inserted_before_it', () => {
+    const s = setup({ welcomeOver: { peers: ['Bob', 'Cy'] } });
+    s.tab('people');
+    const cyMute = s.q<HTMLButtonElement>('li[data-name="Cy"] [data-act=mute]');
+    cyMute.focus();
+    // A welcome-style reorder is not routine; an insertion in the middle is
+    // (here: the peers list as the server sends it after a resync).
+    s.state.peers.splice(1, 0, 'Abe');
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap(), revision: 6 } });
+    expect([...s.root.querySelectorAll('.po-people li[data-name]')].map((li) => li.getAttribute('data-name'))).toEqual(['Ann', 'Bob', 'Abe', 'Cy']);
+    expect(document.activeElement).toBe(cyMute);
+  });
+
+  it('focus_on_a_later_holder_remove_survives_an_earlier_holder_going', () => {
+    const s = setup();
+    const snap = s.snap();
+    const cw = snap.width / snap.columns;
+    const ch = snap.height / snap.rows;
+    const hd = (id: number): PieceHolder => ({ id, owner: 'Ann', label: `H${id}`, x: -2000 - id * 300, y: 0, width: 2 * cw, height: 2 * ch });
+    s.receive({ type: 'pieces_changed', revision: 4, pieces: [], holders: [hd(1), hd(2), hd(3)] });
+    s.q<HTMLButtonElement>('[data-open=menu]').click();
+    s.tab('holders');
+    const rm3 = s.q<HTMLButtonElement>('.po-holders li[data-id="3"] [data-act=delete-holder]');
+    rm3.focus();
+    s.receive({ type: 'pieces_changed', revision: 5, pieces: [], holders: [hd(1), hd(3)] });
+    expect(s.q('.po-holders li[data-id="2"]')).toBeNull();
+    expect(document.activeElement).toBe(rm3);
+    expect(key(rm3, 'Escape').defaultPrevented).toBe(true);
+    expect(s.q('.po-panel').hidden).toBe(true);
+  });
+
   it('destroy_removes_the_toolbar', () => {
     const s = setup();
     s.tb.destroy();
