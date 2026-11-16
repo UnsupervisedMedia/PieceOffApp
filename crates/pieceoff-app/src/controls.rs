@@ -14,6 +14,8 @@ pub(crate) enum Action {
     FocusTray,
     ZoomIn,
     ZoomOut,
+    RotateCw,
+    RotateCcw,
     ToggleGhost,
     TidyTray,
     ShuffleTray,
@@ -33,12 +35,14 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::FitView,
         Self::FocusBoard,
         Self::FocusTray,
         Self::ZoomIn,
         Self::ZoomOut,
+        Self::RotateCw,
+        Self::RotateCcw,
         Self::ToggleGhost,
         Self::TidyTray,
         Self::ShuffleTray,
@@ -65,6 +69,8 @@ impl Action {
             Self::FocusTray => "focus_tray",
             Self::ZoomIn => "zoom_in",
             Self::ZoomOut => "zoom_out",
+            Self::RotateCw => "rotate_cw",
+            Self::RotateCcw => "rotate_ccw",
             Self::ToggleGhost => "toggle_ghost",
             Self::TidyTray => "tidy_tray",
             Self::ShuffleTray => "shuffle_tray",
@@ -91,6 +97,8 @@ impl Action {
             Self::FocusTray => "Focus the tray",
             Self::ZoomIn => "Zoom in",
             Self::ZoomOut => "Zoom out",
+            Self::RotateCw => "Turn the piece clockwise (rotation rooms)",
+            Self::RotateCcw => "Turn the piece counter-clockwise (rotation rooms)",
             Self::ToggleGhost => "Toggle the board ghost",
             Self::TidyTray => "Tidy the tray (edges first)",
             Self::ShuffleTray => "Shuffle the tray",
@@ -133,6 +141,8 @@ impl Action {
             Self::FocusTray => plain(&[Key::T]),
             Self::ZoomIn => plain(&[Key::Plus, Key::Equals]),
             Self::ZoomOut => plain(&[Key::Minus]),
+            Self::RotateCw => plain(&[Key::E]),
+            Self::RotateCcw => plain(&[Key::Q]),
             Self::ToggleGhost => plain(&[Key::G]),
             // Rearranging the tray changes every player's view, so it is
             // reachable from the menu but not from a stray keypress.

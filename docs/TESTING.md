@@ -196,6 +196,20 @@ hear the same moment (audio is off in every automated run), real network paths
 and latency between machines, real pointer and keyboard input in two windows
 (drag and snap are covered separately by `DragRig`), and Windows and macOS.
 
+## Harder modes (manual, per release)
+
+Automated tests cover the rules (core), the wire (server), the maths shared by
+client and server, picking and drawing a turned piece, and the 1000-piece frame
+cost (`cargo test --release -p pieceoff-app thousand_piece_board_frame_cost --
+--ignored --nocapture`). Still by hand, on two machines:
+
+- Create a room with **Rotate pieces**: pieces arrive turned; E / Q turns the
+  piece under the pointer or the selection, also while dragging; a turned piece
+  dropped on its slot does not snap, an upright one does; both players see turns.
+- **No hints** room: no reference image, ghost, still-frame assist, edge filter
+  or edges-first tidy in the menus or by key.
+- An older (v15) app is refused from a rotation room with an update message.
+
 ## Playtest log
 
 ### 2026-10-08: automated two-client video run (real server, real FFmpeg, silent)

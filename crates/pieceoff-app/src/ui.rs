@@ -11,8 +11,15 @@ const CARD: Color32 = Color32::from_rgb(32, 36, 44);
 const CANVAS: Color32 = Color32::from_rgb(35, 38, 44);
 const TOAST_SECONDS: f64 = 6.0;
 /// Piece-count presets offered when creating a puzzle.
-pub(crate) const PIECE_PRESETS: [(&str, u16); 4] =
-    [("Easy", 12), ("Medium", 48), ("Hard", 108), ("Expert", 192)];
+pub(crate) const PIECE_PRESETS: [(&str, u16); 7] = [
+    ("Easy", 12),
+    ("Medium", 48),
+    ("Hard", 108),
+    ("Expert", 192),
+    ("Brutal", 400),
+    ("Insane", 600),
+    ("Mega", 1000),
+];
 
 /// One dark look for the whole app: roomier controls, rounded corners, and a
 /// single accent colour.
@@ -126,6 +133,14 @@ impl PieceOffApp {
 
     /// Switch the cut style; a grid picked from a preset follows to the same
     /// preset in the new style.
+    /// The room being played turns hints off (reference image, ghost,
+    /// still-frame assist, edge filter, edges-first tidy).
+    pub(crate) fn no_hints(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.difficulty.no_hints)
+    }
+
     pub(crate) fn set_cut_style(&mut self, style: CutStyle, aspect: f32) {
         let preset = PIECE_PRESETS.iter().find(|(_, count)| {
             grid_for_style(*count, aspect, self.cut_style) == (self.rows, self.columns)
@@ -342,13 +357,25 @@ impl PieceOffApp {
                 self.view_command = Some(command);
             }
         }
-        if self.controls.pressed(ctx, Action::ToggleGhost) {
+        if self.controls.pressed(ctx, Action::ToggleGhost) && !self.no_hints() {
             self.settings.show_ghost = !self.settings.show_ghost;
             self.persist_settings();
         }
         // Spectators and replays leave the room's pieces alone.
         let playing = !self.spectating && self.replay.is_none();
-        if self.controls.pressed(ctx, Action::TidyTray) && playing {
+        if playing
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.difficulty.rotation)
+        {
+            for (action, turns) in [(Action::RotateCw, 1), (Action::RotateCcw, -1)] {
+                if self.controls.pressed(ctx, action) {
+                    self.pending_rotate = Some(turns);
+                }
+            }
+        }
+        if self.controls.pressed(ctx, Action::TidyTray) && playing && !self.no_hints() {
             self.arrange_tray(TrayArrangement::EdgesFirst);
         }
         if self.controls.pressed(ctx, Action::ShuffleTray) && playing {
@@ -539,11 +566,19 @@ impl PieceOffApp {
             self.persist_settings();
         }
         ui.separator();
+        let no_hints = self.no_hints();
+        if no_hints {
+            self.piece_filter = PieceFilter::All;
+            ui.weak("No hints");
+        }
         for (filter, label) in [
             (PieceFilter::All, "All"),
             (PieceFilter::Edges, "Edges"),
             (PieceFilter::Interior, "Interior"),
-        ] {
+        ]
+        .into_iter()
+        .filter(|_| !no_hints)
+        {
             if ui
                 .selectable_label(self.piece_filter == filter, label)
                 .on_hover_text("Filter the loose pieces in the tray")
@@ -556,13 +591,14 @@ impl PieceOffApp {
         ui.separator();
         if !self.spectating {
             ui.menu_button(language.text("Arrange"), |ui| {
-                if ui
-                    .button("Edges first")
-                    .on_hover_text(self.hint_with_keys(
-                        "Corners, then edges, then the rest, in order",
-                        Action::TidyTray,
-                    ))
-                    .clicked()
+                if !no_hints
+                    && ui
+                        .button("Edges first")
+                        .on_hover_text(self.hint_with_keys(
+                            "Corners, then edges, then the rest, in order",
+                            Action::TidyTray,
+                        ))
+                        .clicked()
                 {
                     ui.close();
                     self.arrange_tray(TrayArrangement::EdgesFirst);
@@ -592,13 +628,14 @@ impl PieceOffApp {
             self.language_menu(ui);
             self.interface_scale_menu(ui);
             let mut ghost = self.settings.show_ghost;
-            if ui
-                .checkbox(
-                    &mut ghost,
-                    self.hint_with_keys("Board ghost", Action::ToggleGhost),
-                )
-                .on_hover_text("Show a faint copy of the media behind the board")
-                .changed()
+            if !no_hints
+                && ui
+                    .checkbox(
+                        &mut ghost,
+                        self.hint_with_keys("Board ghost", Action::ToggleGhost),
+                    )
+                    .on_hover_text("Show a faint copy of the media behind the board")
+                    .changed()
             {
                 self.settings.show_ghost = ghost;
                 self.persist_settings();
@@ -625,7 +662,7 @@ impl PieceOffApp {
             self.listed_toggle(ui, is_host);
             self.chat_toggle(ui, is_host);
             self.report_room_button(ui, ctx);
-            if !self.is_video && self.media_ready {
+            if !no_hints && !self.is_video && self.media_ready {
                 ui.checkbox(&mut self.show_reference, language.text("Reference image"));
             }
             if ui.button(language.text("Controls…")).clicked() {
@@ -813,6 +850,23 @@ impl PieceOffApp {
                             .suffix(" cols"),
                     );
                     ui.weak(format!("{} pieces", self.rows * self.columns));
+                });
+                if self.rows * self.columns > 400 {
+                    ui.weak("Large boards need a fast computer, and are slower to join.");
+                }
+                ui.label(language.text("Harder"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.difficulty.rotation, "Rotate pieces")
+                        .on_hover_text(
+                            "Pieces start turned. Turn them upright (E / Q) before they fit. \
+                             Players on older versions cannot join.",
+                        );
+                    ui.checkbox(&mut self.difficulty.no_hints, "No hints")
+                        .on_hover_text(
+                            "No reference image, board ghost, still-frame assist, edge filter \
+                             or edges-first tidy. Played on trust: a modified client could still \
+                             show them.",
+                        );
                 });
             } else {
                 ui.weak(language.text("This package keeps its saved pieces and progress."));
@@ -1195,6 +1249,7 @@ impl PieceOffApp {
             } else if reconnect_at <= Instant::now() && self.network.is_none() {
                 self.reconnect_at = None;
                 let message = ClientMessage::JoinRoom {
+                    client_protocol: 0,
                     invite_code: self.invite_code.clone(),
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),

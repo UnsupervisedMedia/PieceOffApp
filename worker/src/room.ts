@@ -990,7 +990,7 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   private async join(ws: WebSocket, attachment: Attachment, frame: string): Promise<void> {
-    let parsed: { type?: unknown; name?: unknown; media_sha256?: unknown; resume_token?: unknown; spectator?: unknown; player_key?: unknown };
+    let parsed: { type?: unknown; name?: unknown; media_sha256?: unknown; resume_token?: unknown; spectator?: unknown; player_key?: unknown; client_protocol?: unknown };
     try {
       parsed = JSON.parse(frame);
     } catch {
@@ -1002,6 +1002,10 @@ export class RoomDO extends DurableObject<Env> {
     const name = typeof parsed.name === "string" ? parsed.name : "";
     const sha = typeof parsed.media_sha256 === "string" ? parsed.media_sha256 : "";
     const spectator = parsed.spectator === true;
+    const clientProtocol =
+      typeof parsed.client_protocol === "number" && Number.isInteger(parsed.client_protocol) && parsed.client_protocol >= 0 && parsed.client_protocol <= 65535
+        ? parsed.client_protocol
+        : 0;
     const playerKey = typeof parsed.player_key === "string" ? parsed.player_key : "";
     if (new TextEncoder().encode(playerKey).length > 128) {
       this.sendError(ws, "Invalid player key");
@@ -1047,7 +1051,7 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    const joined = JSON.parse(this.wasm(() => this.room.join_v14(clientId, name, sha, keyHash, spectator, Date.now()))) as Reply<{
+    const joined = JSON.parse(this.wasm(() => this.room.join_v16(clientId, name, sha, keyHash, spectator, clientProtocol, Date.now()))) as Reply<{
       name: string;
       promoted_to_host: boolean;
       needs_upload_token: boolean;
