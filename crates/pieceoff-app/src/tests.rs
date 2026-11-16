@@ -5474,3 +5474,121 @@ fn rotate_keys_default_to_e_and_q_and_do_not_collide() {
         }
     }
 }
+
+#[test]
+fn a_completion_still_fits_the_server_cap_and_is_a_jpeg() {
+    // Noise is the worst case for JPEG size.
+    let mut seed = 0x2545_f491_u32;
+    let pixels = (0..1920 * 1080)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            egui::Color32::from_rgb(seed as u8, (seed >> 8) as u8, (seed >> 16) as u8)
+        })
+        .collect();
+    let frame = ColorImage {
+        size: [1920, 1080],
+        source_size: egui::vec2(1920.0, 1080.0),
+        pixels,
+    };
+    match crate::still::encode_still(&frame) {
+        Ok(bytes) => {
+            assert!(bytes.len() as u64 <= pieceoff_core::MAX_STILL_BYTES);
+            assert!(pieceoff_core::still_magic_ok("jpg", &bytes));
+        }
+        Err(error) => assert!(error.contains("too large"), "{error}"),
+    }
+    let plain = ColorImage::new(
+        [320, 180],
+        vec![egui::Color32::from_rgb(10, 80, 200); 320 * 180],
+    );
+    let bytes = crate::still::encode_still(&plain).unwrap();
+    assert!(pieceoff_core::still_magic_ok("jpg", &bytes));
+}
+
+#[test]
+fn releasing_is_offered_only_to_the_host_of_a_finished_video() {
+    let (mut app, _rx, mut snapshot) = queue_ui_app();
+    snapshot.queue[0].extension = "mp4".into();
+    snapshot.queue[0].available = true;
+    for piece in &mut snapshot.pieces {
+        piece.placed = true;
+    }
+    app.snapshot = Some(snapshot);
+    app.host_upload_token = Some("token".into());
+    app.last_video_frame = Some(ColorImage::new([4, 4], vec![egui::Color32::GRAY; 16]));
+    assert!(app.can_release_video());
+
+    app.client_id = Some("someone-else".into());
+    assert!(!app.can_release_video(), "not the host");
+    app.client_id = Some("host-id".into());
+    app.host_upload_token = None;
+    assert!(!app.can_release_video(), "no upload token");
+    app.host_upload_token = Some("token".into());
+    app.last_video_frame = None;
+    assert!(!app.can_release_video(), "no frame to capture");
+    app.last_video_frame = Some(ColorImage::new([4, 4], vec![egui::Color32::GRAY; 16]));
+    app.snapshot.as_mut().unwrap().pieces[0].placed = false;
+    assert!(!app.can_release_video(), "not finished");
+}
+
+#[test]
+fn bringing_the_video_back_needs_the_original_file() {
+    let directory = std::env::temp_dir().join(format!("pieceoff-restore-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let original = directory.join("original.png");
+    image::RgbaImage::from_pixel(20, 10, image::Rgba([9, 9, 9, 255]))
+        .save(&original)
+        .unwrap();
+    let other = directory.join("other.png");
+    image::RgbaImage::from_pixel(20, 10, image::Rgba([1, 2, 3, 255]))
+        .save(&other)
+        .unwrap();
+    let hash = sha256_file(&original).unwrap();
+    let (mut app, mut outgoing_rx, mut snapshot) = queue_ui_app();
+    snapshot.queue[0].seed_sha256 = hash.clone();
+    app.snapshot = Some(snapshot);
+
+    // A different file is refused and nothing is sent.
+    app.media_files
+        .lock()
+        .unwrap()
+        .insert(hash.clone(), other.clone());
+    app.restore_released_video(0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.restore_rx.is_some() && Instant::now() < deadline {
+        app.poll_restore();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.status.contains("not the original"), "{}", app.status);
+    assert!(outgoing_rx.try_recv().is_err());
+
+    // The original is accepted and RestoreVideo goes out.
+    app.media_files
+        .lock()
+        .unwrap()
+        .insert(hash.clone(), original.clone());
+    app.restore_released_video(0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.restore_rx.is_some() && Instant::now() < deadline {
+        app.poll_restore();
+        thread::sleep(Duration::from_millis(5));
+    }
+    match outgoing_rx.try_recv().expect("RestoreVideo was sent") {
+        ClientMessage::RestoreVideo {
+            index,
+            sha256,
+            width,
+            height,
+            ..
+        } => {
+            assert_eq!(
+                (index, sha256.as_str(), width, height),
+                (0, hash.as_str(), 20, 10)
+            );
+        }
+        other => panic!("unexpected message {other:?}"),
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

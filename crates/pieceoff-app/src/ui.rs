@@ -1278,6 +1278,8 @@ impl PieceOffApp {
         self.process_network(ctx);
         self.show_transfer_progress();
         self.poll_queue_probe();
+        self.poll_still_release();
+        self.poll_restore();
         self.hold_at_item_end();
         self.poll_library_jobs();
         if self.tools.is_empty() && self.tools_rx.is_none() {

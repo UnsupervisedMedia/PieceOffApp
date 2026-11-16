@@ -196,6 +196,35 @@ pub(crate) fn upload_room_media(
     }
 }
 
+/// Upload a completion still (axum servers only; protocol v17). The server
+/// accepts it only while the room is finished, then `ReleaseToStill` adopts it.
+pub(crate) fn upload_room_still(
+    ws_url: &str,
+    sha256: &str,
+    extension: &str,
+    token: &str,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let url = http_media_url(
+        ws_url,
+        &format!("/media/{sha256}?token={token}&still={extension}"),
+    )?;
+    let response = media_upload_client(TransferTimeouts::DEFAULT).and_then(|client| {
+        client
+            .put(url)
+            .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+            .body(bytes)
+            .send()
+            .map_err(|error| format!("Could not upload the completion still: {error}"))
+    })?;
+    match response.status() {
+        reqwest::StatusCode::CREATED => Ok(()),
+        status => Err(format!(
+            "room server rejected the completion still (HTTP {status})"
+        )),
+    }
+}
+
 pub(crate) fn download_room_media(
     ws_url: &str,
     invite_code: &str,

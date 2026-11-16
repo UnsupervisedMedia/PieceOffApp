@@ -67,10 +67,13 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   `seed_sha256`, `still_sha256`, `owner` and `source`; a finished video can be
   released to a stored completion still (the video file is deleted unless
   another room queues it, freeing quota), and only the original video (hash ==
-  `seed_sha256`) can be restored. See ARCHITECTURE.md. **Still to do:** the
-  desktop app capturing and uploading the still on completion and offering
-  "bring back the video" (needs the upload token passed to the UI and an
-  upload thread; the last frame is in `last_video_frame`); the hosted Worker
+  `seed_sha256`) can be restored. See ARCHITECTURE.md. The desktop app now does both (axum servers):
+  the host's Videos window offers "Keep a picture, free the video" once the
+  puzzle is finished (it encodes the last decoded frame as a JPEG under the
+  1 MiB cap, uploads it, then sends `ReleaseToStill`) and "Bring back the
+  video" on a released item (it checks the chosen file hashes to
+  `seed_sha256`, sends `RestoreVideo`, and the normal upload resumes).
+  **Still to do:** the hosted Worker
   releasing videos in R2 with the registry budget (uploads are off at launch
   and built-in loops are not videos, so nothing needs it yet); the
   `completed_cleanup_minutes` timer that releases automatically. Ephemeral

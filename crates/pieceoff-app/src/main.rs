@@ -75,6 +75,7 @@ mod probe;
 mod queue_ui;
 mod server_addr;
 mod sfx;
+mod still;
 mod storage;
 mod timelapse;
 mod transport;
@@ -174,6 +175,12 @@ struct PieceOffApp {
     downloads_in_flight: HashSet<String>,
     /// A file being probed and hashed for `QueueAdd` on a worker thread.
     queue_probe_rx: Option<mpsc::Receiver<(PathBuf, Result<MediaMetadata, String>)>>,
+    /// The host's upload token, kept for completion stills (protocol v17).
+    host_upload_token: Option<String>,
+    /// A completion still being captured and uploaded on a worker thread.
+    still_rx: Option<mpsc::Receiver<Result<ClientMessage, String>>>,
+    /// The original video being checked before `RestoreVideo`.
+    restore_rx: Option<mpsc::Receiver<still::RestoreProbe>>,
     /// Set while the decoder is parked at the end of the item, waiting for
     /// the server to advance the queue.
     holding_at_end: bool,
@@ -435,6 +442,9 @@ impl Default for PieceOffApp {
             item_download_rx,
             downloads_in_flight: HashSet::new(),
             queue_probe_rx: None,
+            host_upload_token: None,
+            still_rx: None,
+            restore_rx: None,
             holding_at_end: false,
             snapshot: None,
             pending_snapshot: None,
