@@ -21,6 +21,13 @@
 //   never taps). Pointers beyond the second, and touch mixed with mouse, are ignored.
 // - pointercancel: drag -> dragCancel, rubber-band -> rubberBand(null) with no
 //   selectRect, anything else just stops.
+// - Select mode (the on-screen toggle, `setSelectMode`): a touch/pen tap on a piece
+//   toggles it, and touch/pen on empty table rubber-bands (additively) instead of
+//   panning. Mouse behaviour does not change.
+// - A pointerdown for an id the machine already tracks (its up was lost) cancels
+//   the old gesture like `reset()` and starts over. `reset()` (and `destroy()`)
+//   clear the long-press timer and every pointer, cancelling a live drag
+//   (dragCancel) or rubber-band (rubberBand(null)) through the sink.
 
 export type PointerKind = 'mouse' | 'touch' | 'pen';
 
@@ -134,6 +141,9 @@ interface Primary {
   startY: number;
   lastX: number;
   lastY: number;
+  /** Where the pointer is now, also inside the slop (lastX/lastY only follow emitted moves). */
+  curX: number;
+  curY: number;
   startTime: number;
   /** What crossing the slop turns this press into. */
   kind: Kind;
@@ -142,6 +152,8 @@ interface Primary {
   target: number | null;
   /** ctrl/meta at the press. */
   modifier: boolean;
+  /** A rubber-band from this press adds to the selection. */
+  additive: boolean;
   /** Can this press end as a tap/click (not a pinch leftover, no long-press fired)? */
   tappable: boolean;
   anchor: [number, number];
@@ -172,6 +184,8 @@ export class GestureMachine {
   private longPress: unknown = null;
   private lastTap: { time: number; x: number; y: number } | null = null;
   private space = false;
+  private selectMode = false;
+  private destroyed = false;
 
   constructor(
     private readonly sink: GestureSink,
@@ -180,6 +194,35 @@ export class GestureMachine {
     this.longPressMs = opts?.longPressMs ?? LONG_PRESS_MS;
     this.doubleTapMs = opts?.doubleTapMs ?? DOUBLE_TAP_MS;
     this.timers = opts?.timers ?? realTimers;
+  }
+
+  /** Select mode: touch/pen taps on pieces toggle them, touch/pen on empty table rubber-bands. */
+  setSelectMode(on: boolean): void {
+    this.selectMode = on;
+  }
+
+  get selecting(): boolean {
+    return this.selectMode;
+  }
+
+  /** Forget every pointer and timer; a live drag is cancelled and a live
+   *  rubber-band removed through the sink. Safe to call at any time. */
+  reset(): void {
+    this.clearLongPress();
+    const p = this.primary;
+    this.primary = null;
+    this.pinchState = null;
+    this.ignored.clear();
+    this.lastTap = null;
+    this.space = false;
+    if (p?.live && p.kind === 'drag') this.sink.dragCancel();
+    else if (p?.live && p.kind === 'rubber') this.sink.rubberBand(null);
+  }
+
+  /** `reset()`, then ignore all further input. */
+  destroy(): void {
+    this.reset();
+    this.destroyed = true;
   }
 
   /** Space held: a left drag pans (desktop's space-drag). */
@@ -193,8 +236,11 @@ export class GestureMachine {
   }
 
   pointerDown(s: PointerSample): void {
+    if (this.destroyed) return;
     const id = s.pointerId;
-    if (this.ignored.has(id) || this.primary?.id === id || this.pinchState?.pos.has(id)) return;
+    // A down for a pointer we still track means its up/cancel was lost.
+    this.ignored.delete(id);
+    if (this.primary?.id === id || this.pinchState?.pos.has(id)) this.reset();
     if (!this.primary && !this.pinchState) {
       this.begin(s);
       return;
@@ -209,8 +255,9 @@ export class GestureMachine {
     if (p.live && p.kind === 'drag') this.sink.dragCancel();
     this.primary = null;
     this.lastTap = null;
+    // Seed from where the first finger is now (it may have moved inside the slop).
     const pos = new Map<number, [number, number]>([
-      [p.id, [p.lastX, p.lastY]],
+      [p.id, [p.curX, p.curY]],
       [id, [s.x, s.y]],
     ]);
     const types = new Map<number, PointerKind>([
@@ -219,12 +266,13 @@ export class GestureMachine {
     ]);
     this.pinchState = {
       ids: [p.id, id], pos, types,
-      cx: (p.lastX + s.x) / 2, cy: (p.lastY + s.y) / 2,
-      dist: Math.hypot(p.lastX - s.x, p.lastY - s.y),
+      cx: (p.curX + s.x) / 2, cy: (p.curY + s.y) / 2,
+      dist: Math.hypot(p.curX - s.x, p.curY - s.y),
     };
   }
 
   pointerMove(s: PointerSample): void {
+    if (this.destroyed) return;
     const id = s.pointerId;
     const pin = this.pinchState;
     if (pin?.pos.has(id)) {
@@ -242,6 +290,8 @@ export class GestureMachine {
     }
     const p = this.primary;
     if (!p || p.id !== id) return;
+    p.curX = s.x;
+    p.curY = s.y;
     if (!p.live) {
       if (Math.hypot(s.x - p.startX, s.y - p.startY) <= slop(p.type)) return;
       this.clearLongPress();
@@ -276,6 +326,7 @@ export class GestureMachine {
     const type = s.pointerType;
     const modifier = s.ctrl || s.meta;
     const left = (s.buttons & 1) !== 0 || s.buttons === 0;
+    const touchSelect = this.selectMode && type !== 'mouse';
     let kind: Kind;
     let target: number | null = null;
     if (type === 'mouse' && (!left || this.space)) {
@@ -283,12 +334,14 @@ export class GestureMachine {
     } else {
       target = this.sink.hit(s.x, s.y, tolerance(type));
       if (target !== null) kind = 'drag';
+      else if (touchSelect) kind = 'rubber';
       else if (type !== 'mouse' || (s.shift && !modifier)) kind = 'pan';
       else kind = 'rubber';
     }
     this.primary = {
-      id: s.pointerId, type, startX: s.x, startY: s.y, lastX: s.x, lastY: s.y, startTime: s.time,
-      kind, live: false, target, modifier, tappable: left && !this.space, anchor: this.sink.toTable(s.x, s.y), rect: null,
+      id: s.pointerId, type, startX: s.x, startY: s.y, lastX: s.x, lastY: s.y, curX: s.x, curY: s.y, startTime: s.time,
+      kind, live: false, target, modifier, additive: modifier || touchSelect, tappable: left && !this.space,
+      anchor: this.sink.toTable(s.x, s.y), rect: null,
     };
     if (target !== null && type !== 'mouse') {
       const p = this.primary;
@@ -303,6 +356,7 @@ export class GestureMachine {
   }
 
   private end(s: PointerSample, cancelled: boolean): void {
+    if (this.destroyed) return;
     const id = s.pointerId;
     if (this.ignored.delete(id)) return;
     const pin = this.pinchState;
@@ -312,8 +366,8 @@ export class GestureMachine {
       const [x, y] = pin.pos.get(other)!;
       this.pinchState = null;
       this.primary = {
-        id: other, type: pin.types.get(other)!, startX: x, startY: y, lastX: x, lastY: y, startTime: s.time,
-        kind: 'pan', live: true, target: null, modifier: false, tappable: false, anchor: [0, 0], rect: null,
+        id: other, type: pin.types.get(other)!, startX: x, startY: y, lastX: x, lastY: y, curX: x, curY: y, startTime: s.time,
+        kind: 'pan', live: true, target: null, modifier: false, additive: false, tappable: false, anchor: [0, 0], rect: null,
       };
       return;
     }
@@ -331,7 +385,7 @@ export class GestureMachine {
       if (p.kind === 'drag') this.sink.dragEnd();
       else if (p.kind === 'rubber') {
         this.sink.rubberBand(null);
-        if (p.rect) this.sink.selectRect(p.rect, p.modifier);
+        if (p.rect) this.sink.selectRect(p.rect, p.additive);
       }
       this.lastTap = null;
       return;
@@ -340,7 +394,7 @@ export class GestureMachine {
     // A click/tap.
     if (p.target !== null) {
       this.lastTap = null;
-      if (p.modifier && p.type !== 'touch') this.sink.toggleSelect(p.target);
+      if ((p.modifier && p.type !== 'touch') || (this.selectMode && p.type !== 'mouse')) this.sink.toggleSelect(p.target);
       return;
     }
     if (p.modifier || s.time - p.startTime >= this.longPressMs) {

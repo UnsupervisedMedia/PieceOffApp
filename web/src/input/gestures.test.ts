@@ -419,4 +419,91 @@ describe('GestureMachine', () => {
     expect(wheelFactor(1e6, 0, false)).toBe(0.5);
     expect(wheelFactor(Number.NaN, 0, false)).toBe(1);
   });
+
+  it('select_mode_tap_on_piece_toggles_and_touch_on_empty_rubber_bands', () => {
+    const r = recorder();
+    const t = fakeTimers();
+    const m = new GestureMachine(r.sink, { timers: t });
+    m.setSelectMode(true);
+    const s = (id: number, x: number, y: number, kind: Kind = 'touch', buttons = 1): PointerSample => ({
+      pointerId: id, pointerType: kind, x, y, buttons, ctrl: false, shift: false, meta: false, time: t.now,
+    });
+    m.pointerDown(s(1, 50, 50));
+    m.pointerUp(s(1, 50, 50, 'touch', 0));
+    expect(r.calls).toEqual([['toggleSelect', 7]]);
+    r.calls.length = 0;
+    m.pointerDown(s(2, 200, 100));
+    m.pointerMove(s(2, 240, 140));
+    m.pointerUp(s(2, 240, 140, 'touch', 0));
+    expect(r.calls).toEqual([
+      ['rubberBand', { x: 100, y: 50, w: 20, h: 20 }],
+      ['rubberBand', null],
+      ['selectRect', { x: 100, y: 50, w: 20, h: 20 }, true],
+    ]);
+    // Mouse is unchanged: a plain click on a piece does not toggle.
+    r.calls.length = 0;
+    m.pointerDown(s(3, 50, 50, 'mouse'));
+    m.pointerUp(s(3, 50, 50, 'mouse', 0));
+    expect(r.calls).toEqual([]);
+    // Off again: touch on empty pans.
+    m.setSelectMode(false);
+    m.pointerDown(s(4, 200, 100));
+    m.pointerMove(s(4, 220, 100));
+    expect(r.calls).toEqual([['pan', 20, 0]]);
+  });
+
+  it('reset_cancels_a_live_drag_and_clears_timers', () => {
+    const r = recorder();
+    const t = fakeTimers();
+    const m = new GestureMachine(r.sink, { timers: t });
+    const s = (x: number, buttons = 1): PointerSample => ({ pointerId: 1, pointerType: 'touch', x, y: 50, buttons, ctrl: false, shift: false, meta: false, time: t.now });
+    m.pointerDown(s(50));
+    m.pointerMove(s(70));
+    m.reset();
+    expect(names(r.calls)).toEqual(['dragStart', 'dragMove', 'dragCancel']);
+    // The old pointer's later events do nothing; the long-press timer is gone.
+    m.pointerMove(s(90));
+    m.pointerUp(s(90, 0));
+    t.advance(1000);
+    expect(names(r.calls)).toEqual(['dragStart', 'dragMove', 'dragCancel']);
+    // A pending long-press is cleared too.
+    r.calls.length = 0;
+    m.pointerDown(s(50));
+    m.destroy();
+    t.advance(1000);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('reset_removes_a_live_rubber_band_without_selecting', () => {
+    const r = recorder();
+    const m = new GestureMachine(r.sink, { timers: fakeTimers() });
+    const s = (x: number): PointerSample => ({ pointerId: 1, pointerType: 'mouse', x, y: 50, buttons: 1, ctrl: false, shift: false, meta: false, time: 0 });
+    m.pointerDown(s(200));
+    m.pointerMove(s(260));
+    m.reset();
+    expect(names(r.calls)).toEqual(['rubberBand', 'rubberBand']);
+    expect(r.calls[1]).toEqual(['rubberBand', null]);
+  });
+
+  it('pinch_seeds_from_the_current_finger_position_before_slop', () => {
+    const r = recorder();
+    const m = new GestureMachine(r.sink, { timers: fakeTimers() });
+    const s = (id: number, x: number, y: number): PointerSample => ({ pointerId: id, pointerType: 'touch', x, y, buttons: 1, ctrl: false, shift: false, meta: false, time: 0 });
+    m.pointerDown(s(1, 200, 100));
+    m.pointerMove(s(1, 205, 100)); // within slop: nothing emitted, but the finger is at 205
+    m.pointerDown(s(2, 305, 100));
+    m.pointerMove(s(1, 205, 100)); // finger 1 has not moved since: no pan, no pinch
+    expect(r.calls).toEqual([]);
+  });
+
+  it('duplicate_pointerdown_cancels_the_old_gesture_and_begins_anew', () => {
+    const r = recorder();
+    const m = new GestureMachine(r.sink, { timers: fakeTimers() });
+    const s = (x: number): PointerSample => ({ pointerId: 1, pointerType: 'touch', x, y: 50, buttons: 1, ctrl: false, shift: false, meta: false, time: 0 });
+    m.pointerDown(s(50));
+    m.pointerMove(s(70));
+    m.pointerDown(s(200)); // the up was lost
+    m.pointerMove(s(220));
+    expect(r.calls).toEqual([['dragStart', 7, 25, 25], ['dragMove', 35, 25], ['dragCancel'], ['pan', 20, 0]]);
+  });
 });

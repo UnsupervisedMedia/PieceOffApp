@@ -4,7 +4,8 @@
 import init, { builtin_media_json, piece_outlines, protocol_version } from '../wasm/pieceoff_web_wasm.js';
 import { builtinAssets } from '../src/media/builtin';
 import type { CutStyle, RoomSnapshot } from '../src/protocol';
-import { buildMesh, strideFor, type Mesh } from '../src/gl/mesh';
+import { buildMesh, type Mesh } from '../src/gl/mesh';
+import { LodPolicy } from '../src/gl/lod';
 import { BoardRenderer, type FrameInfo } from '../src/gl/renderer';
 import { FLAG_HELD, FLAG_PLACED, FLAG_SELECTED } from '../src/gl/shaders';
 import { devSnapshot, tableBounds } from './fixture';
@@ -104,10 +105,11 @@ async function main(): Promise<void> {
   fit();
 
   let mesh: Mesh | null = null;
-  const wantedSamples = () => CAP ?? (Math.max(cw, ch) * cam.scale * 4) / 2.2;
-  const rebuild = () => {
+  const lod = new LodPolicy({ samples0, cellW: cw, cellH: ch, cap: CAP, rebuild: (max) => rebuild(max) });
+  const rebuild = (maxSamples = lod.samplesAt(cam.scale)) => {
     const t0 = performance.now();
-    mesh = buildMesh(outline, snap, { maxSamples: wantedSamples() });
+    mesh = buildMesh(outline, snap, { maxSamples });
+    lod.built(mesh.strides[0]);
     stats.meshBuildMs = performance.now() - t0;
     stats.stride = mesh.strides[0];
     stats.vertices = mesh.pieceOfVertex.length;
@@ -116,13 +118,7 @@ async function main(): Promise<void> {
     for (let i = 0; i < n; i++) renderer.setPiece(snap.pieces[i].id, px[i], py[i], rot[i], flags[i]);
   };
   rebuild();
-  let lodTimer = 0;
-  const maybeRebuild = () => {
-    if (CAP !== null || !mesh) return;
-    if (strideFor(samples0, wantedSamples()) === mesh.strides[0]) return;
-    clearTimeout(lodTimer);
-    lodTimer = window.setTimeout(rebuild, 150);
-  };
+  const maybeRebuild = () => lod.viewChanged(cam.scale);
 
   renderer.onContextLost((lost) => {
     lostMsg.hidden = !lost;

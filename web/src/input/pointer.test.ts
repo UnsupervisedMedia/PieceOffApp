@@ -12,6 +12,7 @@ function fakeMachine() {
     pointerCancel: (s) => void calls.push(['cancel', s]),
     wheel: (s) => void calls.push(['wheel', s]),
     setSpaceHeld: (b) => void calls.push(['space', b]),
+    reset: () => void calls.push(['reset', false]),
   };
   return { m, calls };
 }
@@ -98,6 +99,16 @@ describe('attachPointerEvents', () => {
     detach();
     el.dispatchEvent(pe('pointerdown', { pointerId: 1, pointerType: 'mouse', clientX: 1, clientY: 1, buttons: 1 }));
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true }));
-    expect(calls).toEqual([]);
+    expect(calls.map((c) => c[0])).toEqual(['reset']); // only detach's own reset
+  });
+
+  it('detach_resets_the_machine', () => {
+    const el = canvasAt(0, 0);
+    const { m, calls } = fakeMachine();
+    const detach = attachPointerEvents(el, m, new Camera(300, 200));
+    detach();
+    expect(calls.map((c) => c[0])).toEqual(['reset']);
+    el.dispatchEvent(pe('pointerdown', { pointerId: 1, pointerType: 'mouse', clientX: 1, clientY: 1, buttons: 1 }));
+    expect(calls.map((c) => c[0])).toEqual(['reset']);
   });
 });

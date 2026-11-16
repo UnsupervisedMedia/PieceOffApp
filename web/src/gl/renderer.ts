@@ -1,5 +1,6 @@
 import type { RoomSnapshot } from '../protocol';
 import { Camera } from './camera';
+import { defaultMatchMedia, watchDpr, type MatchMedia } from './dpr';
 import type { Mesh } from './mesh';
 import {
   FLAG_BACKDROP,
@@ -22,6 +23,19 @@ export interface FrameInfo {
   cpuMs: number;
   /** A new video frame was uploaded this frame. */
   videoUploaded: boolean;
+}
+
+export interface RendererOptions {
+  /** Share a camera (the board's input uses the same one). */
+  camera?: Camera;
+  /** Clear to transparent so a layer under the canvas shows the table. */
+  transparent?: boolean;
+  /** Context factory (tests inject a fake; null = no WebGL2). */
+  getContext?: (canvas: HTMLCanvasElement, attrs: WebGLContextAttributes) => WebGL2RenderingContext | null;
+  raf?: (cb: FrameRequestCallback) => number;
+  caf?: (handle: number) => void;
+  /** For device-pixel-ratio changes; null turns watching off. */
+  matchMedia?: MatchMedia | null;
 }
 
 /** Device pixel ratio cap. */
@@ -51,6 +65,7 @@ type VideoWithRvfc = HTMLVideoElement & {
 interface Gl {
   gl: WebGL2RenderingContext;
   program: WebGLProgram;
+  shaders: WebGLShader[];
   vao: WebGLVertexArrayObject;
   buffers: WebGLBuffer[];
   fillEbo: WebGLBuffer;
@@ -66,7 +81,14 @@ interface Gl {
 
 /** WebGL2 board: one program, one batched mesh for every piece, per-piece state
  *  in a float texture (a drag re-uploads two texels). Draws on demand: after a
- *  state/camera change or when the video delivers a new frame. */
+ *  state/camera change or when the video delivers a new frame.
+ *
+ *  Robustness: no WebGL2 at construction is treated like a context loss (poster
+ *  shown, `onContextLost(true)`); a failed restore (context or shader link)
+ *  stays lost. The CPU copy of every piece's state survives both, so input and
+ *  room state keep working and a restore redraws everything. A video frame that
+ *  cannot be uploaded (tainted, decoder trouble) keeps the poster and stops
+ *  uploading video for good. */
 export class BoardRenderer {
   readonly camera: Camera;
   /** Called after each drawn frame (stats). */
@@ -87,6 +109,17 @@ export class BoardRenderer {
   private dirty = new Set<number>();
   private allDirty = true;
   private rafPending = false;
+  private frameHandle = 0;
+  private videoBroken = false;
+  private crop: [number, number, number, number] = [0, 0, 1, 1];
+  private cropKey = '';
+  private readonly info: FrameInfo = { time: 0, cpuMs: 0, videoUploaded: false };
+  private readonly raf: (cb: FrameRequestCallback) => number;
+  private readonly caf: (handle: number) => void;
+  private readonly transparent: boolean;
+  private readonly getContext: NonNullable<RendererOptions['getContext']>;
+  private unwatchDpr: () => void = () => {};
+  private readonly videoEvents: [string, () => void][] = [];
   private videoDirty = false;
   private posterDirty = false;
   private videoFrames = 0;
@@ -100,19 +133,27 @@ export class BoardRenderer {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly media: BoardMedia,
+    opts: RendererOptions = {},
   ) {
-    this.camera = new Camera(canvas.clientWidth || 1, canvas.clientHeight || 1);
+    this.camera = opts.camera ?? new Camera(canvas.clientWidth || 1, canvas.clientHeight || 1);
+    this.raf = opts.raf ?? ((cb) => requestAnimationFrame(cb));
+    this.caf = opts.caf ?? ((h) => cancelAnimationFrame(h));
+    this.transparent = opts.transparent ?? false;
+    this.getContext =
+      opts.getContext ?? ((c, attrs) => c.getContext('webgl2', attrs) as WebGL2RenderingContext | null);
     canvas.addEventListener('webglcontextlost', this.handleLost, false);
     canvas.addEventListener('webglcontextrestored', this.handleRestored, false);
     this.g = this.createGl();
+    if (!this.g) this.markLost(); // no WebGL2: the same path as a lost context
     this.resize();
     if (typeof ResizeObserver !== 'undefined') {
       this.observer = new ResizeObserver(() => this.resize());
       this.observer.observe(canvas);
     }
+    this.unwatchDpr = watchDpr(opts.matchMedia === undefined ? defaultMatchMedia() : opts.matchMedia, () => this.resize());
     const poster = media.poster;
     if (poster.complete && poster.naturalWidth > 0) this.posterDirty = true;
-    else poster.addEventListener('load', () => ((this.posterDirty = true), this.requestRender()));
+    else poster.addEventListener('load', this.onPosterLoad);
     this.watchVideo();
   }
 
@@ -214,12 +255,14 @@ export class BoardRenderer {
   requestRender(): void {
     if (this.rafPending || this.disposed) return;
     this.rafPending = true;
-    requestAnimationFrame(this.frame);
+    this.frameHandle = this.raf(this.frame);
   }
 
-  /** `cb(true)` on context loss (poster shown, board state kept), `cb(false)` once restored. */
+  /** `cb(true)` on context loss (poster shown, board state kept), `cb(false)` once restored.
+   *  Called at once with `true` if the context is already lost (or never existed). */
   onContextLost(cb: (lost: boolean) => void): void {
     this.lostCbs.push(cb);
+    if (this.lost) cb(true);
   }
 
   /** Re-read the canvas size (CSS px) and DPR. */
@@ -235,14 +278,25 @@ export class BoardRenderer {
     this.requestRender();
   }
 
+  /** Stop everything: frames, observers, listeners; GL objects are deleted. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    if (this.rafPending) this.caf(this.frameHandle);
+    this.rafPending = false;
     this.observer?.disconnect();
-    const v = this.media.video as VideoWithRvfc;
-    if (this.rvfcHandle && v.cancelVideoFrameCallback) v.cancelVideoFrameCallback(this.rvfcHandle);
-    if (this.pollHandle) cancelAnimationFrame(this.pollHandle);
+    this.observer = null;
+    this.unwatchDpr();
+    this.stopVideoWatch();
+    for (const [type, fn] of this.videoEvents) this.media.video.removeEventListener(type, fn);
+    this.videoEvents.length = 0;
+    this.media.poster.removeEventListener('load', this.onPosterLoad);
     this.canvas.removeEventListener('webglcontextlost', this.handleLost);
     this.canvas.removeEventListener('webglcontextrestored', this.handleRestored);
+    if (this.g) deleteGl(this.g);
+    this.g = null;
+    this.lostCbs.length = 0;
+    this.onFrame = null;
   }
 
   // ---- internals -------------------------------------------------------------
@@ -268,43 +322,94 @@ export class BoardRenderer {
     this.allDirty = true;
   }
 
+  private readonly onPosterLoad = (): void => {
+    this.posterDirty = true;
+    this.requestRender();
+  };
+
   private watchVideo(): void {
     const v = this.media.video as VideoWithRvfc;
+    const on = (type: string, fn: () => void) => {
+      v.addEventListener(type, fn);
+      this.videoEvents.push([type, fn]);
+    };
+    // A seek or the first decoded frame while paused still changes the picture.
+    const once = () => {
+      if (this.disposed || this.videoBroken) return;
+      this.videoDirty = true;
+      this.requestRender();
+    };
+    on('seeked', once);
+    on('loadeddata', once);
     if (typeof v.requestVideoFrameCallback === 'function') {
+      // rVFC only fires for presented frames, so a paused video costs nothing.
       const onFrame = () => {
-        if (this.disposed) return;
+        if (this.disposed || this.videoBroken) return;
         this.videoDirty = true;
         this.requestRender();
         this.rvfcHandle = v.requestVideoFrameCallback!(onFrame);
       };
       this.rvfcHandle = v.requestVideoFrameCallback(onFrame);
-    } else {
-      // Fallback: poll for a new decoded frame once per display frame. Cheap; a
-      // paused/stalled video just stops changing currentTime.
-      const poll = () => {
-        if (this.disposed) return;
-        if (v.readyState >= 2 && v.currentTime !== this.lastVideoTime) {
-          this.lastVideoTime = v.currentTime;
-          this.videoDirty = true;
-          this.requestRender();
-        }
-        this.pollHandle = requestAnimationFrame(poll);
-      };
-      this.pollHandle = requestAnimationFrame(poll);
+      return;
     }
+    // Fallback: poll for a new decoded frame once per display frame while the
+    // video plays; paused or ended stops the poll, `playing` restarts it.
+    on('playing', () => this.startPoll());
+    on('pause', () => this.stopPoll());
+    on('ended', () => this.stopPoll());
+    if (!v.paused) this.startPoll();
+  }
+
+  private startPoll(): void {
+    if (this.pollHandle || this.disposed || this.videoBroken) return;
+    const v = this.media.video;
+    const poll = () => {
+      this.pollHandle = 0;
+      if (this.disposed || this.videoBroken) return;
+      if (v.readyState >= 2 && v.currentTime !== this.lastVideoTime) {
+        this.lastVideoTime = v.currentTime;
+        this.videoDirty = true;
+        this.requestRender();
+      }
+      this.pollHandle = this.raf(poll);
+    };
+    this.pollHandle = this.raf(poll);
+  }
+
+  private stopPoll(): void {
+    if (this.pollHandle) this.caf(this.pollHandle);
+    this.pollHandle = 0;
+  }
+
+  private stopVideoWatch(): void {
+    const v = this.media.video as VideoWithRvfc;
+    if (this.rvfcHandle && v.cancelVideoFrameCallback) v.cancelVideoFrameCallback(this.rvfcHandle);
+    this.rvfcHandle = 0;
+    this.stopPoll();
+  }
+
+  /** Board/media crop, recomputed only when either size changes. */
+  private cropFor(bw: number, bh: number, mw: number, mh: number): [number, number, number, number] {
+    const key = `${bw}x${bh}/${mw}x${mh}`;
+    if (key !== this.cropKey) {
+      this.crop = coverUv(bw, bh, mw, mh);
+      this.cropKey = key;
+    }
+    return this.crop;
   }
 
   private readonly frame = (time: number): void => {
     this.rafPending = false;
     const g = this.g;
-    if (!g || this.lost || !this.mesh || !this.snapshot) return;
+    if (!g || this.lost || this.disposed || !this.mesh || !this.snapshot) return;
     const t0 = performance.now();
     const gl = g.gl;
     const uploaded = this.uploadMedia(g);
     this.uploadState(g);
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0.16, 0.17, 0.2, 1);
+    if (this.transparent) gl.clearColor(0, 0, 0, 0);
+    else gl.clearColor(0.16, 0.17, 0.2, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(g.program);
@@ -316,8 +421,8 @@ export class BoardRenderer {
     const cw = s.width / s.columns;
     const ch = s.height / s.rows;
     gl.uniform2f(g.u.cell, cw, ch);
-    const [u0, v0, u1, v1] = coverUv(s.width, s.height, g.mediaW, g.mediaH);
-    gl.uniform4f(g.u.crop, u0, v0, u1, v1);
+    const crop = this.cropFor(s.width, s.height, g.mediaW, g.mediaH);
+    gl.uniform4f(g.u.crop, crop[0], crop[1], crop[2], crop[3]);
     gl.uniform1i(g.u.hasMedia, g.mediaW > 0 ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, g.state);
@@ -335,13 +440,21 @@ export class BoardRenderer {
     if (Math.min(cw, ch) * cam.scale >= MIN_OUTLINE_PX) {
       gl.depthMask(false);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // Keep destination alpha opaque over pieces (a transparent canvas would
+      // otherwise let the table show through the outlines).
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.uniform1i(g.u.pass, 1);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.lineEbo);
       gl.drawElements(gl.LINES, g.lineCount, gl.UNSIGNED_INT, 0);
     }
     gl.bindVertexArray(null);
-    this.onFrame?.({ time, cpuMs: performance.now() - t0, videoUploaded: uploaded });
+    if (this.onFrame) {
+      const f = this.info;
+      f.time = time;
+      f.cpuMs = performance.now() - t0;
+      f.videoUploaded = uploaded;
+      this.onFrame(f);
+    }
   };
 
   private uploadMedia(g: Gl): boolean {
@@ -353,7 +466,7 @@ export class BoardRenderer {
     let isVideo = false;
     // HAVE_CURRENT_DATA: a decoded frame exists. Otherwise keep what is in the
     // texture (last frame or poster).
-    if (this.videoDirty && v.readyState >= 2 && v.videoWidth > 0) {
+    if (this.videoDirty && !this.videoBroken && v.readyState >= 2 && v.videoWidth > 0) {
       source = v;
       w = v.videoWidth;
       h = v.videoHeight;
@@ -370,12 +483,27 @@ export class BoardRenderer {
     gl.bindTexture(gl.TEXTURE_2D, g.media);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    if (w === g.mediaW && h === g.mediaH) {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-      g.mediaW = w;
-      g.mediaH = h;
+    try {
+      if (w === g.mediaW && h === g.mediaH) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        g.mediaW = w;
+        g.mediaH = h;
+      }
+    } catch {
+      if (isVideo) {
+        // Keep the still: put the poster back and never try the video again.
+        this.videoBroken = true;
+        this.stopVideoWatch();
+        g.mediaW = 0;
+        g.mediaH = 0;
+        this.posterDirty = true;
+        this.requestRender();
+      } else {
+        g.mediaW = 0; // no picture at all: pieces draw grey
+      }
+      return false;
     }
     if (isVideo) this.videoFrames++;
     return isVideo;
@@ -399,17 +527,36 @@ export class BoardRenderer {
     this.allDirty = false;
   }
 
+  /** A ready context with program and buffers, or null (no WebGL2, lost, or
+   *  the shaders would not build); never throws. */
   private createGl(): Gl | null {
-    const gl = this.canvas.getContext('webgl2', {
-      antialias: true,
-      alpha: false,
-      depth: true,
-      premultipliedAlpha: false,
-      preserveDrawingBuffer: false,
-      powerPreference: 'default',
-    });
+    let gl: WebGL2RenderingContext | null = null;
+    try {
+      gl = this.getContext(this.canvas, {
+        antialias: true,
+        alpha: this.transparent,
+        depth: true,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: false,
+        powerPreference: 'default',
+      });
+    } catch {
+      return null;
+    }
     if (!gl || gl.isContextLost()) return null;
-    const program = link(gl, VERT, FRAG);
+    const shaders: WebGLShader[] = [];
+    let program: WebGLProgram | null = null;
+    try {
+      program = link(gl, VERT, FRAG, shaders);
+      return this.setupGl(gl, program, shaders);
+    } catch {
+      for (const sh of shaders) gl.deleteShader(sh);
+      if (program) gl.deleteProgram(program);
+      return null;
+    }
+  }
+
+  private setupGl(gl: WebGL2RenderingContext, program: WebGLProgram, shaders: WebGLShader[]): Gl {
     const u: Gl['u'] = {};
     for (const name of ['state', 'view', 'viewSize', 'cell', 'crop', 'pass', 'media', 'hasMedia']) {
       u[name] = gl.getUniformLocation(program, 'u_' + name);
@@ -430,6 +577,7 @@ export class BoardRenderer {
     const g: Gl = {
       gl,
       program,
+      shaders,
       vao: gl.createVertexArray()!,
       buffers: [gl.createBuffer()!, gl.createBuffer()!, gl.createBuffer()!],
       fillEbo: gl.createBuffer()!,
@@ -495,17 +643,24 @@ export class BoardRenderer {
     this.dirty.clear();
   }
 
-  private readonly handleLost = (e: Event): void => {
-    // Without preventDefault the browser never fires `webglcontextrestored`.
-    e.preventDefault();
+  private markLost(): void {
     this.lost = true;
     this.g = null;
     if (this.media.poster.isConnected) this.media.poster.hidden = false;
     for (const cb of this.lostCbs) cb(true);
+  }
+
+  private readonly handleLost = (e: Event): void => {
+    // Without preventDefault the browser never fires `webglcontextrestored`.
+    e.preventDefault();
+    if (this.disposed) return;
+    this.rafPending = false;
+    this.markLost();
   };
 
   private readonly handleRestored = (): void => {
-    this.g = this.createGl();
+    if (this.disposed) return;
+    this.g = this.createGl(); // never throws; null keeps us on the poster
     if (!this.g) return;
     this.lost = false;
     // Media texture is empty again: poster now, next video frame when it comes.
@@ -517,13 +672,33 @@ export class BoardRenderer {
   };
 }
 
-function link(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
-  const p = gl.createProgram()!;
+function deleteGl(g: Gl): void {
+  const gl = g.gl;
+  try {
+    gl.deleteProgram(g.program);
+    for (const sh of g.shaders) gl.deleteShader(sh);
+    gl.deleteVertexArray(g.vao);
+    for (const b of g.buffers) gl.deleteBuffer(b);
+    gl.deleteBuffer(g.fillEbo);
+    gl.deleteBuffer(g.lineEbo);
+    gl.deleteTexture(g.state);
+    gl.deleteTexture(g.media);
+  } catch {
+    // a lost context ignores deletes anyway
+  }
+}
+
+/** Compile and link; the shaders created are pushed to `made` (also on failure). */
+function link(gl: WebGL2RenderingContext, vs: string, fs: string, made: WebGLShader[]): WebGLProgram {
+  const p = gl.createProgram();
+  if (!p) throw new Error('createProgram failed');
   for (const [type, src] of [
     [gl.VERTEX_SHADER, vs],
     [gl.FRAGMENT_SHADER, fs],
   ] as const) {
-    const sh = gl.createShader(type)!;
+    const sh = gl.createShader(type);
+    if (!sh) throw new Error('createShader failed');
+    made.push(sh);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS) && !gl.isContextLost()) {

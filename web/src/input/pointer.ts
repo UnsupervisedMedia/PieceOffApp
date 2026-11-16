@@ -12,6 +12,8 @@ export interface PointerTarget {
   pointerCancel(s: PointerSample): void;
   wheel(w: WheelSample): void;
   setSpaceHeld(held: boolean): void;
+  /** Forget every pointer (cancelling a live drag); called on detach. */
+  reset(): void;
 }
 
 const kind = (t: string): PointerKind => (t === 'touch' || t === 'pen' ? t : 'mouse');
@@ -22,7 +24,8 @@ const typing = (t: EventTarget | null): boolean =>
 /** Wire `el` to `machine`. `camera` supplies the page size for page-mode wheel
  *  deltas. Sets `touch-action: none` (and kills overscroll/selection/callouts)
  *  so the browser does not pan, zoom, back-swipe or pull-to-refresh under the
- *  game. Returns a detach function. */
+ *  game. Returns a detach function, which also `reset()`s the machine (a live drag
+ *  is cancelled, timers cleared). */
 export function attachPointerEvents(el: HTMLElement, machine: PointerTarget, camera: Camera): () => void {
   const st = el.style as CSSStyleDeclaration & { webkitUserSelect?: string; webkitTouchCallout?: string };
   st.touchAction = 'none';
@@ -103,5 +106,7 @@ export function attachPointerEvents(el: HTMLElement, machine: PointerTarget, cam
   for (const [t, n, f, o] of on) t.addEventListener(n, f, o);
   return () => {
     for (const [t, n, f] of on) t.removeEventListener(n, f);
+    active.clear();
+    machine.reset();
   };
 }
