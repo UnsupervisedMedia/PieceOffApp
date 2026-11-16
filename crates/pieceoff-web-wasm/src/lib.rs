@@ -89,6 +89,67 @@ pub fn piece_outlines(snapshot_json: &str) -> Result<Outlines, JsError> {
         .map_err(|e| JsError::new(&e))
 }
 
+#[derive(Debug, PartialEq, Serialize)]
+struct RectJson {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct SceneJson {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+/// The table around the board, in board coordinates (source pixels from the
+/// board's top-left), as the desktop board draws it.
+#[derive(Debug, PartialEq, Serialize)]
+struct BoardLayout {
+    /// The tray's slot area (core `tray_layout`, moved from content to board
+    /// coordinates).
+    tray: RectJson,
+    /// How far the drawn tray reaches past `tray` on every side: tabs reach
+    /// past a piece's cell (desktop pads it by 0.3 of the larger cell side).
+    tray_pad: f32,
+    /// Where pieces (and cursors and pings) may be: core `scene_bounds`.
+    scene: SceneJson,
+}
+
+fn board_layout_from_json(snapshot_json: &str) -> Result<BoardLayout, String> {
+    let snapshot: RoomSnapshot = serde_json::from_str(snapshot_json).map_err(|e| e.to_string())?;
+    let tray = snapshot.tray_layout();
+    let scene = snapshot.scene_bounds();
+    Ok(BoardLayout {
+        tray: RectJson {
+            x: tray.tray_x,
+            y: tray.tray_y - tray.board_y,
+            width: tray.tray_width,
+            height: tray.tray_height,
+        },
+        tray_pad: snapshot.cell_width().max(snapshot.cell_height()) * 0.3,
+        scene: SceneJson {
+            min_x: scene.min_x,
+            min_y: scene.min_y,
+            max_x: scene.max_x,
+            max_y: scene.max_y,
+        },
+    })
+}
+
+/// `{"tray":{x,y,width,height},"tray_pad":..,"scene":{min_x,min_y,max_x,max_y}}`
+/// for a snapshot: the tray and table geometry come from core, so the web
+/// board never re-derives them.
+#[wasm_bindgen]
+pub fn board_layout(snapshot_json: &str) -> Result<String, JsError> {
+    board_layout_from_json(snapshot_json)
+        .map(|layout| serde_json::to_string(&layout).unwrap_or_else(|_| "{}".into()))
+        .map_err(|e| JsError::new(&e))
+}
+
 /// Every `type` tag a serde internally tagged enum accepts, in declaration
 /// order. Serde keeps no public list of variants, but it names them all when
 /// refusing an unknown one, so this asks it to refuse one.
@@ -223,6 +284,30 @@ mod tests {
     #[test]
     fn protocol_version_matches_core() {
         assert_eq!(protocol_version(), pieceoff_core::PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn board_layout_is_core_tray_and_scene_in_board_coordinates() {
+        for style in CutStyle::ALL {
+            let snap = snapshot(style);
+            let json = serde_json::to_string(&snap).unwrap();
+            let got = board_layout_from_json(&json).unwrap();
+            let tray = snap.tray_layout();
+            let scene = snap.scene_bounds();
+            assert_eq!(got.tray.x, tray.tray_x);
+            assert_eq!(got.tray.y, tray.tray_y - tray.board_y);
+            assert_eq!(got.tray.width, tray.tray_width);
+            assert_eq!(got.tray.height, tray.tray_height);
+            assert_eq!(got.scene.min_x, scene.min_x);
+            assert_eq!(got.scene.max_y, scene.max_y);
+            assert!(got.tray_pad > 0.0);
+            // Every freshly scattered piece starts inside the drawn tray.
+            for piece in &snap.pieces {
+                assert!(piece.x >= got.tray.x - got.tray_pad, "{style:?}");
+                assert!(piece.y >= got.tray.y - got.tray_pad - snap.cell_height(), "{style:?}");
+            }
+        }
+        assert!(board_layout_from_json("{").is_err());
     }
 
     #[test]
