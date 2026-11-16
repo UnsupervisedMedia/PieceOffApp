@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
     epaint::{Mesh, Vertex},
@@ -113,6 +115,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("PieceOff")
             .with_app_id("pieceoff")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../packaging/icon/pieceoff.png"
+                ))
+                .expect("the bundled icon is a valid PNG"),
+            )
             .with_resizable(true)
             .with_maximize_button(true)
             .with_inner_size([1180.0, 780.0])

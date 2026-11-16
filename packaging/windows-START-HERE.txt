@@ -2,9 +2,16 @@ PieceOff @VERSION@ - Windows test build (x86_64 GNU)
 
 To run:
 1. Extract this folder to a location you can write to.
-2. Open PowerShell in the extracted folder.
-3. Run: .\pieceoff.ps1 start
-4. To stop PieceOff, run: .\pieceoff.ps1 stop
+2. Double-click PieceOff.exe. (The installer, PieceOff-@VERSION@-win64-setup.exe,
+   does the same with a Start Menu shortcut.)
+3. Closing the PieceOff window stops its local room server too.
+
+Windows may show "Windows protected your PC" until releases are code-signed:
+choose More info, then Run anyway. You can verify the download against
+SHA256SUMS.txt on the release page. Rooms and media are kept in
+%LOCALAPPDATA%\PieceOff\data, so they survive upgrades.
+
+Command line (optional): .\pieceoff.ps1 start | stop | status | restart
 
 This package includes the PieceOff app, the room server, and a basic FFmpeg (in
 the ffmpeg folder, with its source in the source folder). It plays WebM/VP9 and
