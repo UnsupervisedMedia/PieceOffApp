@@ -2247,10 +2247,8 @@ impl RoomRuntime {
         width: u32,
         height: u32,
     ) -> Result<(RoomSnapshot, (String, String)), String> {
-        if !self.names.contains_key(client_id) {
-            return Err("Only players can offer a completion still".into());
-        }
-        let snapshot = self.snapshot.as_mut().ok_or("Room is not initialized")?;
+        // Releasing deletes the video, like any queue change: host only.
+        let snapshot = self.queue_guard(client_id)?;
         if !snapshot.completed() {
             return Err("The puzzle is not finished yet".into());
         }
@@ -4212,6 +4210,12 @@ mod cut_style_tests {
         );
 
         let mut room = finished_room();
+        room.names.insert("guest".into(), "Guest".into());
+        assert!(
+            room.release_to_still("guest", 0, &still_hash(), "webp", 64, 48)
+                .is_err(),
+            "a player who is not the host cannot release the video"
+        );
         assert!(
             room.release_to_still("nobody", 0, &still_hash(), "webp", 64, 48)
                 .is_err()

@@ -198,6 +198,10 @@ struct RoomRecord {
     chat_budget: std::sync::Mutex<TokenBucket>,
     persist_lock: Mutex<()>,
     media_upload_token: Mutex<Option<String>>,
+    /// Stills uploaded under this room's token (by hash). A release may only
+    /// adopt one of these, never a file another room stored. Not persisted:
+    /// after a restart the host uploads the still again (a no-op if stored).
+    accepted_stills: std::sync::Mutex<HashSet<String>>,
     last_activity: Arc<Mutex<SystemTime>>,
     /// Held while a chat line is both recorded and broadcast, and while a
     /// joiner subscribes and copies the history, so each line reaches a
@@ -219,6 +223,7 @@ impl RoomRecord {
             chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(media_upload_token),
+            accepted_stills: std::sync::Mutex::new(HashSet::new()),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
             chat: std::sync::Mutex::new(ChatLog::default()),
             replaced: broadcast::channel(16).0,
@@ -235,6 +240,7 @@ impl RoomRecord {
             chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(None),
+            accepted_stills: std::sync::Mutex::new(HashSet::new()),
             last_activity: Arc::new(Mutex::new(last_activity)),
             chat: std::sync::Mutex::new(ChatLog::default()),
             replaced: broadcast::channel(16).0,
@@ -881,7 +887,7 @@ async fn upload_still(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
-    let mut allowed = false;
+    let mut target = None;
     for room in rooms {
         if room.media_upload_token.lock().await.as_deref() == Some(token)
             && room
@@ -892,13 +898,13 @@ async fn upload_still(
                 .as_ref()
                 .is_some_and(RoomSnapshot::completed)
         {
-            allowed = true;
+            target = Some(room);
             break;
         }
     }
-    if !allowed {
+    let Some(room) = target else {
         return StatusCode::FORBIDDEN.into_response();
-    }
+    };
     if body
         .size_hint()
         .exact()
@@ -946,6 +952,9 @@ async fn upload_still(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
+    if let Ok(mut accepted) = room.accepted_stills.lock() {
+        accepted.insert(sha256.to_owned());
+    }
     StatusCode::CREATED.into_response()
 }
 
@@ -967,6 +976,14 @@ async fn release_still(
         .ok_or("A completion still must be a JPEG, PNG or WebP image")?;
     if !valid_sha256(sha256) {
         return Err("Invalid completion still".into());
+    }
+    // It must be a still this room uploaded, not a file another room stored.
+    let uploaded_here = room
+        .accepted_stills
+        .lock()
+        .is_ok_and(|accepted| accepted.contains(&sha256.to_ascii_lowercase()));
+    if !uploaded_here {
+        return Err("Upload the still before releasing the video".into());
     }
     // The still must already be stored: the video is only deleted after.
     let path = media_path(&state.data_dir, sha256, extension);
@@ -3392,6 +3409,43 @@ mod tests {
             "the video's space is freed"
         );
         assert!(media_path(&data_dir, &still, "png").is_file());
+        let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_room_cannot_adopt_a_still_another_room_stored_and_only_the_host_releases() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-bound-{}", Uuid::new_v4()));
+        let state = AppState::new(data_dir.clone());
+        let video_a = "a1".repeat(32);
+        let video_b = "b2".repeat(32);
+        let still_bytes = [&[0xff, 0xd8, 0xff][..], b"jpeg-ish"].concat();
+        let still = hex(Sha256::digest(&still_bytes));
+        fs::create_dir_all(data_dir.join("media")).unwrap();
+        fs::write(media_path(&data_dir, &video_a, "mp4"), b"a").unwrap();
+        fs::write(media_path(&data_dir, &video_b, "mp4"), b"b").unwrap();
+        let first = room_with_finished_video(&state, "AAA111", &video_a, true).await;
+        let second = room_with_finished_video(&state, "BBB222", &video_b, true).await;
+        assert_eq!(
+            put_still(&state, "secret-AAA111", &still, "jpg", still_bytes).await,
+            StatusCode::CREATED
+        );
+        // The file is on disk, but room B never uploaded it.
+        let adopted = release_still(&state, &second, "host", 0, &still, "jpg", 32, 24).await;
+        assert!(adopted.is_err());
+        assert!(media_path(&data_dir, &video_b, "mp4").is_file());
+        // A player who is not the host cannot release room A's video either.
+        first
+            .runtime
+            .lock()
+            .await
+            .names
+            .insert("guest".into(), "Guest".into());
+        let by_guest = release_still(&state, &first, "guest", 0, &still, "jpg", 32, 24).await;
+        assert!(by_guest.is_err());
+        assert!(media_path(&data_dir, &video_a, "mp4").is_file());
+        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24)
+            .await
+            .unwrap();
         let _ = fs::remove_dir_all(&data_dir);
     }
 
