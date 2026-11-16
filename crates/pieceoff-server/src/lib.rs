@@ -874,6 +874,21 @@ async fn upload_media(
     StatusCode::CREATED.into_response()
 }
 
+/// Lower-case hex of a digest, built from a constant table so the result is
+/// made of known characters whatever the input was. Used to name files from
+/// content hashes without trusting the string a client sent.
+fn hex_from_table(digest: &[u8]) -> String {
+    const HEX: [char; 16] = [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    ];
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        name.push(HEX[usize::from(byte >> 4)]);
+        name.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    name
+}
+
 /// A completion still: held to its own small cap and checked by magic bytes,
 /// then stored under its hash. It is not queued; `ReleaseToStill` adopts it.
 async fn upload_still(
@@ -919,9 +934,13 @@ async fn upload_still(
     let Ok(bytes) = axum::body::to_bytes(body, MAX_STILL_BYTES as usize).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    if hex(Sha256::digest(&bytes)) != sha256 {
+    // From here on the file is named by the hash we computed, which equals
+    // the one the client declared.
+    let digest = hex_from_table(&Sha256::digest(&bytes));
+    if digest != sha256 {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     }
+    let sha256 = digest.as_str();
     if !still_magic_ok(extension, &bytes) {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
