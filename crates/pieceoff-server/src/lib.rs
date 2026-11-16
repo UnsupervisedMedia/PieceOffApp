@@ -951,6 +951,8 @@ async fn upload_still(
 
 /// The host swaps a finished video for its stored still, then frees the
 /// video's space unless another room still queues it.
+// Mirrors the wire message, like `set_playback`.
+#[allow(clippy::too_many_arguments)]
 async fn release_still(
     state: &AppState,
     room: &Arc<RoomRecord>,

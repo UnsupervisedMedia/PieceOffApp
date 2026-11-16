@@ -2296,6 +2296,8 @@ impl RoomRuntime {
     /// Put a released item's video back. Only the original video qualifies
     /// (its hash must equal `seed_sha256`); it is unavailable until the host
     /// uploads it again, as for any queued item.
+    // Mirrors the wire message, like `set_playback`.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore_video(
         &mut self,
         client_id: &str,
