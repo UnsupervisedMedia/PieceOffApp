@@ -520,7 +520,23 @@ impl PieceOffApp {
 
         // View changes apply before layout so they take effect this frame.
         let locked = self.settings.lock_view;
-        if response.hovered() && !locked {
+        // While a piece is held in a rotation room the wheel turns it instead
+        // of zooming, even with the view locked.
+        let wheel_turns_piece =
+            interactive && self.dragging.is_some() && snapshot.difficulty.rotation;
+        if !wheel_turns_piece {
+            self.wheel_turn = 0.0;
+        }
+        if response.hovered() && wheel_turns_piece {
+            let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
+            let turns = wheel_quarter_turns(
+                &mut self.wheel_turn,
+                self.settings.mouse.adjust_scroll(scroll_y),
+            );
+            if turns != 0 {
+                self.pending_rotate = Some(turns);
+            }
+        } else if response.hovered() && !locked {
             let (scroll_y, pointer) = ui.input(|input| {
                 (
                     input.smooth_scroll_delta.y,
@@ -1205,7 +1221,7 @@ impl PieceOffApp {
         }
         let challenge = match (snapshot.difficulty.rotation, no_hints) {
             (true, true) => Some("Rotation · No hints"),
-            (true, false) => Some("Rotation · turn pieces upright with E / Q"),
+            (true, false) => Some("Rotation · turn pieces upright with E / Q or the wheel"),
             (false, true) => Some("No hints"),
             (false, false) => None,
         };
@@ -1558,6 +1574,26 @@ pub(crate) fn cover_uv_rect(board_w: f32, board_h: f32, media_w: f32, media_h: f
     }
 }
 
+/// Wheel movement needed for one quarter turn.
+const WHEEL_POINTS_PER_TURN: f32 = 40.0;
+
+/// Turn wheel movement into at most one quarter turn per call: wheel down is
+/// clockwise (+1), wheel up counter-clockwise (-1). The remainder carries over
+/// so slow or smooth scrolling still adds up, and a flick is one step a frame
+/// rather than a blur.
+pub(crate) fn wheel_quarter_turns(carry: &mut f32, scroll_y: f32) -> i8 {
+    *carry += scroll_y;
+    if *carry <= -WHEEL_POINTS_PER_TURN {
+        *carry += WHEEL_POINTS_PER_TURN;
+        1
+    } else if *carry >= WHEEL_POINTS_PER_TURN {
+        *carry -= WHEEL_POINTS_PER_TURN;
+        -1
+    } else {
+        0
+    }
+}
+
 /// Rotate a piece-local point clockwise by `quarter_turns` about the centre of
 /// the piece's cell. The server pivots on the same centre (see
 /// `RoomRuntime::rotate_selection`), so what is drawn is what is validated.
@@ -1809,6 +1845,22 @@ mod rotation_tests {
         // Clockwise on screen: the cell's right-middle goes to bottom-middle.
         let right = rotate_local([w, h / 2.0], 1, 100.0, 100.0);
         assert!((right[0] - 50.0).abs() < 1e-3 && right[1] > 50.0);
+    }
+
+    #[test]
+    fn the_wheel_turns_one_quarter_per_notch_and_carries_the_remainder() {
+        let mut carry = 0.0;
+        assert_eq!(wheel_quarter_turns(&mut carry, -50.0), 1, "wheel down is clockwise");
+        assert_eq!(wheel_quarter_turns(&mut carry, 0.0), 0);
+        assert_eq!(wheel_quarter_turns(&mut carry, 50.0), -1, "wheel up is counter-clockwise");
+        // Smooth scrolling adds up across frames.
+        let mut carry = 0.0;
+        let steps: i8 = (0..10).map(|_| wheel_quarter_turns(&mut carry, -10.0)).sum();
+        assert_eq!(steps, 2);
+        // A hard flick is one step per call, the rest carries.
+        let mut carry = 0.0;
+        assert_eq!(wheel_quarter_turns(&mut carry, -200.0), 1);
+        assert_eq!(wheel_quarter_turns(&mut carry, 0.0), 1);
     }
 
     #[test]

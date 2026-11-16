@@ -218,6 +218,8 @@ struct PieceOffApp {
     difficulty: Difficulty,
     /// A rotate key press waiting for the board to apply it (quarter turns).
     pending_rotate: Option<i8>,
+    /// Wheel movement not yet enough for a quarter turn while a piece is held.
+    wheel_turn: f32,
     dragging: Option<ActiveDrag>,
     selected_pieces: std::collections::HashSet<u32>,
     keyboard_play_open: bool,
@@ -446,6 +448,7 @@ impl Default for PieceOffApp {
             cut_style: CutStyle::Jigsaw,
             difficulty: Difficulty::default(),
             pending_rotate: None,
+            wheel_turn: 0.0,
             dragging: None,
             selected_pieces: std::collections::HashSet::new(),
             keyboard_play_open: false,
