@@ -104,7 +104,10 @@ fn protocol_gen_is_current() {
         std::fs::write(&path, &fresh).expect("write web/src/protocol.gen.ts");
         return;
     }
-    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    // A Windows checkout may have turned the committed file's LF into CRLF.
+    let current = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert!(
         current == fresh,
         "web/src/protocol.gen.ts is missing or out of date with the core's wire types.\n\
