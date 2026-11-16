@@ -1401,6 +1401,28 @@ impl PieceOffApp {
                     });
                 });
         }
+        if self.confirm_release {
+            egui::Window::new("Free the video?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label("The video is deleted from the server and replaced by a picture of the finished puzzle. You can bring it back only with the exact original file.");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Free the video").color(DANGER))
+                            .clicked()
+                        {
+                            self.confirm_release = false;
+                            self.release_video_to_still(false);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_release = false;
+                        }
+                    });
+                });
+        }
         self.kick_window(ctx);
         self.codec_window(ctx);
         self.link_window(ctx);

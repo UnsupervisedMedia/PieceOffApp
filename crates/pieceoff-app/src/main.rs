@@ -179,6 +179,8 @@ struct PieceOffApp {
     host_upload_token: Option<String>,
     /// When this host first saw the puzzle finished, for the auto-release timer.
     finished_since: Option<Instant>,
+    /// The host is being asked to confirm releasing the video.
+    confirm_release: bool,
     /// A completion still being captured and uploaded on a worker thread.
     still_rx: Option<mpsc::Receiver<Result<ClientMessage, String>>>,
     /// The original video being checked before `RestoreVideo`.
@@ -446,6 +448,7 @@ impl Default for PieceOffApp {
             queue_probe_rx: None,
             host_upload_token: None,
             finished_since: None,
+            confirm_release: false,
             still_rx: None,
             restore_rx: None,
             holding_at_end: false,
