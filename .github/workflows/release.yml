@@ -74,6 +74,11 @@ jobs:
       - name: Bundle (Linux and macOS)
         if: runner.os != 'Windows'
         run: scripts/bundle.sh --skip-verify
+      - name: Install Inno Setup (Windows installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
       - name: Bundle (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -84,6 +89,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*-setup.exe
           if-no-files-found: error
           retention-days: 7
 

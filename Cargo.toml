@@ -2,6 +2,7 @@
 members = [
     "crates/pieceoff-core",
     "crates/pieceoff-app",
+    "crates/pieceoff-launcher",
     "crates/pieceoff-server",
     "crates/pieceoff-room-wasm",
 ]

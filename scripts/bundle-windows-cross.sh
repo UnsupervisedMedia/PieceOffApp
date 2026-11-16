@@ -43,9 +43,9 @@ BIN=$WIN_TARGET_DIR/$TARGET/release
 
 if [ "$BUILD" = yes ]; then
   CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
-    cargo build --release --locked --target "$TARGET" --target-dir "$WIN_TARGET_DIR" -p pieceoff-app -p pieceoff-server
+    cargo build --release --locked --target "$TARGET" --target-dir "$WIN_TARGET_DIR" -p pieceoff-app -p pieceoff-server -p pieceoff-launcher
 fi
-for binary in pieceoff-app.exe pieceoff-server.exe; do
+for binary in PieceOff.exe pieceoff-app.exe pieceoff-server.exe; do
   [ -f "$BIN/$binary" ] || { echo "$BIN/$binary is missing; build first." >&2; exit 1; }
   # Every Windows executable starts with the DOS "MZ" header.
   [ "$(head -c 2 "$BIN/$binary")" = MZ ] || { echo "$binary is not a Windows executable." >&2; exit 1; }
@@ -54,7 +54,7 @@ done
 mkdir -p "$ROOT/dist"
 rm -r "$OUT" 2>/dev/null || true
 mkdir -p "$OUT/docs"
-cp "$BIN/pieceoff-app.exe" "$BIN/pieceoff-server.exe" pieceoff.ps1 README.md LICENSE CONTRIBUTING.md "$OUT/"
+cp "$BIN/PieceOff.exe" "$BIN/pieceoff-app.exe" "$BIN/pieceoff-server.exe" pieceoff.ps1 README.md LICENSE CONTRIBUTING.md "$OUT/"
 cp docs/PACKAGING.md docs/FFMPEG.md docs/TESTING.md docs/DEPLOYMENT.md docs/LICENSING.md "$OUT/docs/" 2>/dev/null || true
 sed "s/@VERSION@/$VERSION/" packaging/windows-START-HERE.txt >"$OUT/START-HERE.txt"
 
