@@ -59,6 +59,7 @@ export function devSnapshot(o: DevSnapshotOpts): RoomSnapshot {
       y: trayY + Math.floor(slot / trayCols) * spacingY * ch,
       placed: false,
       held_by: null,
+      rotation: 0,
     });
   }
   return {
@@ -106,6 +107,7 @@ export function devSnapshot(o: DevSnapshotOpts): RoomSnapshot {
     stats: { elapsed_ms: 0, running_since_ms: null, started: false, finished: false, players: [] },
     holders: [],
     cut_style: o.cut,
+    difficulty: { rotation: false, no_hints: false },
     listed: false,
     chat_enabled: true,
   };

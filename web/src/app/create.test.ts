@@ -80,6 +80,7 @@ describe('create room', () => {
       player_key: KEY,
       cut_style: 'jigsaw',
       listed: true,
+      difficulty: { rotation: false, no_hints: false },
     });
 
     // Anything that is not one of the eight built-ins never reaches the network.

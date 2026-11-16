@@ -201,6 +201,7 @@ export async function createRoom(deps: CreateRoomDeps): Promise<CreatedRoom> {
     player_key: deps.playerKey ?? playerKey(browserStorage()),
     cut_style: deps.cutStyle ?? 'jigsaw',
     listed: deps.listed,
+    difficulty: { rotation: false, no_hints: false },
   };
 
   const f = deps.fetch ?? fetch;

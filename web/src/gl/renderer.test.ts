@@ -165,7 +165,7 @@ describe('BoardRenderer with a (fake) WebGL2 context', () => {
   it('uploads_only_dirty_pieces_and_everything_past_64', () => {
     const g = fakeGl();
     const { r, f } = make({ gl: g.gl });
-    const s = snap(15, { pieces: Array.from({ length: 100 }, (_, id) => ({ id, group_id: id, row: 0, column: 0, x: 0, y: 0, placed: false, held_by: null })) });
+    const s = snap(15, { pieces: Array.from({ length: 100 }, (_, id) => ({ id, group_id: id, row: 0, column: 0, x: 0, y: 0, placed: false, held_by: null, rotation: 0 })) });
     r.setPuzzle(mesh(s), s);
     f.flush();
     g.calls.length = 0;

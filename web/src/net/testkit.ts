@@ -126,6 +126,7 @@ export function pieces(n: number, columns = 2): Piece[] {
     y: 500 + id * 10,
     placed: false,
     held_by: null,
+    rotation: 0,
   }));
 }
 
@@ -161,6 +162,7 @@ export function snapshot(protocolVersion: number, over: Partial<RoomSnapshot> = 
     stats: { elapsed_ms: 0, running_since_ms: null, started: false, finished: false, players: [] },
     holders: [],
     cut_style: 'jigsaw',
+    difficulty: { rotation: false, no_hints: false },
     listed: false,
     chat_enabled: true,
     ...over,

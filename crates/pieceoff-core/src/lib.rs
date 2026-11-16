@@ -95,6 +95,7 @@ pub struct Piece {
 /// Optional challenge settings chosen by the host when the room is created
 /// (protocol v16). Both off by default; fixed for the life of the room.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Difficulty {
     /// Pieces start turned and must be turned upright before they fit.
     #[serde(default)]

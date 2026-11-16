@@ -130,7 +130,7 @@ function ctx2d() {
 function spreadPieces(): Piece[] {
   return Array.from({ length: 4 }, (_, id) => ({
     id, group_id: id, row: Math.floor(id / 2), column: id % 2,
-    x: 600 + id * 400, y: 100, placed: false, held_by: null,
+    x: 600 + id * 400, y: 100, placed: false, held_by: null, rotation: 0,
   }));
 }
 

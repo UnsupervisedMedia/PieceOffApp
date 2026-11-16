@@ -27,7 +27,9 @@ export type FatalReason =
 
 export type SocketState = 'connecting' | 'open' | 'reconnecting' | 'fatal';
 
-export type JoinRequest = Omit<Extract<ClientMessage, { type: 'join_room' }>, 'type'>;
+/** The join as callers give it. `client_protocol` is not theirs to set: the
+ *  socket always sends this build's PROTOCOL_VERSION (and the resume token). */
+export type JoinRequest = Omit<Extract<ClientMessage, { type: 'join_room' }>, 'type' | 'client_protocol'>;
 
 export interface Timers {
   set(fn: () => void, ms: number): unknown;
@@ -346,7 +348,11 @@ export class RoomSocket {
     ws.onopen = () => {
       if (ws !== this.ws) return;
       this.wsOpened = true;
-      const join: Record<string, unknown> = { type: 'join_room', ...this.join, client_protocol: PROTOCOL_VERSION };
+      const join: Extract<ClientMessage, { type: 'join_room' }> & { resume_token?: string } = {
+        type: 'join_room',
+        ...this.join,
+        client_protocol: PROTOCOL_VERSION,
+      };
       if (this.resumeToken) join.resume_token = this.resumeToken;
       this.writeRaw(JSON.stringify(join));
     };

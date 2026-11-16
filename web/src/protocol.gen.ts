@@ -3,7 +3,7 @@
 //   PIECEOFF_UPDATE_PROTOCOL=1 cargo test -p pieceoff-web-wasm --test protocol_gen
 
 /** The protocol version these types describe. */
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 /**
  * One line of room chat as the server relays it. Kept in the room's memory
@@ -37,7 +37,11 @@ cut_style: CutStyle,
  * List the room in the public lobby (protocol v15). Refused unless
  * every queue item is built-in; servers without a lobby refuse it.
  */
-listed: boolean, } | { "type": "join_room", invite_code: string, name: string, media_sha256: string, media_extension: string,
+listed: boolean,
+/**
+ * Harder-play options (protocol v16); older clients send none.
+ */
+difficulty: Difficulty, } | { "type": "join_room", invite_code: string, name: string, media_sha256: string, media_extension: string,
 /**
  * Join to watch: see everything, change nothing (protocol v13).
  */
@@ -45,13 +49,32 @@ spectator: boolean,
 /**
  * This device's private player key; empty from older clients.
  */
-player_key: string, } | { "type": "drag_start", piece_id: number, } | { "type": "drag_start_selection", piece_ids: Array<number>, } | { "type": "move_piece", piece_id: number, x: number, y: number, } | { "type": "drag_end", piece_id: number, x: number, y: number, } | { "type": "move_selection", anchor_piece_id: number, x: number, y: number, } | { "type": "drag_end_selection", anchor_piece_id: number, x: number, y: number, } | { "type": "set_playback", playing: boolean, position_ms: number, rate: number, loop_start_ms: number, loop_end_ms: number, } | { "type": "restart_puzzle" } | { "type": "rearrange_tray", arrangement: TrayArrangement, } | { "type": "queue_add", sha256: string, extension: string, title: string, width: number, height: number, duration_ms: number, } | { "type": "queue_remove", index: number, } | { "type": "queue_move", from: number, to: number, } | { "type": "select_item", index: number, } | { "type": "next_item" } | { "type": "prev_item" } | { "type": "set_repeat", mode: RepeatMode, } | { "type": "set_video_lock", locked: boolean, } | { "type": "set_listed", listed: boolean, } | { "type": "set_chat_enabled", enabled: boolean, } | { "type": "kick_player", name: string, } | { "type": "cursor", x: number, y: number, } | { "type": "cursor_hidden" } | { "type": "chat", text: string, } | { "type": "ping", x: number, y: number, } | { "type": "create_holder", x: number, y: number, width: number, height: number, label: string, } | { "type": "update_holder", holder_id: number, x: number, y: number, width: number, height: number, label: string, } | { "type": "delete_holder", holder_id: number, } | { "type": "request_timelapse" } | { "type": "release_name", name: string, };
+player_key: string,
+/**
+ * The newest protocol this client speaks (0 from clients before
+ * v16); rooms with rotation refuse older ones.
+ */
+client_protocol: number, } | { "type": "drag_start", piece_id: number, } | { "type": "drag_start_selection", piece_ids: Array<number>, } | { "type": "move_piece", piece_id: number, x: number, y: number, } | { "type": "drag_end", piece_id: number, x: number, y: number, } | { "type": "move_selection", anchor_piece_id: number, x: number, y: number, } | { "type": "rotate_selection", anchor_piece_id: number, quarter_turns: number, } | { "type": "drag_end_selection", anchor_piece_id: number, x: number, y: number, } | { "type": "set_playback", playing: boolean, position_ms: number, rate: number, loop_start_ms: number, loop_end_ms: number, } | { "type": "restart_puzzle" } | { "type": "rearrange_tray", arrangement: TrayArrangement, } | { "type": "queue_add", sha256: string, extension: string, title: string, width: number, height: number, duration_ms: number, } | { "type": "queue_remove", index: number, } | { "type": "queue_move", from: number, to: number, } | { "type": "select_item", index: number, } | { "type": "next_item" } | { "type": "prev_item" } | { "type": "set_repeat", mode: RepeatMode, } | { "type": "set_video_lock", locked: boolean, } | { "type": "set_listed", listed: boolean, } | { "type": "set_chat_enabled", enabled: boolean, } | { "type": "kick_player", name: string, } | { "type": "cursor", x: number, y: number, } | { "type": "cursor_hidden" } | { "type": "chat", text: string, } | { "type": "ping", x: number, y: number, } | { "type": "create_holder", x: number, y: number, width: number, height: number, label: string, } | { "type": "update_holder", holder_id: number, x: number, y: number, width: number, height: number, label: string, } | { "type": "delete_holder", holder_id: number, } | { "type": "request_timelapse" } | { "type": "release_name", name: string, };
 
 /**
  * How a puzzle's picture is cut into pieces. Older rooms and packages have
  * no cut style and load as `Jigsaw`.
  */
 export type CutStyle = "jigsaw" | "hexagon" | "triangle";
+
+/**
+ * Optional challenge settings chosen by the host when the room is created
+ * (protocol v16). Both off by default; fixed for the life of the room.
+ */
+export type Difficulty = {
+/**
+ * Pieces start turned and must be turned upright before they fit.
+ */
+rotation: boolean,
+/**
+ * No reference image, ghost, still-frame assist or edge filter.
+ */
+no_hints: boolean, };
 
 export type MediaItem = { sha256: string, extension: string, title: string, width: number, height: number, duration_ms: number, available: boolean,
 /**
@@ -64,7 +87,12 @@ export type Piece = { id: number, group_id: number, row: number, column: number,
  * Piece position in source-image pixels. The board has a clear target at
  * (column * cell_width, row * cell_height).
  */
-x: number, y: number, placed: boolean, held_by: string | null, };
+x: number, y: number, placed: boolean, held_by: string | null,
+/**
+ * Clockwise quarter turns, 0..=3 (protocol v16). Only rooms with
+ * rotation on ever leave 0; a group's members always share a value.
+ */
+rotation: number, };
 
 export type PieceHolder = { id: number,
 /**
@@ -108,6 +136,10 @@ holders: Array<PieceHolder>,
  * classic jigsaw grid with their contours unchanged.
  */
 cut_style: CutStyle,
+/**
+ * Challenge settings (protocol v16). Older snapshots load with none.
+ */
+difficulty: Difficulty,
 /**
  * Listed in the public lobby (protocol v15). Only rooms whose every
  * queue item is built-in may be listed; older snapshots load unlisted.
@@ -226,6 +258,7 @@ export const CLIENT_MESSAGE_TYPES = [
   "move_piece",
   "drag_end",
   "move_selection",
+  "rotate_selection",
   "drag_end_selection",
   "set_playback",
   "restart_puzzle",
