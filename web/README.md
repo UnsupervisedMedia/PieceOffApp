@@ -76,8 +76,10 @@ web/build-wasm.sh && (cd web && npm test)
 ```
 
 Without the variable the same test fails when the committed file is out of date.
-This branch is on protocol v15. Turned pieces and difficulty arrive with v16: after
-that merges, regenerate, then remove the `src/app/rotation.ts` shim paths.
+The client speaks protocol v16 (turned pieces and the create form's difficulty
+options included). Core limits and text rules the client needs (piece and side
+caps, cell aspects, `clean_name`, `clean_title`) come from the wasm or are pinned
+to it by tests, so a core change fails the web tests instead of drifting.
 
 ## Release asset
 
@@ -95,11 +97,13 @@ release asset".
 
 ## How the site vendors a release
 
-```sh
-gh release download v<version> --repo <owner>/PieceOff --pattern 'pieceoff-web-*.tar.gz'
-mkdir -p public/play-app && tar -xzf pieceoff-web-<version>.tar.gz -C public/play-app
-(cd public/play-app && sha256sum -c SHA256SUMS)
-```
+The site (`pieceoff.app`, its own repo) does not untar by hand: its
+`site/scripts/vendor-web.mjs` pins the release tag and the tarball's sha256 in
+`site/web-version`, downloads the asset from
+`https://github.com/UnsupervisedMedia/PieceOffApp/releases`, checks the pin, the
+tarball's own `SHA256SUMS` and `play-app.json`, refuses unsafe entries, and replaces
+`public/play-app/` whole (`--from <tarball> --update-pin --tag vX.Y.Z` for a local
+tarball). See the site repo's `CLAUDE.md` "Web play client".
 
 Then the page (served from the site's own origin, e.g. `/play`) sets
 `PIECEOFF_WEB_CONFIG` and loads `/play-app/play.js` as above. Check `play-app.json`'s

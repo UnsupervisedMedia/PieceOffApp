@@ -213,8 +213,8 @@ cost (`cargo test --release -p pieceoff-app thousand_piece_board_frame_cost --
 ## Web play client (`web/`)
 
 - **Unit tests and gate:** `scripts/web-check.sh` builds the core wasm, typechecks, runs the vitest suite (jsdom; the wasm is loaded for real, protocol tags are checked against the Rust enums), builds, enforces the size budget (initial JS + WASM + CSS gzip at most 400 KB; the lazy board chunk is reported), then packs the release tarball and checks it (`web/check-pack.mjs`: every file `play-app.json` and `builtin/manifest.json` name is present, both sha256 lists match, no sourcemaps/dev/spike/e2e files, relative imports resolve, budget again on the packed bytes, two packs are byte-identical). `scripts/check.sh --web` runs it, and `scripts/check.sh` does when `web/node_modules` exists.
-- **Two-client e2e:** `scripts/web-e2e.sh` (or `scripts/web-check.sh --e2e`) starts a local rooms Worker (`wrangler dev`, uploads off, a loopback Turnstile verifier) and a page server, then runs `web/e2e/two-client.spec.ts` in headless Chromium (Playwright): create, invite link, join, drag and snap, chat, reload resume, host controls, 25 pick-up/drop rounds that must leave no lease held, kick, plus interruptions (pointercancel, window blur, reload and socket cut mid-drag) and a phone profile (touch drag, second-finger cancel, long-press, pinch). It needs `wrangler` deps (`worker/`), Playwright's Chromium 1200 in `~/.cache/ms-playwright`, and about a minute. Not covered: a real OS focus loss, a true transport outage, iOS/Android engines.
-- **Release asset smoke:** unpack `dist/pieceoff-web-<version>.tar.gz` into a directory served under `/play-app/` and open a page that loads `/play-app/play.js`; the lobby must render with no 404s (done for 0.2.1 headless; see the Task 12 report).
+- **Two-client e2e:** `scripts/web-e2e.sh` (or `scripts/web-check.sh --e2e`) starts a local rooms Worker (`wrangler dev`, uploads off, a loopback Turnstile verifier) and a page server, then runs `web/e2e/two-client.spec.ts` in headless Chromium (Playwright): create, invite link, join, drag and snap, chat, reload resume, host controls, 25 pick-up/drop rounds that must leave no lease held, kick, plus interruptions (pointercancel, window blur, reload and socket cut mid-drag), a phone profile (touch drag, second-finger cancel, long-press, pinch), and a rotation room (created with **Rotate pieces**: a held turned piece is turned upright with the wheel and E while the other client sees each turn, then dropped home and snaps; a turned piece dropped on its slot does not). Any uncaught page error fails the test. It needs `wrangler` deps (`worker/`), Playwright's Chromium 1200 in `~/.cache/ms-playwright`, and about a minute. Not covered: a real OS focus loss, a true transport outage, iOS/Android engines.
+- **Release asset smoke:** unpack `dist/pieceoff-web-<version>.tar.gz` into a directory served under `/play-app/` and open a page that loads `/play-app/play.js`; the lobby must render with no 404s (done for 0.2.1 in headless Chromium: the tarball unpacked under a `/play-app/` sub-path served the lobby with no failed requests).
 
 ### Manual device matrix (web client)
 
@@ -224,10 +224,49 @@ Real devices are the only answer for video-in-WebGL and touch feel. Fill one row
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | iPhone (iOS Safari) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | Highest risk: muted inline autoplay, `texImage2D(video)`, Low Power Mode, `requestVideoFrameCallback` needs 15.4+ | PENDING (owner) |
 | Android phone (Chrome) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | | PENDING (owner) |
-| Desktop Chrome (headless, AMD RX 580, ANGLE/GL, 1280x800 @ DPR 2, Linux) | Google Chrome (headless), Playwright 1.49 driving `/usr/bin/google-chrome` | yes, 12 fps loop delivered at 12 fps | yes: 400 jigsaw 16.67 ms avg / 16.8 p95, 0% over 20 ms (vsync-capped); 1000 jigsaw 16.67 / 16.8 | not applicable (emulated touch only: covered by `web-e2e` phone profile on Chromium) | e2e: chat both ways, name prompt | Spike renderer numbers from the Task 5 report; same GL code as the client. Software GL (SwiftShader) is not representative: 62-86 ms avg at DPR 2 | 2026-11-15 |
+| Desktop Chrome (headless, AMD RX 580, ANGLE/GL, 1280x800 @ DPR 2, Linux) | Google Chrome (headless), Playwright 1.49 driving `/usr/bin/google-chrome` | yes, 12 fps loop delivered at 12 fps | yes: 400 jigsaw 16.67 ms avg / 16.8 p95, 0% over 20 ms (vsync-capped); 1000 jigsaw 16.67 / 16.8 | not applicable (emulated touch only: covered by `web-e2e` phone profile on Chromium) | e2e: chat both ways, name prompt | Renderer spike (`web/dev/spike.html`, same GL code as the client), GPU otherwise idle. Software GL (SwiftShader) is not representative: 62-86 ms avg at DPR 2 | 2026-11-15 |
+| Desktop Chrome (headless, same machine, v16 re-run) | Google Chrome 157 (headless), Playwright 1.49 driving `/usr/bin/google-chrome` | yes, 12 fps loop delivered at 12 fps in every case | yes on an idle GPU: 400 and 1000 (all cuts, upright and turned) at 16.67 ms avg, p95 at most 16.8; with the GPU shared, 1000 pieces drop to 24-36 ms avg (see "1000 pieces in the browser" below) | not applicable | not run | Renderer spike with `turned=1` for v16 rotation rooms | 2026-11-16 |
 | Desktop Chrome (interactive, real display) | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | | PENDING (owner) |
 | Desktop Firefox | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | Not run in e2e (Chromium only) | PENDING (owner) |
 | Desktop Safari (macOS) | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | | PENDING (owner) |
+
+### 1000 pieces in the browser (v16)
+
+Protocol v16 raises the cap to 1000 pieces (50 a side) and the web create form
+offers the desktop's presets up to **Mega · 1000** (with the desktop's "large
+boards need a fast device" note over 400). Measured, not assumed, with the
+renderer spike in bench mode (continuous redraw; frame time is throughput, last
+120 frames), 1280x800 at DPR 2 (2560x1600 canvas), a 12 fps built-in loop
+playing into the texture; `turned=1` puts every piece at a quarter turn as a
+rotation room scatters them. Run: `cd web && npm run spike`, then
+`python3 web/dev/spike-bench.py OUT /usr/bin/google-chrome` (Python Playwright)
+loads `/dev/spike.html?pieces=N&cut=C[&turned=1]`, waits 4 s, reads
+`window.__spike`, drags piece 0 across 200 px and reads it again.
+
+2026-11-16, headless Chrome 157, ANGLE/GL on an AMD RX 580, two runs minutes
+apart. The first ran while another process kept that GPU 100% busy
+(`gpu_busy_percent`; host load average 45-58 on 96 threads); for the second the
+GPU was otherwise idle (`gpu_busy_percent` 0 right after).
+
+| case | idle GPU: avg / p95 ms, > 20 ms, JS ms | idle GPU: during a drag avg / p95 | contended GPU: avg / p95 ms, > 20 ms, JS ms | contended: during a drag avg / p95 | vertices | mesh build ms (idle / contended) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 400 jigsaw | 16.67 / 16.8, 0%, 1.19 | 16.67 / 16.8 | 16.80 / 16.8, 1%, 3.29 | 18.89 / 33.3 | 8 000 | 24.8 / 55.8 |
+| 1000 jigsaw | 16.67 / 16.8, 0%, 1.21 | 16.67 / 16.7 | 24.31 / 66.6, 28%, 10.38 | 31.25 / 66.7 | 20 000 | 48.2 / 102.5 |
+| 1000 hexagon | 16.67 / 16.8, 0%, 2.08 | 16.67 / 16.7 | 29.30 / 66.7, 48%, 14.79 | 29.86 / 66.7 | 29 108 | 46.8 / 48.8 |
+| 1000 triangle | 16.67 / 16.7, 0%, 2.26 | 16.67 / 16.8 | 32.08 / 66.7, 52%, 16.14 | 34.44 / 66.8 | 24 256 | 36.3 / 40.1 |
+| 1000 jigsaw, turned | 16.67 / 16.7, 0%, 1.43 | 16.67 / 16.7 | 36.11 / 83.3, 58%, 19.24 | 33.75 / 66.7 | 20 000 | 51.0 / 58.2 |
+| 1000 hexagon, turned | 16.67 / 16.8, 0%, 2.13 | 16.67 / 16.8 | 32.22 / 66.7, 48%, 17.07 | 31.11 / 66.8 | 29 108 | 55.1 / 51.7 |
+
+In every case the 12 fps loop was delivered at 12 fps, on-demand rendering
+idled at the video rate (12-13 renders/s), and there were no console or page
+errors. What this shows: on this desktop GPU, 1000 pieces (upright or turned,
+any cut) hold the 60 Hz vsync cap with 1.2-2.3 ms of JS a frame, drags
+included; when the GPU is shared with other work, 1000 pieces drop to about
+30-40 fps (p95 67-83 ms) while 400 stay at 60. Turned pieces cost nothing
+measurable on an idle GPU; under contention they ran 3-12 ms slower, within a
+spread this run cannot separate from noise. What it does not show: any phone or
+integrated GPU. **1000 pieces on a real iPhone or Android phone: PENDING
+(owner)**; until then treat Mega as desktop-class, as the form's note says.
 
 ## Playtest log
 

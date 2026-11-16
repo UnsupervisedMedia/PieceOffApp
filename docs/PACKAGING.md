@@ -67,7 +67,7 @@ Attach it to a release by hand (the release workflow does not build it: that nee
 ```sh
 git checkout v<version>   # the tag; the tarball must come from the tagged tree
 scripts/web-check.sh && web/pack.sh
-gh release upload v<version> dist/pieceoff-web-<version>.tar.gz --repo <owner>/PieceOff
+gh release upload v<version> dist/pieceoff-web-<version>.tar.gz --repo UnsupervisedMedia/PieceOffApp
 ```
 
 The asset is not in the release's `SHA256SUMS.txt` or attestation; it carries its own `SHA256SUMS`, and the uploaded file's sha256 should be noted in the release text. Native users never need it.
