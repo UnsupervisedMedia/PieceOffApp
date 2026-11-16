@@ -6,6 +6,12 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 cd "$ROOT"
+# Path-independent output: panic/location strings must not carry the builder's
+# home directory, cargo registry path or checkout path (the wasm is published).
+CARGO_DIR=${CARGO_HOME:-$HOME/.cargo}
+SYSROOT=$(rustc --print sysroot)
+RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$CARGO_DIR=/cargo --remap-path-prefix=$ROOT=/src --remap-path-prefix=$SYSROOT=/rustc-sysroot"
+export RUSTFLAGS
 CARGO_PROFILE_RELEASE_OPT_LEVEL=z CARGO_PROFILE_RELEASE_LTO=true \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort \
 CARGO_PROFILE_RELEASE_STRIP=true \

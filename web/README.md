@@ -88,7 +88,8 @@ web/pack.sh [--out DIR] [--no-build]   # -> dist/pieceoff-web-<version>.tar.gz
 `<version>` is `version` in `crates/pieceoff-app/Cargo.toml`. The tarball root is the
 `play-app/` directory: `play.js`, `chunks/`, `play.css`, `pieceoff_web_wasm_bg.wasm`,
 `builtin/`, `play-app.json` (entry/css/wasm paths, version, protocol, sha256 per file),
-`SHA256SUMS`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`. Output is reproducible (sorted,
+`SHA256SUMS`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`. Output is reproducible for the same toolchain and lockfiles (the wasm build remaps
+builder paths; `check-pack.mjs` fails on `/home/`, `$HOME` or the checkout path in any file) (sorted,
 owner 0, fixed mtime, `gzip -n`). See [PACKAGING.md](../docs/PACKAGING.md) "Web client
 release asset".
 

@@ -38,6 +38,7 @@ node size.mjs
 echo "== web: pack (release tarball) and check it"
 ./pack.sh >/dev/null
 node check-pack.mjs
+node check-pack-selftest.mjs "$ROOT/dist/"pieceoff-web-*.tar.gz
 if [ "$E2E" -eq 1 ]; then
   "$ROOT/scripts/web-e2e.sh"
 fi

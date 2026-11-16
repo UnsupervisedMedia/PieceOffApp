@@ -15,7 +15,8 @@
 # SHA256SUMS, LICENSE, THIRD_PARTY_NOTICES.txt (the Rust crates in the wasm and
 # the npm packages in the bundle). The wasm glue is inlined in play.js.
 #
-# Reproducible: files only, sorted by name (C locale), owner 0:0, mtime fixed,
+# Reproducible (same toolchain and lockfiles; the wasm build remaps builder
+# paths, see build-wasm.sh): files only, sorted by name (C locale), owner 0:0, mtime fixed,
 # normalised modes, gzip -n. Packing twice gives the same bytes.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)

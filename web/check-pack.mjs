@@ -66,6 +66,14 @@ for (const [p, buf] of files) {
   }
 }
 
+// 1b. No builder paths: the bundle is published, so no file may carry /home/,
+//     this user's $HOME or the checkout's absolute path.
+const REPO = resolve(HERE, '..');
+const needles = ['/home/', REPO, process.env.HOME].filter((n) => n && n.length > 1);
+for (const [p, buf] of files) {
+  for (const n of needles) if (buf.includes(Buffer.from(n))) bad(`${p}: leaks a local path (contains "${n}")`);
+}
+
 // 2. play-app.json and everything it references.
 let idx = {};
 try {
