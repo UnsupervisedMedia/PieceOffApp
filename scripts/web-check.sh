@@ -3,7 +3,9 @@
 # it), typecheck, tests, build, and a size budget: what the lobby loads up
 # front (play.js and the chunks it imports statically, the core wasm and
 # play.css), gzipped, must stay at or under 400 KB; the lazy board chunk is
-# reported (web/size.mjs). With --e2e it then also runs the two-client
+# reported (web/size.mjs). Then web/pack.sh builds the release tarball into
+# dist/ and web/check-pack.mjs verifies it (contents, checksums, no leaks,
+# budget again on the packed bytes, byte-identical second pack; ~1 s). With --e2e it then also runs the two-client
 # browser e2e against a local rooms Worker (scripts/web-e2e.sh; opt-in: it
 # needs wrangler, Playwright's Chromium and about a minute).
 #
@@ -33,6 +35,9 @@ echo "== web: build"
 npm run --silent build
 echo "== web: size budget"
 node size.mjs
+echo "== web: pack (release tarball) and check it"
+./pack.sh >/dev/null
+node check-pack.mjs
 if [ "$E2E" -eq 1 ]; then
   "$ROOT/scripts/web-e2e.sh"
 fi
