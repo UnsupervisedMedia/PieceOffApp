@@ -402,7 +402,8 @@ impl PieceOffApp {
     fn apply_rotate(&mut self, snapshot: &mut RoomSnapshot, hovered: Option<u32>, turns: i8) {
         let (cell_w, cell_h) = (snapshot.cell_width(), snapshot.cell_height());
         if let Some(drag) = self.dragging.as_mut() {
-            drag.origins = rotate_origins(&drag.origins, drag.anchor_piece_id, turns, cell_w, cell_h);
+            drag.origins =
+                rotate_origins(&drag.origins, drag.anchor_piece_id, turns, cell_w, cell_h);
             let anchor_piece_id = drag.anchor_piece_id;
             let held: Vec<u32> = drag.origins.iter().map(|(id, _, _)| *id).collect();
             for id in held {
@@ -1560,7 +1561,12 @@ pub(crate) fn cover_uv_rect(board_w: f32, board_h: f32, media_w: f32, media_h: f
 /// Rotate a piece-local point clockwise by `quarter_turns` about the centre of
 /// the piece's cell. The server pivots on the same centre (see
 /// `RoomRuntime::rotate_selection`), so what is drawn is what is validated.
-pub(crate) fn rotate_local(point: [f32; 2], quarter_turns: u8, cell_w: f32, cell_h: f32) -> [f32; 2] {
+pub(crate) fn rotate_local(
+    point: [f32; 2],
+    quarter_turns: u8,
+    cell_w: f32,
+    cell_h: f32,
+) -> [f32; 2] {
     let (cx, cy) = (cell_w / 2.0, cell_h / 2.0);
     let (mut dx, mut dy) = (point[0] - cx, point[1] - cy);
     for _ in 0..quarter_turns % 4 {
@@ -1572,7 +1578,12 @@ pub(crate) fn rotate_local(point: [f32; 2], quarter_turns: u8, cell_w: f32, cell
 /// The inverse of `rotate_local`, for mapping a pointer into an unrotated
 /// outline.
 pub(crate) fn unrotate_local(point: Pos2, quarter_turns: u8, cell_w: f32, cell_h: f32) -> Pos2 {
-    let [x, y] = rotate_local([point.x, point.y], (4 - quarter_turns % 4) % 4, cell_w, cell_h);
+    let [x, y] = rotate_local(
+        [point.x, point.y],
+        (4 - quarter_turns % 4) % 4,
+        cell_w,
+        cell_h,
+    );
     Pos2::new(x, y)
 }
 
@@ -1612,7 +1623,11 @@ pub(crate) fn rotate_origins(
         .iter()
         .map(|&(id, x, y)| {
             let (dx, dy) = (x + cell_w / 2.0 - px, y + cell_h / 2.0 - py);
-            let (rx, ry) = if quarter_turns > 0 { (-dy, dx) } else { (dy, -dx) };
+            let (rx, ry) = if quarter_turns > 0 {
+                (-dy, dx)
+            } else {
+                (dy, -dx)
+            };
             (id, px + rx - cell_w / 2.0, py + ry - cell_h / 2.0)
         })
         .collect()

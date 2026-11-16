@@ -363,7 +363,12 @@ impl PieceOffApp {
         }
         // Spectators and replays leave the room's pieces alone.
         let playing = !self.spectating && self.replay.is_none();
-        if playing && self.snapshot.as_ref().is_some_and(|s| s.difficulty.rotation) {
+        if playing
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.difficulty.rotation)
+        {
             for (action, turns) in [(Action::RotateCw, 1), (Action::RotateCcw, -1)] {
                 if self.controls.pressed(ctx, action) {
                     self.pending_rotate = Some(turns);
@@ -588,12 +593,12 @@ impl PieceOffApp {
             ui.menu_button(language.text("Arrange"), |ui| {
                 if !no_hints
                     && ui
-                    .button("Edges first")
-                    .on_hover_text(self.hint_with_keys(
-                        "Corners, then edges, then the rest, in order",
-                        Action::TidyTray,
-                    ))
-                    .clicked()
+                        .button("Edges first")
+                        .on_hover_text(self.hint_with_keys(
+                            "Corners, then edges, then the rest, in order",
+                            Action::TidyTray,
+                        ))
+                        .clicked()
                 {
                     ui.close();
                     self.arrange_tray(TrayArrangement::EdgesFirst);
@@ -625,12 +630,12 @@ impl PieceOffApp {
             let mut ghost = self.settings.show_ghost;
             if !no_hints
                 && ui
-                .checkbox(
-                    &mut ghost,
-                    self.hint_with_keys("Board ghost", Action::ToggleGhost),
-                )
-                .on_hover_text("Show a faint copy of the media behind the board")
-                .changed()
+                    .checkbox(
+                        &mut ghost,
+                        self.hint_with_keys("Board ghost", Action::ToggleGhost),
+                    )
+                    .on_hover_text("Show a faint copy of the media behind the board")
+                    .changed()
             {
                 self.settings.show_ghost = ghost;
                 self.persist_settings();

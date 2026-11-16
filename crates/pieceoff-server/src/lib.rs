@@ -5287,16 +5287,23 @@ mod hardening_tests {
             spectator,
             player_key: String::new(),
         };
-        let refused = connect_room(&state, "old", join(15, false)).await.err().unwrap();
+        let refused = connect_room(&state, "old", join(15, false))
+            .await
+            .err()
+            .unwrap();
         assert!(refused.contains("Update PieceOff"), "{refused}");
         let refused_spectator = connect_room(&state, "old-watcher", join(0, true))
             .await
             .err()
             .unwrap();
         assert!(refused_spectator.contains("Update PieceOff"));
-        connect_room(&state, "guest", join(pieceoff_core::PROTOCOL_VERSION, false))
-            .await
-            .unwrap();
+        connect_room(
+            &state,
+            "guest",
+            join(pieceoff_core::PROTOCOL_VERSION, false),
+        )
+        .await
+        .unwrap();
 
         let mut events = room.events.subscribe();
         let before = room
