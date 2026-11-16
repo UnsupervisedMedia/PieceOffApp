@@ -239,7 +239,7 @@ Secrets (dashboard → Worker → Settings → Variables and Secrets, type
 
 | Secret | Needed for |
 | --- | --- |
-| `TURNSTILE_SECRET` | Link approvals and browser room creation. Without it both are refused, so no device can be linked. The live Worker has none yet. |
+| `TURNSTILE_SECRET` | Link approvals and browser room creation. Without it both are refused, so no device can be linked. Set on the live Worker since 2026-11-10 (Turnstile widget `pieceoff-online`). |
 | `ADMIN_TOKEN` | `POST /api/admin/devices/revoke` and `GET /api/admin/usage`. Without it both answer 404. Use a long random value. |
 
 Test-only, never set in production: `DEV_ALLOW_UNVERIFIED_CREATE=1` (skips

@@ -7,3 +7,6 @@
 /dist/
 /docs/superpowers/
 /.venv-media/
+/web/node_modules/
+/web/dist/
+/web/wasm/

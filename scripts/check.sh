@@ -3,22 +3,26 @@
 # formatting, clippy, the workspace tests, and a Windows cross-check so a
 # change that only breaks the Windows build is caught on Linux.
 #
-#   scripts/check.sh [--no-windows] [--bundle]
+#   scripts/check.sh [--no-windows] [--bundle] [--web]
 #
 # --bundle also assembles a no-FFmpeg test zip at
 # dist/PieceOff-<version>-win64-gnu.zip. The Windows steps are skipped, loudly,
-# when the target or mingw-w64 is not installed.
+# when the target or mingw-w64 is not installed. --web runs scripts/web-check.sh
+# (typecheck, tests, build, size budget for web/); it also runs automatically
+# when web/node_modules exists.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 WINDOWS=yes
 BUNDLE=no
+WEB=no
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-windows) WINDOWS=no ;;
     --bundle) BUNDLE=yes ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    --web) WEB=yes ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -49,5 +53,8 @@ fi
 if [ "$BUNDLE" = yes ]; then
   echo "== windows bundle"
   "$ROOT/scripts/bundle-windows-cross.sh"
+fi
+if [ "$WEB" = yes ] || [ -d "$ROOT/web/node_modules" ]; then
+  "$ROOT/scripts/web-check.sh"
 fi
 echo "All checks passed."
