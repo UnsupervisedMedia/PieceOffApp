@@ -886,6 +886,10 @@ async fn upload_still(
     let Some(extension) = valid_still_extension(extension) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Checked here, not only by the caller: the hash names a file on disk.
+    if !valid_sha256(sha256) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
     let mut target = None;
     for room in rooms {
