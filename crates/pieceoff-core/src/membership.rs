@@ -61,6 +61,7 @@ impl RoomRuntime {
             duration_ms,
             cut_style,
             listed,
+            difficulty,
             ..
         } = message
         else {
@@ -85,6 +86,7 @@ impl RoomRuntime {
                 || initial.rows != rows
                 || initial.columns != columns
                 || initial.cut_style != cut_style
+                || initial.difficulty != difficulty
             {
                 return Err("Imported puzzle snapshot does not match its media or grid".into());
             }
@@ -102,7 +104,8 @@ impl RoomRuntime {
                 columns,
                 client_id.to_owned(),
             )?
-            .with_cut_style(cut_style);
+            .with_cut_style(cut_style)
+            .with_difficulty(difficulty);
             snapshot.revision = 1;
             if let Some(first) = snapshot.queue.first_mut() {
                 first.duration_ms = duration_ms;
@@ -116,6 +119,19 @@ impl RoomRuntime {
         runtime.host_id = Some(client_id.to_owned());
         runtime.names.insert(client_id.to_owned(), name.clone());
         Ok((runtime, name))
+    }
+
+    /// Refuse clients too old to render this room (they would show turned
+    /// pieces upright and never let a player turn them).
+    pub fn require_client_protocol(&self, client_protocol: u16) -> Result<(), String> {
+        let rotation = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.difficulty.rotation);
+        if rotation && client_protocol < 16 {
+            return Err("This room turns its pieces. Update PieceOff to join it.".into());
+        }
+        Ok(())
     }
 
     /// Add a player. Promotes them to host when the recorded host is gone.
@@ -275,6 +291,7 @@ mod tests {
             player_key: String::new(),
             cut_style: Default::default(),
             listed: false,
+            difficulty: Default::default(),
         }
     }
 
@@ -319,6 +336,7 @@ mod tests {
             media_extension: "mp4".into(),
             spectator: false,
             player_key: String::new(),
+            client_protocol: 0,
         };
         let wrong = RoomRuntime::new_room("h", join, "i".into(), "C".into());
         assert_eq!(

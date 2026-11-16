@@ -1438,6 +1438,7 @@ async fn connect_room(
             media_extension: _,
             spectator,
             player_key,
+            client_protocol,
         } => {
             let invite_code = invite_code.trim().to_ascii_uppercase();
             let room = state
@@ -1462,6 +1463,7 @@ async fn connect_room(
                 if !media_ready {
                     return Err("The room media is still uploading. Wait for the host and try joining again.".into());
                 }
+                runtime.require_client_protocol(client_protocol)?;
                 let key_hash = player_key_hash(&snapshot_id, &player_key)?;
                 if spectator {
                     // Watchers never host, never count toward the clock or
@@ -1990,6 +1992,7 @@ mod tests {
         imported.playback.playing = true;
 
         let request = ClientMessage::CreateRoom {
+            difficulty: Default::default(),
             name: "Host".into(),
             title: "Imported puzzle".into(),
             media_sha256: "c".repeat(64),
@@ -2028,6 +2031,7 @@ mod tests {
         let state = AppState::new(data_dir.clone());
         let request =
             |cut_style, initial_snapshot: Option<RoomSnapshot>| ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Cut".into(),
                 media_sha256: "c".repeat(64),
@@ -2246,6 +2250,7 @@ mod tests {
             &state,
             client_id,
             ClientMessage::JoinRoom {
+                client_protocol: 0,
                 invite_code: "REJOIN1".into(),
                 name: "Replacement host".into(),
                 media_sha256: hash,
@@ -2954,6 +2959,7 @@ mod tests {
         state.rooms.write().await.insert("ABC123".into(), room);
 
         let guest = ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: "ABC123".into(),
             name: "Guest".into(),
             media_sha256: String::new(),
@@ -4925,6 +4931,7 @@ mod hardening_tests {
         config.max_rooms = 1;
         let state = AppState::from_config(&config);
         let create = |title: &str| ClientMessage::CreateRoom {
+            difficulty: Default::default(),
             name: "Host".into(),
             title: title.into(),
             media_sha256: "a".repeat(64),
@@ -4957,6 +4964,7 @@ mod hardening_tests {
         let state = AppState::from_config(&test_config());
         let (builtin, _) = pieceoff_core::BUILTIN_MEDIA_SHA256[0];
         let create = |listed: bool| ClientMessage::CreateRoom {
+            difficulty: Default::default(),
             name: "Host".into(),
             title: "Loop".into(),
             media_sha256: builtin.into(),
@@ -5105,6 +5113,7 @@ mod hardening_tests {
             &state,
             "host",
             ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Saved at exit".into(),
                 media_sha256: "b".repeat(64),
@@ -5158,6 +5167,7 @@ mod hardening_tests {
             &state,
             "host",
             ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Timed".into(),
                 media_sha256: "c".repeat(64),
@@ -5222,6 +5232,7 @@ mod hardening_tests {
             &restored,
             "guest",
             ClientMessage::JoinRoom {
+                client_protocol: 0,
                 invite_code: code.clone(),
                 name: "Guest".into(),
                 media_sha256: "c".repeat(64),
@@ -5239,6 +5250,115 @@ mod hardening_tests {
     }
 
     #[tokio::test]
+    async fn rotation_rooms_turn_pieces_for_everyone_and_refuse_old_clients() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                difficulty: pieceoff_core::Difficulty {
+                    rotation: true,
+                    no_hints: false,
+                },
+                name: "Host".into(),
+                title: "Turned".into(),
+                media_sha256: "e".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+                player_key: String::new(),
+                cut_style: Default::default(),
+                listed: false,
+            },
+        )
+        .await
+        .unwrap();
+        let join = |protocol: u16, spectator: bool| ClientMessage::JoinRoom {
+            client_protocol: protocol,
+            invite_code: code.clone(),
+            name: "Guest".into(),
+            media_sha256: "e".repeat(64),
+            media_extension: "png".into(),
+            spectator,
+            player_key: String::new(),
+        };
+        let refused = connect_room(&state, "old", join(15, false))
+            .await
+            .err()
+            .unwrap();
+        assert!(refused.contains("Update PieceOff"), "{refused}");
+        let refused_spectator = connect_room(&state, "old-watcher", join(0, true))
+            .await
+            .err()
+            .unwrap();
+        assert!(refused_spectator.contains("Update PieceOff"));
+        connect_room(
+            &state,
+            "guest",
+            join(pieceoff_core::PROTOCOL_VERSION, false),
+        )
+        .await
+        .unwrap();
+
+        let mut events = room.events.subscribe();
+        let before = room
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .piece(0)
+            .unwrap()
+            .rotation;
+        dispatch(&room, "guest", ClientMessage::DragStart { piece_id: 0 })
+            .await
+            .unwrap();
+        dispatch(
+            &room,
+            "guest",
+            ClientMessage::RotateSelection {
+                anchor_piece_id: 0,
+                quarter_turns: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut saw_turn = false;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await
+        {
+            if let ServerMessage::PiecesChanged { pieces, .. } = event
+                && pieces
+                    .iter()
+                    .any(|piece| piece.id == 0 && piece.rotation == (before + 1) % 4)
+            {
+                saw_turn = true;
+            }
+        }
+        assert!(saw_turn, "every player is told about the turn");
+        // Someone who does not hold the piece cannot turn it.
+        assert!(
+            dispatch(
+                &room,
+                "host",
+                ClientMessage::RotateSelection {
+                    anchor_piece_id: 0,
+                    quarter_turns: 1,
+                },
+            )
+            .await
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
     async fn holders_reserve_pieces_survive_a_restart_and_are_released_after_the_grace() {
         let config = test_config();
         let state = AppState::from_config(&config);
@@ -5246,6 +5366,7 @@ mod hardening_tests {
             &state,
             "host",
             ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Sorted".into(),
                 media_sha256: "d".repeat(64),
@@ -5267,6 +5388,7 @@ mod hardening_tests {
             &state,
             "guest",
             ClientMessage::JoinRoom {
+                client_protocol: 0,
                 invite_code: code.clone(),
                 name: "Guest".into(),
                 media_sha256: "d".repeat(64),
@@ -5393,6 +5515,7 @@ mod hardening_tests {
             &state,
             "host",
             ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Claimed".into(),
                 media_sha256: "e".repeat(64),
@@ -5411,6 +5534,7 @@ mod hardening_tests {
         .await
         .unwrap();
         let join = |name: &str, key: &str| ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: code.clone(),
             name: name.into(),
             media_sha256: "e".repeat(64),
@@ -5461,6 +5585,7 @@ mod hardening_tests {
             &state,
             "host",
             ClientMessage::CreateRoom {
+                difficulty: Default::default(),
                 name: "Host".into(),
                 title: "Lapsing".into(),
                 media_sha256: "e".repeat(64),
@@ -5479,6 +5604,7 @@ mod hardening_tests {
         .await
         .unwrap();
         let join = |name: &str, key: &str| ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: code.clone(),
             name: name.into(),
             media_sha256: "e".repeat(64),
@@ -5608,6 +5734,7 @@ mod hardening_tests {
 
     fn create_message(title: &str, hash: char) -> ClientMessage {
         ClientMessage::CreateRoom {
+            difficulty: Default::default(),
             name: "Host".into(),
             title: title.into(),
             media_sha256: hash.to_string().repeat(64),
@@ -5626,6 +5753,7 @@ mod hardening_tests {
 
     fn watch_message(code: &str, name: &str, hash: char) -> ClientMessage {
         ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: code.into(),
             name: name.into(),
             media_sha256: hash.to_string().repeat(64),
@@ -5718,6 +5846,7 @@ mod hardening_tests {
         );
         // Players have their own limit: a full gallery does not stop one.
         let player = ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: code.clone(),
             name: "Eve".into(),
             media_sha256: "e".repeat(64),
@@ -5849,6 +5978,7 @@ mod hardening_tests {
             &restored,
             "host-2",
             ClientMessage::JoinRoom {
+                client_protocol: 0,
                 invite_code: code.clone(),
                 name: "Host".into(),
                 media_sha256: "1".repeat(64),

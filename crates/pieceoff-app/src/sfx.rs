@@ -513,6 +513,7 @@ mod tests {
 
     fn piece(id: u32, group_id: u32, placed: bool) -> Piece {
         Piece {
+            rotation: 0,
             id,
             group_id,
             row: 0,

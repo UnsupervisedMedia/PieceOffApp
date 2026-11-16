@@ -63,7 +63,7 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   stays unannounced until moderation exists; uploads stay off until abuse
   contact, takedown and a hash blocklist exist.
 - **Next: Plan 1C media lifecycle.** The earlier protocol v9 sketch is stale;
-  the current wire protocol is v15. Decide the schema change for `seed_sha256`,
+  the current wire protocol is v16 (v16 shipped harder modes: rotation, no hints, 1000 pieces; this schema change would be v17). Decide the schema change for `seed_sha256`,
   `still_sha256`, owner and source fields; completion still and release of the
   finished video so a solved
   room keeps only a still; restart of a released item accepted only if the
