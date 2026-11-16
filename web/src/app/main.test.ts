@@ -283,6 +283,30 @@ describe('app', () => {
     expect(reload).toHaveBeenCalled();
   });
 
+  it('kicked_or_banned_in_room_ends_on_a_screen_with_back_to_lobby', async () => {
+    const { root, sockets } = setup({ search: '?c=ABCD2345' });
+    root.querySelector<HTMLInputElement>('input[name=name]')!.value = 'Ann';
+    submit(root);
+    sockets[0]!.open();
+    sockets[0]!.receive(welcome(V));
+    await flush();
+    expect(root.textContent).toContain('board ABCD2345 Ann');
+    sockets[0]!.receive({ type: 'kicked', client_id: 'me', message: 'removed by host' });
+    expect(root.querySelector('[data-end]')!.getAttribute('data-end')).toBe('kicked');
+    expect(root.textContent).not.toContain('board ABCD2345');
+    click(root, 'Back to the lobby');
+    expect(root.querySelector('h1')!.textContent).toBe('Play PieceOff');
+    // Rejoining after a ban: the refusal is fatal 'banned', same way out.
+    app!.join.start('ABCD2345');
+    root.querySelector<HTMLInputElement>('input[name=name]')!.value = 'Ann';
+    submit(root);
+    sockets.at(-1)!.open();
+    sockets.at(-1)!.receive({ type: 'error', message: 'The host removed you from this room.' });
+    expect(root.querySelector('[data-end]')!.getAttribute('data-end')).toBe('banned');
+    click(root, 'Back to the lobby');
+    expect(root.querySelector('h1')!.textContent).toBe('Play PieceOff');
+  });
+
   it('escape_goes_back_from_the_name_prompt', () => {
     const { root } = setup({ search: '?c=ABCD2345' });
     root.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));

@@ -7,15 +7,16 @@ describe('config', () => {
       api: 'https://rooms.pieceoff.app',
       turnstileSiteKey: '0x4AAAAAAF7xNWih_NrGxdF_',
       assetBase: '/play-app/',
+      site: 'https://pieceoff.app',
     });
     expect(DEFAULT_CONFIG.api).toBe('https://rooms.pieceoff.app');
   });
 
   it('reads_window_config_and_tidies_it', () => {
     const c = readConfig({
-      PIECEOFF_WEB_CONFIG: { api: 'http://127.0.0.1:8787/', turnstileSiteKey: 'site-key', assetBase: '/assets' },
+      PIECEOFF_WEB_CONFIG: { api: 'http://127.0.0.1:8787/', turnstileSiteKey: 'site-key', assetBase: '/assets', site: 'http://localhost:4321/' },
     });
-    expect(c).toEqual({ api: 'http://127.0.0.1:8787', turnstileSiteKey: 'site-key', assetBase: '/assets/' });
+    expect(c).toEqual({ api: 'http://127.0.0.1:8787', turnstileSiteKey: 'site-key', assetBase: '/assets/', site: 'http://localhost:4321' });
   });
 
   it('ignores_unusable_values', () => {
@@ -26,6 +27,11 @@ describe('config', () => {
     expect(readConfig({ PIECEOFF_WEB_CONFIG: 'nope' } as unknown as { PIECEOFF_WEB_CONFIG?: unknown })).toEqual(DEFAULT_CONFIG);
     // Plain http only for local development.
     expect(readConfig({ PIECEOFF_WEB_CONFIG: { api: 'http://evil.example' } }).api).toBe(DEFAULT_CONFIG.api);
+    // The invite origin is an origin: no path, query or script scheme.
+    for (const site of ['javascript:alert(1)', 'http://evil.example', 'https://x.example/join', 'https://x.example/?a=1']) {
+      expect(readConfig({ PIECEOFF_WEB_CONFIG: { site } }).site).toBe(DEFAULT_CONFIG.site);
+    }
+    expect(readConfig({ PIECEOFF_WEB_CONFIG: { site: 'https://staging.pieceoff.app' } }).site).toBe('https://staging.pieceoff.app');
   });
 
   it('ws_url_follows_the_api_scheme', () => {

@@ -8,7 +8,7 @@ export interface BoardModule {
     root: HTMLElement,
     joined: Joined & { spectatorBecauseFull: boolean },
     leave: () => void,
-    config: { assetBase: string },
+    config: { assetBase: string; site: string },
   ): { destroy(): void };
 }
 

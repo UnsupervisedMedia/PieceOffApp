@@ -132,7 +132,7 @@ export interface OverlayOptions {
   /** 2D context factory (tests inject a recorder; jsdom has none). */
   context2d?: (c: HTMLCanvasElement) => CanvasRenderingContext2D | null;
   /** Names whose cursors and pings are hidden (local mute). */
-  muted?: () => ReadonlySet<string>;
+  muted?: () => { has(name: string): boolean };
 }
 
 export interface OverlayScene {

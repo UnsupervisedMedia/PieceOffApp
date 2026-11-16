@@ -4,7 +4,8 @@
 //
 //   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 //   <script>window.PIECEOFF_WEB_CONFIG = { api: "https://rooms.pieceoff.app",
-//     turnstileSiteKey: "0x4AAAAAAF7xNWih_NrGxdF_", assetBase: "/play-app/" };</script>
+//     turnstileSiteKey: "0x4AAAAAAF7xNWih_NrGxdF_", assetBase: "/play-app/",
+//     site: "https://pieceoff.app" };</script>
 //
 // `viewport-fit=cover` is needed for the safe-area insets the stylesheet uses.
 
@@ -15,12 +16,15 @@ export interface WebConfig {
   turnstileSiteKey: string;
   /** URL prefix the release bundle is served from (wasm, builtin/), with a trailing slash. */
   assetBase: string;
+  /** Public site origin that serves `/join?c=CODE` invite links, no trailing slash. */
+  site: string;
 }
 
 export const DEFAULT_CONFIG: Readonly<WebConfig> = Object.freeze({
   api: 'https://rooms.pieceoff.app',
   turnstileSiteKey: '0x4AAAAAAF7xNWih_NrGxdF_',
   assetBase: '/play-app/',
+  site: 'https://pieceoff.app',
 });
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -36,6 +40,19 @@ function cleanApi(v: unknown): string | null {
   const ok = u.protocol === 'https:' || (u.protocol === 'http:' && LOCAL_HOSTS.has(u.hostname));
   if (!ok || u.username || u.password || u.search || u.hash) return null;
   return u.origin + u.pathname.replace(/\/+$/, '');
+}
+
+function cleanSite(v: unknown): string | null {
+  if (typeof v !== 'string' || v.length > 200) return null;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  const ok = u.protocol === 'https:' || (u.protocol === 'http:' && LOCAL_HOSTS.has(u.hostname));
+  if (!ok || u.username || u.password || u.search || u.hash || (u.pathname !== '/' && u.pathname !== '')) return null;
+  return u.origin;
 }
 
 function cleanKey(v: unknown): string | null {
@@ -57,6 +74,7 @@ export function readConfig(win: { PIECEOFF_WEB_CONFIG?: unknown } = globalThis a
     api: cleanApi(o.api) ?? DEFAULT_CONFIG.api,
     turnstileSiteKey: cleanKey(o.turnstileSiteKey) ?? DEFAULT_CONFIG.turnstileSiteKey,
     assetBase: cleanBase(o.assetBase) ?? DEFAULT_CONFIG.assetBase,
+    site: cleanSite(o.site) ?? DEFAULT_CONFIG.site,
   };
 }
 

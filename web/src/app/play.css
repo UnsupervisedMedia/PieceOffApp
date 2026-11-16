@@ -495,3 +495,270 @@ body {
   border: 1px solid var(--line);
   pointer-events: none;
 }
+
+/* ---- room toolbar (ui/toolbar.ts): a bottom sheet on phones, a side panel
+   on wide screens and short landscape screens (SIDE_QUERY in toolbar.ts) ---- */
+.po-board-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.po-board-body > .po-board-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.btn--danger {
+  border-color: #c2453a;
+  color: #ffb4ab;
+}
+.po-hud-chat {
+  position: relative;
+}
+.po-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+}
+.po-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+  z-index: 20;
+}
+.po-panel--sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--po-kb, 0px);
+  max-height: calc(var(--po-vvh, 100dvh) * 0.72);
+  min-height: min(18rem, calc(var(--po-vvh, 100dvh) * 0.6));
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  animation: po-sheet-in 160ms ease-out;
+}
+@keyframes po-sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+.po-panel--side {
+  position: relative;
+  flex: 0 0 min(22rem, 42vw);
+  width: min(22rem, 42vw);
+  border-left: 1px solid var(--line);
+  padding-right: env(safe-area-inset-right);
+  padding-top: env(safe-area-inset-top);
+}
+.po-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.po-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+.po-tab {
+  flex: 1 1 auto;
+  min-height: var(--tap);
+  padding: 0 0.6rem;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.po-tab.is-on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.po-tab:focus-visible,
+.po-panel a:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+.po-panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.po-pane {
+  padding: 10px 12px 12px;
+}
+.po-panel-status {
+  margin: 8px 12px 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #2a2f3a;
+}
+.po-confirm {
+  margin: 8px 12px 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #c2453a;
+  border-radius: 10px;
+  background: #2a2228;
+}
+.po-confirm p {
+  margin: 0.25rem 0 0.5rem;
+}
+.po-sub {
+  margin: 0.9rem 0 0.35rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+.po-list,
+.po-credits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.po-list li,
+.po-credits li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: var(--tap);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.po-list li.is-muted .po-person-name {
+  opacity: 0.6;
+}
+.po-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.po-person-name,
+.po-credit-who {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.po-credit-n {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.po-row-actions {
+  display: flex;
+  gap: 4px;
+}
+.po-host-badge {
+  padding: 0 0.4rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.po-solve-clock {
+  margin: 0;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.po-solve-total {
+  margin: 0.1rem 0 0.4rem;
+}
+.po-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.po-chat-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.po-panel--sheet .po-chat-log {
+  max-height: calc(var(--po-vvh, 100dvh) * 0.72 - 9rem);
+}
+.po-chat-line {
+  padding: 3px 0;
+}
+.po-chat-name {
+  font-weight: 700;
+  margin-right: 0.4rem;
+}
+.po-chat-off {
+  margin: 0;
+}
+.po-chat-form,
+.po-inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.po-chat-form .input,
+.po-inline .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.po-chat-count {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.po-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.8rem;
+  margin: 0.6rem 0;
+}
+.po-facts dt {
+  color: var(--muted);
+}
+.po-facts dd {
+  margin: 0;
+}
+.po-invite-link {
+  overflow-wrap: anywhere;
+}
+.po-share p,
+.po-report {
+  margin: 0 0 0.4rem;
+}
+.po-leave {
+  margin-top: 1rem;
+}
+/* Narrow phones: the room code is in the Room tab; keep the HUD on one row. */
+@media (max-width: 430px) {
+  .po-board-code {
+    display: none;
+  }
+  .po-board-hud {
+    gap: 6px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .po-panel--sheet {
+    animation: none;
+  }
+}

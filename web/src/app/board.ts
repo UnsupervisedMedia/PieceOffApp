@@ -51,8 +51,10 @@ import { builtinAssets, type BuiltinAssets } from '../media/builtin';
 import { MediaSync } from '../media/sync';
 import type { RoomState } from '../net/roomState';
 import type { FatalReason, SocketState } from '../net/socket';
-import type { ClientMessage, RoomSnapshot, ServerMessage, SolveStats } from '../protocol';
+import type { ClientMessage, RoomSnapshot, ServerMessage } from '../protocol';
+import { SolveClock } from '../ui/clock';
 import { button, h } from '../ui/dom';
+import { mountToolbar } from '../ui/toolbar';
 import type { BoardModule } from './loadBoard';
 import { HAS_ROTATION, pieceRotation, roomRotates, rotateMessage } from './rotation';
 
@@ -119,25 +121,18 @@ export interface BoardHandle {
   setSelectMode(on: boolean): void;
   /** Subscribe to select-mode changes (toolbar). Returns the unsubscribe. */
   onSelectModeChange(cb: (on: boolean) => void): () => void;
+  /** The board's section; `body` holds the stage (and the toolbar's side panel), `hud` the bottom bar. */
+  readonly el: HTMLElement;
+  readonly body: HTMLElement;
+  readonly hud: HTMLElement;
+  /** The room's solve clock (the HUD shows it; the players panel too). */
+  readonly clock: SolveClock;
+  /** Local mute: these names' cursors and pings are not drawn (compared without case). */
+  setMuted(names: Iterable<string>): void;
 }
 
-// ---- solve clock -------------------------------------------------------------
-
-/** Solve time at server time `serverNow`: banked time plus the running stretch. */
-export function solveElapsedMs(stats: SolveStats, serverNow: number): number {
-  const run = stats.running_since_ms === null ? 0 : Math.max(0, serverNow - stats.running_since_ms);
-  return stats.elapsed_ms + run;
-}
-
-/** m:ss, or h:mm:ss from an hour. */
-export function formatClock(ms: number): string {
-  const t = Math.max(0, Math.floor(ms / 1000));
-  const s = t % 60;
-  const m = Math.floor(t / 60) % 60;
-  const hr = Math.floor(t / 3600);
-  const ss = String(s).padStart(2, '0');
-  return hr > 0 ? `${hr}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-}
+// The solve clock lives in ui/clock.ts (shared with the players panel).
+export { formatClock, solveElapsedMs } from '../ui/clock';
 
 // ---- geometry ----------------------------------------------------------------
 
@@ -220,7 +215,8 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
   );
   const toast = h('div', { class: 'po-board-toast', role: 'status', 'aria-live': 'polite' });
   toast.hidden = true;
-  const section = h('section', { class: 'po-board', 'aria-label': 'Puzzle' }, stage, hud, toast);
+  const body = h('div', { class: 'po-board-body' }, stage);
+  const section = h('section', { class: 'po-board', 'aria-label': 'Puzzle' }, body, hud, toast);
   root.replaceChildren(section);
 
   // ---- renderer, overlays ----
@@ -230,9 +226,12 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     ? deps.createRenderer(glCanvas, media, camera)
     : new BoardRenderer(glCanvas, media, { camera, transparent: true, raf, caf, matchMedia: mm });
   const model = new OverlayModel();
+  let mutedLower = new Set<string>();
+  const mutedView = { has: (name: string) => mutedLower.has(name.toLowerCase()) };
   const overlays = new OverlayLayers(under, over, camera, {
     model,
     cursors: () => state.cursors,
+    muted: () => mutedView,
     now,
     raf,
     caf,
@@ -374,23 +373,11 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
   };
 
   // ---- solve clock ----
-  let clockTimer: unknown = null;
-  const tickClock = () => {
-    clockTimer = null;
-    const s = state.snapshot();
-    if (!s) return;
-    const ms = solveElapsedMs(s.stats, state.serverNow());
-    clockEl.textContent = formatClock(ms);
-    if (s.stats.running_since_ms !== null) {
-      // Wake at the next whole second of the clock.
-      clockTimer = timers.set(tickClock, 1000 - (ms % 1000) || 1000);
-    }
-  };
-  const restartClock = () => {
-    if (clockTimer !== null) timers.clear(clockTimer);
-    clockTimer = null;
-    tickClock();
-  };
+  const clock = new SolveClock(state, timers);
+  clock.onTick((r) => {
+    clockEl.textContent = r.text;
+  });
+  const restartClock = () => clock.restart();
 
   // ---- toast ----
   let toastTimer: unknown = null;
@@ -753,6 +740,14 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     camera,
     selection,
     setSelectMode,
+    el: section,
+    body,
+    hud,
+    clock,
+    setMuted(names) {
+      mutedLower = new Set([...names].map((n) => n.toLowerCase()));
+      overlays.requestDraw('over');
+    },
     onSelectModeChange(cb) {
       selectCbs.push(cb);
       return () => {
@@ -770,9 +765,9 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       for (const c of cleanups.splice(0)) c();
       observer?.disconnect();
       observer = null;
-      if (clockTimer !== null) timers.clear(clockTimer);
+      clock.dispose();
       if (toastTimer !== null) timers.clear(toastTimer);
-      clockTimer = toastTimer = null;
+      toastTimer = null;
       lod?.dispose();
       sync.dispose();
       overlays.dispose();
@@ -791,11 +786,18 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
 }
 
 /** The lobby app's entry point (see loadBoard.ts): a joined room, full screen. */
-export const mountJoined: BoardModule['mountBoard'] = (root, joined, leave, config) =>
-  mountBoard(root, {
+export const mountJoined: BoardModule['mountBoard'] = (root, joined, leave, config) => {
+  const board = mountBoard(root, {
     socket: joined.socket,
     state: joined.room,
     media: { assetBase: config.assetBase },
     spectator: joined.welcome.spectator,
-    leave,
   });
+  const toolbar = mountToolbar(board, { state: joined.room, socket: joined.socket, site: config.site, leave });
+  return {
+    destroy() {
+      toolbar.destroy();
+      board.destroy();
+    },
+  };
+};
