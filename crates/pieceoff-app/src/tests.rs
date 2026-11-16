@@ -4859,7 +4859,7 @@ fn http_stub(
     (format!("ws://{address}/ws"), handle)
 }
 
-const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":16,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
+const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":17,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
 const TEST_DEVICE_KEY: &str = "pok_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 
 #[test]

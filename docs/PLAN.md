@@ -62,13 +62,19 @@ Durable Object, with media in R2. Status as of 2026-11-05:
   are refused), `ADMIN_TOKEN`, and the Workers Builds connection. The lobby
   stays unannounced until moderation exists; uploads stay off until abuse
   contact, takedown and a hash blocklist exist.
-- **Next: Plan 1C media lifecycle.** The earlier protocol v9 sketch is stale;
-  the current wire protocol is v16 (v16 shipped harder modes: rotation, no hints, 1000 pieces; this schema change would be v17). Decide the schema change for `seed_sha256`,
-  `still_sha256`, owner and source fields; completion still and release of the
-  finished video so a solved
-  room keeps only a still; restart of a released item accepted only if the
-  re-upload matches `seed_sha256`; quota-freeing media deletion. Ephemeral
-  cursors, chat and pings now pass through shared Rust relay validation in the
+- **Plan 1C media lifecycle (protocol v17): schema and axum server done.**
+  The wire protocol is v17 (v16 shipped harder modes). `MediaItem` carries
+  `seed_sha256`, `still_sha256`, `owner` and `source`; a finished video can be
+  released to a stored completion still (the video file is deleted unless
+  another room queues it, freeing quota), and only the original video (hash ==
+  `seed_sha256`) can be restored. See ARCHITECTURE.md. **Still to do:** the
+  desktop app capturing and uploading the still on completion and offering
+  "bring back the video" (needs the upload token passed to the UI and an
+  upload thread; the last frame is in `last_video_frame`); the hosted Worker
+  releasing videos in R2 with the registry budget (uploads are off at launch
+  and built-in loops are not videos, so nothing needs it yet); the
+  `completed_cleanup_minutes` timer that releases automatically. Ephemeral
+  cursors, chat and pings pass through shared Rust relay validation in the
   Durable Object, with host-side rate limits and in-memory chat history.
 - **Later: Plan 1D, web client.** egui compiled to WASM sharing the desktop board
   code, a browser `MediaDecoderBackend` (hidden `<video>` uploaded to GL through
