@@ -260,13 +260,74 @@ describe('board', () => {
     const back = s.r.last(0);
     expect([back[1], back[2]]).toEqual([600, 100]);
     expect(back[4] & FLAG_HELD).toBe(0);
-    // The rest of the gesture sends nothing for a refused drag.
+    // No more moves for a refused (paused) drag, but the release still drops:
+    // errors carry no id, so the client cannot know it was this drag's refusal.
     const before = s.drags().length;
     s.pointer('pointermove', 1, x + 80, y);
-    s.pointer('pointerup', 1, x + 80, y);
     expect(s.drags().length).toBe(before);
-    // The refusal is shown verbatim.
-    expect(s.root.textContent).toContain("That piece is in Bo's holder.");
+    s.pointer('pointerup', 1, x + 80, y);
+    const after = s.drags().slice(before);
+    expect(after.map((m) => m.type)).toEqual(['drag_end']);
+    // The refusal is shown verbatim; the server's answer to the drop is not toasted over it.
+    s.receive({ type: 'error', message: 'You do not hold that piece group' });
+    const toast = s.root.querySelector('.po-board-toast')!;
+    expect(toast.textContent).toBe("That piece is in Bo's holder.");
+  });
+
+  it('a_stray_error_before_the_grant_does_not_leak_the_lease', () => {
+    const s = setup();
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.receive({ type: 'error', message: 'You are sending chat messages too quickly. Wait a moment.' });
+    s.pointer('pointermove', 1, x + 30, y);
+    // The grant arrives after all: back to a normal drag.
+    s.receive({ type: 'pieces_changed', revision: 2, pieces: [{ ...s.snap.pieces[1], held_by: 'me' }] });
+    expect(s.state.localDrag()?.anchorId).toBe(1);
+    s.pointer('pointermove', 1, x + 40, y);
+    s.pointer('pointerup', 1, x + 40, y);
+    const d = s.drags();
+    expect(d[d.length - 1].type).toBe('drag_end');
+    const end = d[d.length - 1] as Extract<ClientMessage, { type: 'drag_end' }>;
+    expect(end.x).toBeCloseTo(1000 + 40 / s.h.camera.scale, 3);
+    expect(s.r.last(1)[1]).toBeCloseTo(end.x, 3);
+  });
+
+  it('a_refused_pickup_sends_exactly_one_drop_and_one_toast', () => {
+    const s = setup();
+    const [x, y] = s.at(0);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.receive({ type: 'error', message: "That piece is in Bo's holder." });
+    for (let k = 0; k < 5; k++) s.pointer('pointermove', 1, x + 30 + k, y);
+    s.pointer('pointerup', 1, x + 40, y);
+    s.receive({ type: 'error', message: 'You do not hold that piece group' });
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
+    expect(s.root.querySelector('.po-board-toast')!.textContent).toBe("That piece is in Bo's holder.");
+    // A real "do not hold" later (nothing expected any more) is shown.
+    s.receive({ type: 'error', message: 'You do not hold that piece group' });
+    expect(s.root.querySelector('.po-board-toast')!.textContent).toBe('You do not hold that piece group');
+  });
+
+  it('a_drag_right_after_a_refused_flick_survives_the_trailing_error', () => {
+    const s = setup();
+    const [x0, y0] = s.at(0);
+    s.pointer('pointerdown', 1, x0, y0);
+    s.pointer('pointermove', 1, x0 + 20, y0);
+    s.receive({ type: 'error', message: "That piece is in Bo's holder." });
+    s.pointer('pointerup', 1, x0 + 20, y0);
+    // Next drag starts before the drop's reply comes back.
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.receive({ type: 'error', message: 'You do not hold that piece group' });
+    expect(s.state.localDrag()?.anchorId).toBe(1);
+    s.pointer('pointermove', 1, x + 40, y);
+    s.receive({ type: 'pieces_changed', revision: 2, pieces: [{ ...s.snap.pieces[1], held_by: 'me' }] });
+    s.pointer('pointerup', 1, x + 40, y);
+    const second = s.drags().slice(3);
+    expect(second.map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'move_piece', 'drag_end']);
+    expect(s.root.querySelector('.po-board-toast')!.textContent).toBe("That piece is in Bo's holder.");
   });
 
   it('group_drag_sends_selection_variants', () => {
@@ -346,6 +407,27 @@ describe('board', () => {
     s.pointer('pointermove', 1, x + 40, y);
     s.pointer('pointerup', 1, x + 40, y);
     expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece']);
+    // Nothing stuck: after the resume the next drag is a normal one.
+    s.receive(welcome(V, { snapshot: { ...s.snap, revision: 5 } }));
+    s.setSocketState('open');
+    expect(s.state.localDrag()).toBeNull();
+    const [x2, y2] = s.at(2);
+    s.pointer('pointerdown', 1, x2, y2);
+    s.pointer('pointermove', 1, x2 + 20, y2);
+    s.pointer('pointerup', 1, x2 + 20, y2);
+    expect(s.drags().slice(2).map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
+  });
+
+  it('a_reconnect_welcome_mid_drag_ends_it_without_a_drop', () => {
+    const s = setup();
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.receive(welcome(V, { snapshot: { ...s.snap, revision: 5 } }));
+    s.pointer('pointermove', 1, x + 40, y);
+    s.pointer('pointerup', 1, x + 40, y);
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece']);
+    expect(s.state.localDrag()).toBeNull();
   });
 
   it('renderer_context_loss_keeps_state_and_input_alive', () => {
