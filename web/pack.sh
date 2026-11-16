@@ -36,10 +36,14 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/pieceoff-app/Cargo.t
 [ -f "$HERE/wasm/pieceoff_web_wasm_bg.wasm" ] || { echo "web/wasm is missing: run web/build-wasm.sh" >&2; exit 1; }
 
 cd "$HERE"
-[ "$BUILD" -eq 0 ] || npm run --silent build
+WORK=
+WORK_LOG=$(mktemp "${TMPDIR:-/tmp}/pieceoff-web-pack-build.XXXXXX")
+trap 'rm -r -f "$WORK" "$WORK_LOG"' EXIT
+if [ "$BUILD" -eq 1 ]; then
+  npm run --silent build >"$WORK_LOG" 2>&1 || { cat "$WORK_LOG" >&2; exit 1; }
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/pieceoff-web-pack.XXXXXX")
-trap 'rm -r -f "$WORK"' EXIT
 STAGE="$WORK/stage"
 mkdir -p "$STAGE/chunks" "$STAGE/builtin"
 cp dist/play.js dist/play.css dist/pieceoff_web_wasm_bg.wasm "$STAGE/"

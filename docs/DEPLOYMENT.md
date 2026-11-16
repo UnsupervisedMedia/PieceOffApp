@@ -331,6 +331,16 @@ the declared part size (R2 needs 5 MiB minimum, up to 10,000 parts). The upload
 token goes only to the host over the socket. The full-file hash is not checked
 by the worker; clients verify it after download.
 
+### Web client (browser play on pieceoff.app)
+
+The browser client (`web/`, vendored into the site as `/play-app/`) calls the Worker from the page origin `https://pieceoff.app`, so the Worker needs three things:
+
+- **CORS for the site origin, from this branch's Worker change.** `POST /api/rooms` now answers `OPTIONS` (204, `Allow-Methods: POST`, `Allow-Headers: x-turnstile-token, content-type`) and returns `Access-Control-Allow-Origin: <SITE_ORIGIN>` on every answer, refusals included, and the `/ws` refusals answered before the room's Durable Object (403 origin, 429 lookup budget, 503 paused) carry it too. A browser hides the status of a failed WebSocket upgrade, so the client re-asks with a plain `GET /ws` and needs that header to read why. The header is only ever the exact `SITE_ORIGIN` (never `*`), and only when the request's `Origin` equals it. **None of this is live until the Worker is deployed** (Workers Builds on a push to the Worker's branch, see above); until then the client works only where the browser sees no cross-origin refusal, and a refused create or join shows a generic failure.
+- **`SITE_ORIGIN` must be in `ALLOWED_ORIGINS`.** The `/ws` origin check (`originAllowed`) accepts the Worker's own host or an origin listed in `ALLOWED_ORIGINS`; the site is a different host. The `/ws` upgrade, the media routes and room creation from the browser therefore depend on `ALLOWED_ORIGINS` containing `https://pieceoff.app` (and any other origin that serves the client, such as a preview). `SITE_ORIGIN` alone only sets the CORS answer; it does not allow the socket. **`worker/wrangler.jsonc` does not set `ALLOWED_ORIGINS` today** (the e2e server sets it for its local page origin only), so before the web client goes live add `"ALLOWED_ORIGINS": "https://pieceoff.app"` to the vars (or set it in the dashboard) and deploy: without it every browser `/ws` upgrade and `POST /api/rooms` from the site is refused with 403 `Origin not allowed`.
+- **Turnstile hostname.** Browser room creation verifies a widget token (action `create_room`) and checks its hostname against `TURNSTILE_HOSTNAME` (default `pieceoff.app`). The widget (`pieceoff-online`, the site key in `PIECEOFF_WEB_CONFIG`) must list `pieceoff.app` as an allowed domain, and the `TURNSTILE_SECRET` secret must be set, or creation is refused. A preview host needs its own widget or domain entry and a matching `TURNSTILE_HOSTNAME`.
+
+The client and the Worker must speak the same protocol version (`GET /api/info` `protocol`; the vendored `play-app.json` carries the client's). Deploy the Worker first when the protocol moves.
+
 ### Device keys
 
 A desktop app links itself once: it asks for a link code, opens

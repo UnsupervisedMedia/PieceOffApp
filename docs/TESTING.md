@@ -196,6 +196,25 @@ hear the same moment (audio is off in every automated run), real network paths
 and latency between machines, real pointer and keyboard input in two windows
 (drag and snap are covered separately by `DragRig`), and Windows and macOS.
 
+## Web play client (`web/`)
+
+- **Unit tests and gate:** `scripts/web-check.sh` builds the core wasm, typechecks, runs the vitest suite (jsdom; the wasm is loaded for real, protocol tags are checked against the Rust enums), builds, enforces the size budget (initial JS + WASM + CSS gzip at most 400 KB; the lazy board chunk is reported), then packs the release tarball and checks it (`web/check-pack.mjs`: every file `play-app.json` and `builtin/manifest.json` name is present, both sha256 lists match, no sourcemaps/dev/spike/e2e files, relative imports resolve, budget again on the packed bytes, two packs are byte-identical). `scripts/check.sh --web` runs it, and `scripts/check.sh` does when `web/node_modules` exists.
+- **Two-client e2e:** `scripts/web-e2e.sh` (or `scripts/web-check.sh --e2e`) starts a local rooms Worker (`wrangler dev`, uploads off, a loopback Turnstile verifier) and a page server, then runs `web/e2e/two-client.spec.ts` in headless Chromium (Playwright): create, invite link, join, drag and snap, chat, reload resume, host controls, 25 pick-up/drop rounds that must leave no lease held, kick, plus interruptions (pointercancel, window blur, reload and socket cut mid-drag) and a phone profile (touch drag, second-finger cancel, long-press, pinch). It needs `wrangler` deps (`worker/`), Playwright's Chromium 1200 in `~/.cache/ms-playwright`, and about a minute. Not covered: a real OS focus loss, a true transport outage, iOS/Android engines.
+- **Release asset smoke:** unpack `dist/pieceoff-web-<version>.tar.gz` into a directory served under `/play-app/` and open a page that loads `/play-app/play.js`; the lobby must render with no 404s (done for 0.2.1 headless; see the Task 12 report).
+
+### Manual device matrix (web client)
+
+Real devices are the only answer for video-in-WebGL and touch feel. Fill one row per device and run; keep old rows. "60fps@400" is a 400-piece room with a built-in loop, measured with the dev page (`web/dev/play.html` through `node web/dev/serve.mjs`, LAN reachable) or Safari/Chrome remote devtools. Cells marked PENDING (owner) have not been tested by anyone; nothing here is inferred.
+
+| Device | OS / browser version | Video-in-WebGL plays | 60fps@400 | Touch drag / pinch / long-press | Keyboard / chat | Notes | Date |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| iPhone (iOS Safari) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | Highest risk: muted inline autoplay, `texImage2D(video)`, Low Power Mode, `requestVideoFrameCallback` needs 15.4+ | PENDING (owner) |
+| Android phone (Chrome) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | PENDING (owner) | | PENDING (owner) |
+| Desktop Chrome (headless, AMD RX 580, ANGLE/GL, 1280x800 @ DPR 2, Linux) | Google Chrome (headless), Playwright 1.49 driving `/usr/bin/google-chrome` | yes, 12 fps loop delivered at 12 fps | yes: 400 jigsaw 16.67 ms avg / 16.8 p95, 0% over 20 ms (vsync-capped); 1000 jigsaw 16.67 / 16.8 | not applicable (emulated touch only: covered by `web-e2e` phone profile on Chromium) | e2e: chat both ways, name prompt | Spike renderer numbers from the Task 5 report; same GL code as the client. Software GL (SwiftShader) is not representative: 62-86 ms avg at DPR 2 | 2026-11-15 |
+| Desktop Chrome (interactive, real display) | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | | PENDING (owner) |
+| Desktop Firefox | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | Not run in e2e (Chromium only) | PENDING (owner) |
+| Desktop Safari (macOS) | PENDING (owner) | PENDING (owner) | PENDING (owner) | n/a | PENDING (owner) | | PENDING (owner) |
+
 ## Playtest log
 
 ### 2026-10-08: automated two-client video run (real server, real FFmpeg, silent)
