@@ -1589,7 +1589,7 @@ pub(crate) fn unrotate_local(point: Pos2, quarter_turns: u8, cell_w: f32, cell_h
 
 /// Bounds of `bounds` (piece-local) after the piece is turned.
 pub(crate) fn rotated_bounds(bounds: Rect, quarter_turns: u8, cell_w: f32, cell_h: f32) -> Rect {
-    if quarter_turns % 4 == 0 {
+    if quarter_turns.is_multiple_of(4) {
         return bounds;
     }
     let mut out = Rect::NOTHING;

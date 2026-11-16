@@ -3747,8 +3747,7 @@ mod cut_style_tests {
     fn a_selection_turns_rigidly_about_the_anchor() {
         let mut room = hard_room(true, false);
         let (a, b) = (0u32, 1u32);
-        let (ids, _) = room.acquire_selection("host", &[a, b]).unwrap().into();
-        let _ = ids;
+        room.acquire_selection("host", &[a, b]).unwrap();
         let snap = room.snapshot.as_ref().unwrap();
         let (pa, pb) = (
             snap.piece(a).unwrap().clone(),
