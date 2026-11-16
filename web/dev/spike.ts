@@ -1,6 +1,7 @@
 // Renderer spike: a fixed local puzzle on the WebGL2 board renderer, with a
 // frame-time readout. Not part of play.js. Query:
 //   ?pieces=400|1000  &cut=jigsaw|hexagon|triangle  &art=0..7  &cap=auto|<max samples>  &bench=1|0
+//   &turned=1 (every piece at a pseudo-random quarter turn, as a v16 rotation room scatters them)
 import init, { builtin_media_json, piece_outlines, protocol_version } from '../wasm/pieceoff_web_wasm.js';
 import { builtinAssets } from '../src/media/builtin';
 import type { CutStyle, RoomSnapshot } from '../src/protocol';
@@ -20,6 +21,7 @@ const ART = Math.max(0, Math.min(7, Number(q.get('art') ?? 0) || 0));
 const CAP_PARAM = q.get('cap') ?? 'auto';
 const CAP = CAP_PARAM === 'auto' ? null : Math.max(3, Number(CAP_PARAM) || 1e9);
 let bench = q.get('bench') !== '0';
+const TURNED = q.get('turned') === '1';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('board');
@@ -93,6 +95,7 @@ async function main(): Promise<void> {
   const rot = new Uint8Array(n);
   const flags = new Uint8Array(n);
   snap.pieces.forEach((p, i) => ((px[i] = p.x), (py[i] = p.y)));
+  if (TURNED) for (let i = 0; i < n; i++) rot[i] = (Math.imul(i + 1, 2654435761) >>> 30) & 3;
 
   const renderer = new BoardRenderer(canvas, { video, poster });
   stats.glRenderer = renderer.glRenderer;

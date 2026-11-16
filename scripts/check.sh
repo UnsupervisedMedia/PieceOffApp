@@ -56,5 +56,7 @@ if [ "$BUNDLE" = yes ]; then
 fi
 if [ "$WEB" = yes ] || [ -d "$ROOT/web/node_modules" ]; then
   "$ROOT/scripts/web-check.sh"
+else
+  echo "WARNING: web check skipped (web/node_modules missing: run 'npm ci' in web/, or pass --web)" >&2
 fi
 echo "All checks passed."

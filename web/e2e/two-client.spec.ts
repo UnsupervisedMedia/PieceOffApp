@@ -40,6 +40,7 @@ interface Piece {
   y: number;
   placed: boolean;
   held_by: string | null;
+  rotation: number;
 }
 interface Snap {
   invite_code: string;
@@ -50,6 +51,7 @@ interface Snap {
   host_id: string;
   revision: number;
   pieces: Piece[];
+  difficulty: { rotation: boolean; no_hints: boolean };
 }
 type Pt = { x: number; y: number };
 
@@ -57,7 +59,11 @@ test.beforeAll(() => {
   if (!SITE || !API) throw new Error('E2E_SITE and E2E_API are not set: run scripts/web-e2e.sh');
 });
 
-async function newClient(browser: Browser, opts: Parameters<Browser['newContext']>[0], tag: string): Promise<{ ctx: BrowserContext; page: Page; log: string[] }> {
+async function newClient(
+  browser: Browser,
+  opts: Parameters<Browser['newContext']>[0],
+  tag: string,
+): Promise<{ ctx: BrowserContext; page: Page; log: string[]; errors: string[] }> {
   const ctx = await browser.newContext(opts);
   await ctx.addInitScript(
     ({ api, site }) => {
@@ -77,10 +83,14 @@ async function newClient(browser: Browser, opts: Parameters<Browser['newContext'
   await ctx.route('https://challenges.cloudflare.com/**', (r) => r.abort());
   const page = await ctx.newPage();
   const log: string[] = [];
+  const errors: string[] = [];
   page.on('console', (m) => {
     if (m.type() === 'error' || m.type() === 'warning') log.push(`${tag} ${m.type()}: ${m.text()}`);
   });
-  page.on('pageerror', (e) => log.push(`${tag} pageerror: ${e.message}`));
+  page.on('pageerror', (e) => {
+    log.push(`${tag} pageerror: ${e.message}`);
+    errors.push(`${tag}: ${e.stack ?? e.message}`);
+  });
   page.on('websocket', (ws) => {
     ws.on('framereceived', (f) => {
       const s = typeof f.payload === 'string' ? f.payload : '';
@@ -89,7 +99,12 @@ async function newClient(browser: Browser, opts: Parameters<Browser['newContext'
     ws.on('close', () => log.push(`${tag} socket closed`));
     if (process.env.E2E_DEBUG) ws.on('framesent', (f) => log.push(`${tag} sent ${String(f.payload).slice(0, 120)}`));
   });
-  return { ctx, page, log };
+  return { ctx, page, log, errors };
+}
+
+/** An uncaught exception in either page fails the test (they are also in the attached log). */
+function noPageErrors(...clients: Array<{ errors: string[] }>): void {
+  expect(clients.flatMap((c) => c.errors), 'uncaught page errors').toEqual([]);
 }
 
 const snap = (p: Page): Promise<Snap | null> =>
@@ -210,10 +225,11 @@ async function touchPath(cdp: CDPSession, from: Pt, to: Pt, steps: number, id = 
 
 // ---- UI steps ----------------------------------------------------------------------
 
-async function createRoom(a: Page, name: string): Promise<Snap> {
+async function createRoom(a: Page, name: string, o: { rotation?: boolean } = {}): Promise<Snap> {
   await a.goto(`${SITE}/`);
   await a.getByRole('button', { name: 'Create room' }).click();
   await a.locator('label', { hasText: /^Easy · 12$/ }).click();
+  if (o.rotation) await a.getByLabel('Rotate pieces').check();
   await a.fill('form input[name=name]', name);
   const submit = a.locator('form button[type=submit]');
   await expect(submit).toBeEnabled();
@@ -464,6 +480,7 @@ test('desktop: join, drag and snap, chat, resume, host controls, leases, kick', 
       await b.getByRole('button', { name: 'Back to the lobby' }).click();
       await expect(b.getByRole('button', { name: 'Create room' })).toBeVisible();
     });
+    noPageErrors(A, B);
   } finally {
     const log = [...A.log, ...B.log];
     if (log.length) await test.info().attach('browser-log', { body: log.join('\n'), contentType: 'text/plain' });
@@ -561,6 +578,88 @@ test('phone: touch join by code, drag, second-finger cancel, long-press select, 
       await expect.poll(() => cameraScale(b)).toBeGreaterThan(before * 1.5);
       await noLease(a, 'pinch');
     });
+    noPageErrors(A, B);
+  } finally {
+    const log = [...A.log, ...B.log];
+    if (log.length) await test.info().attach('browser-log', { body: log.join('\n'), contentType: 'text/plain' });
+    await A.ctx.close();
+    await B.ctx.close();
+  }
+});
+
+test('rotation room: create with turned pieces, turn a held piece upright, snap it home', async ({ browser }) => {
+  const A = await newClient(browser, { viewport: { width: 1100, height: 720 } }, 'A');
+  const B = await newClient(browser, { viewport: { width: 1000, height: 700 } }, 'B');
+  const a = A.page;
+  const b = B.page;
+  try {
+    const s0 = await createRoom(a, 'Ann', { rotation: true });
+    expect(s0.difficulty).toEqual({ rotation: true, no_hints: false });
+    expect(s0.pieces.some((q) => q.rotation !== 0), 'a rotation room starts with turned pieces').toBe(true);
+    await b.goto(`${SITE}/join?c=${s0.invite_code}`);
+    await b.fill('form input[name=name]', 'Bo');
+    await b.locator('form button[type=submit]').click();
+    await boardReady(b);
+    const bId = (await clientId(b))!;
+    const turnRight = b.locator('.po-board-turn[data-turn="1"]');
+
+    await test.step('B holds a turned piece, turns it upright (wheel and E), A sees each turn, then B drops it home and it snaps', async () => {
+      await expect(turnRight).toBeHidden();
+      const s = (await snap(b))!;
+      const { w, h } = cell(s);
+      // A clear, turned piece (its own group: nothing has merged yet).
+      const turned = s.pieces.filter((q) => q.rotation !== 0 && !q.placed);
+      const pressed =
+        turned.find((q) => s.pieces.every((o) => o.id === q.id || Math.abs(o.x - q.x) > w * 1.45 || Math.abs(o.y - q.y) > h * 1.45)) ??
+        turned[0]!;
+      const press = centre(pressed, s);
+      const grabbed = await mouseGrab(b, a, s, pressed, bId, '(rotation room)');
+      const q = piece(s, grabbed.id);
+      expect(q.rotation).not.toBe(0);
+      // The touch turn buttons show once the grab is granted (a mouse turns with the wheel or E / Q).
+      await expect(turnRight).toBeVisible();
+      // Quarter turns clockwise until upright: the first by the wheel, the rest by E.
+      const turns = (4 - q.rotation) % 4;
+      for (let i = 0; i < turns; i++) {
+        if (i === 0) await b.mouse.wheel(0, 100);
+        else await b.keyboard.press('e');
+        const want = (q.rotation + i + 1) % 4;
+        await expect.poll(async () => piece((await snap(a))!, q.id).rotation, { message: `A sees turn ${i + 1}` }).toBe(want);
+      }
+      expect(piece((await snap(a))!, q.id).held_by).toBe(bId);
+      // A quarter turn is about the cell centre, so the corner keeps its offset from the pointer.
+      const home = { x: q.column * w, y: q.row * h };
+      const grab = { x: press.x - q.x, y: press.y - q.y };
+      const target = await toPage(b, { x: home.x + grab.x, y: home.y + grab.y });
+      await b.mouse.move(target.x, target.y, { steps: 10 });
+      await b.mouse.up();
+      await expect
+        .poll(async () => {
+          const p = piece((await snap(a))!, q.id);
+          return { placed: p.placed, held: p.held_by, rotation: p.rotation };
+        })
+        .toEqual({ placed: true, held: null, rotation: 0 });
+      await expect(turnRight).toBeHidden();
+      await noLease(a, 'rotation drop');
+    });
+
+    await test.step('a turned piece dropped on its home cell does not snap', async () => {
+      const s = (await snap(b))!;
+      const { w, h } = cell(s);
+      const q = s.pieces.find((p) => p.rotation !== 0 && !p.placed && p.held_by === null);
+      test.skip(!q, 'no turned piece left');
+      const grabbed = await mouseGrab(b, a, s, q!, bId, '(turned, no snap)');
+      const g = piece(s, grabbed.id);
+      if (g.rotation === 0) return; // grabbed a different, upright piece on top
+      const press = centre(q!, s);
+      const grab = { x: press.x - g.x, y: press.y - g.y };
+      const target = await toPage(b, { x: g.column * w + grab.x, y: g.row * h + grab.y });
+      await b.mouse.move(target.x, target.y, { steps: 10 });
+      await b.mouse.up();
+      await noLease(a, 'turned drop');
+      expect(piece((await snap(a))!, g.id).placed).toBe(false);
+    });
+    noPageErrors(A, B);
   } finally {
     const log = [...A.log, ...B.log];
     if (log.length) await test.info().attach('browser-log', { body: log.join('\n'), contentType: 'text/plain' });
