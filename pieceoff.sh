@@ -108,16 +108,43 @@ start_one() {
     echo "Started $label (PID $pid). Log: $log_file"
 }
 
+port_busy() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | grep -q "[:.]$1[[:space:]]"
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    elif command -v nc >/dev/null 2>&1; then
+        nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# First free port at or after 28878, so nobody has to know about PIECEOFF_BIND.
+pick_port() {
+    port=28878
+    while [ "$port" -lt 28978 ] && port_busy "$port"; do
+        port=$((port + 1))
+    done
+    echo "$port"
+}
+
 start_all() {
     resolve_binaries yes
     umask 077
     mkdir -p "$RUN_DIR" "$DATA_DIR"
-    PIECEOFF_BIND=${PIECEOFF_BIND:-0.0.0.0:28878}
+    if [ -z "${PIECEOFF_BIND:-}" ]; then
+        PORT=$(pick_port)
+        [ "$PORT" = 28878 ] || echo "Port 28878 is in use; using $PORT for the local room server."
+        PIECEOFF_BIND=0.0.0.0:$PORT
+    fi
     PIECEOFF_SERVER_URL=${PIECEOFF_SERVER_URL:-"ws://127.0.0.1:${PIECEOFF_BIND##*:}/ws"}
     export PIECEOFF_BIND PIECEOFF_SERVER_URL
     export PIECEOFF_DATA_DIR="$DATA_DIR"
     echo "PieceOff data: $DATA_DIR"
-    start_one "room server" "$SERVER_BIN" "$SERVER_PID_FILE" "$RUN_DIR/server.log"
+    # Online rooms don't need the local server, so don't block the app on it.
+    start_one "room server" "$SERVER_BIN" "$SERVER_PID_FILE" "$RUN_DIR/server.log" ||
+        echo "Warning: local room server not running; online rooms still work, LAN hosting won't." >&2
     start_one "desktop app" "$APP_BIN" "$APP_PID_FILE" "$RUN_DIR/app.log"
     echo "Open the app and create a room. Run '$0 stop' to close PieceOff."
 }
