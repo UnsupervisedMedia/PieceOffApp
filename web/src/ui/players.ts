@@ -7,6 +7,7 @@ import { playerColor } from '../gl/overlays';
 import type { RoomSnapshot } from '../protocol';
 import type { ClockReading, SolveClock } from './clock';
 import { button, h } from './dom';
+import { patchRows } from './rows';
 
 export interface PeopleSource {
   snapshot(): RoomSnapshot | null;
@@ -85,12 +86,30 @@ export class PlayersPanel {
     const host = this.d.isHost();
     const hostName = this.d.hostName();
     const players = st.spectator ? [...st.peers] : [st.name, ...st.peers];
-    this.people.replaceChildren(...players.map((n) => this.row(n, n === st.name && !st.spectator, host, hostName, credit)));
-    if (players.length === 0) this.people.append(h('li', { class: 'muted' }, 'Nobody is playing right now.'));
-    else if (!st.spectator && st.peers.length === 0) this.people.append(h('li', { class: 'muted' }, 'Share the invite link (under Room) to play together.'));
     const watchers = st.spectator ? [st.name, ...st.spectators] : [...st.spectators];
-    this.watchers.replaceChildren(...watchers.map((n) => this.row(n, n === st.name && st.spectator, host, null, credit)));
+    // Keyed rows patched in place, so focus on a row's control survives the
+    // scoring, joins and snapshots that re-render this panel.
+    const rows = (names: string[], meWhen: (n: string) => boolean, hostNameFor: string | null) =>
+      names.map((n) => {
+        const me = meWhen(n);
+        const sig = JSON.stringify([n, me, host, hostNameFor === n, me ? false : this.d.isMuted(n), st.spectator]);
+        return { key: n, sig, build: () => this.row(n, me, host, hostNameFor, credit) };
+      });
+    const extra: Node[] = [];
+    if (players.length === 0) extra.push(h('li', { class: 'muted' }, 'Nobody is playing right now.'));
+    else if (!st.spectator && st.peers.length === 0) extra.push(h('li', { class: 'muted' }, 'Share the invite link (under Room) to play together.'));
+    patchRows(this.people, rows(players, (n) => n === st.name && !st.spectator, hostName), extra);
+    patchRows(this.watchers, rows(watchers, (n) => n === st.name && st.spectator, null));
     this.watchHead.hidden = this.watchers.hidden = watchers.length === 0;
+    // Credits change with every score: patched into the kept rows.
+    for (const li of [...this.people.children, ...this.watchers.children]) {
+      const n = (li as HTMLElement).dataset.name;
+      const el = li.querySelector('.po-credit-n');
+      if (n === undefined || !el) continue;
+      const c = String(credit.get(n) ?? 0);
+      if (el.textContent !== c) el.textContent = c;
+      el.setAttribute('aria-label', `${c} pieces placed`);
+    }
   }
 
   private row(name: string, me: boolean, host: boolean, hostName: string | null, credit: Map<string, number>): HTMLLIElement {

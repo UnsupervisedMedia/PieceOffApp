@@ -623,6 +623,95 @@ describe('toolbar', () => {
     expect(s.q('.po-people li[data-name="Dee"]')).toBeNull();
   });
 
+  // ---- fix round 1: routine traffic keeps focus and typed input ----------------
+
+  const scoring = (s: ReturnType<typeof setup>, rev: number, n: number) =>
+    s.receive({
+      type: 'pieces_changed', revision: rev, pieces: [],
+      stats: { elapsed_ms: 0, running_since_ms: null, started: true, finished: false, players: [{ name: 'Bob', pieces: n }] },
+    });
+
+  it('focus_on_mute_and_holder_remove_survives_scoring_and_holder_updates', () => {
+    const s = setup({ welcomeOver: { peers: ['Bob', 'Cy'] } });
+    s.q<HTMLButtonElement>('[data-open=menu]').click();
+    s.tab('people');
+    const mute = s.q<HTMLButtonElement>('li[data-name="Bob"] [data-act=mute]');
+    mute.focus();
+    scoring(s, 5, 1);
+    s.receive({ type: 'peer_joined', name: 'Dee', spectator: false });
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap(), revision: 6 } });
+    expect(document.activeElement).toBe(mute);
+    expect(s.q('li[data-name="Bob"] .po-credit-n').textContent).toBe('1');
+    // Toggling mute re-draws that row: focus stays on its Mute control.
+    mute.click();
+    const again = s.q<HTMLButtonElement>('li[data-name="Bob"] [data-act=mute]');
+    expect(again.textContent).toBe('Unmute');
+    expect(document.activeElement).toBe(again);
+    // The sheet still answers its keys.
+    const panel = s.q('.po-panel');
+    const e = key(document.activeElement!, 'Escape');
+    expect(e.defaultPrevented).toBe(true);
+    expect(panel.hidden).toBe(true);
+
+    // Holder Remove button through stats and holder updates.
+    const snap = s.snap();
+    const cw = snap.width / snap.columns;
+    const ch = snap.height / snap.rows;
+    const hd = (id: number, owner: string): PieceHolder => ({ id, owner, label: `H${id}`, x: -2000 - id * 300, y: 0, width: 2 * cw, height: 2 * ch });
+    s.receive({ type: 'pieces_changed', revision: 7, pieces: [], holders: [hd(1, 'Ann'), hd(2, 'Ann')] });
+    s.q<HTMLButtonElement>('[data-open=menu]').click();
+    s.tab('holders');
+    const rm = s.q<HTMLButtonElement>('.po-holders li[data-id="2"] [data-act=delete-holder]');
+    rm.focus();
+    scoring(s, 8, 2);
+    s.receive({ type: 'pieces_changed', revision: 9, pieces: [], holders: [hd(1, 'Ann'), hd(2, 'Ann'), hd(3, 'Bob')] });
+    expect(document.activeElement).toBe(rm);
+    // Its own holder changes (a rename): still the same logical control.
+    s.receive({ type: 'pieces_changed', revision: 10, pieces: [], holders: [hd(1, 'Ann'), { ...hd(2, 'Ann'), label: 'Sky' }, hd(3, 'Bob')] });
+    expect((document.activeElement as HTMLElement).closest('li')!.getAttribute('data-id')).toBe('2');
+    expect((document.activeElement as HTMLElement).dataset.act).toBe('delete-holder');
+    expect(s.q('.po-holders li[data-id="2"]').textContent).toContain('Sky');
+    expect(key(document.activeElement!, 'Escape').defaultPrevented).toBe(true);
+    expect(s.q('.po-panel').hidden).toBe(true);
+  });
+
+  it('release_name_input_keeps_node_text_and_caret_through_scoring', () => {
+    const s = setup({ host: true });
+    s.tab('room');
+    const input = s.q<HTMLInputElement>('input[data-act=release-input]');
+    input.focus();
+    input.value = 'Patricia';
+    input.setSelectionRange(2, 5);
+    scoring(s, 5, 1);
+    s.receive({ type: 'peer_joined', name: 'Dee', spectator: false });
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap(), revision: 6, chat_enabled: false } });
+    s.receive({ type: 'playback_changed', revision: 7, playback: { ...s.snap().playback, playing: false } });
+    const now = s.q<HTMLInputElement>('input[data-act=release-input]');
+    expect(now).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('Patricia');
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    // The switches still follow the room.
+    expect(s.q<HTMLInputElement>('input[data-act=chat-enabled]').checked).toBe(false);
+  });
+
+  it('chat_input_keeps_focus_and_text_through_snapshot_and_peer_join', () => {
+    const s = setup();
+    s.tab('chat');
+    const input = s.q<HTMLInputElement>('.po-chat-input');
+    expect(document.activeElement).toBe(input);
+    input.value = 'half a thou';
+    input.setSelectionRange(4, 4);
+    s.receive({ type: 'snapshot', snapshot: { ...s.snap(), revision: 6 } });
+    s.receive({ type: 'peer_joined', name: 'Dee', spectator: false });
+    s.receive(chatLine(1, 'Bob', 'hey'));
+    scoring(s, 7, 1);
+    expect(s.q('.po-chat-input')).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('half a thou');
+    expect([input.selectionStart, input.selectionEnd]).toEqual([4, 4]);
+  });
+
   it('destroy_removes_the_toolbar', () => {
     const s = setup();
     s.tb.destroy();

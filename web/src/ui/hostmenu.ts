@@ -8,6 +8,7 @@
 import { targetPositionMs } from '../media/sync';
 import type { ClientMessage, CutStyle, RoomSnapshot } from '../protocol';
 import { append, button, h, uid } from './dom';
+import { patchRows } from './rows';
 
 /** Where public-room reports go (desktop moderation_ui.rs REPORT_ADDRESS). */
 export const REPORT_ADDRESS = 'contact@pieceoff.app';
@@ -64,12 +65,80 @@ export class RoomPanel {
   private readonly hostBox: HTMLElement;
   private readonly reportBox: HTMLElement;
   private readonly linkText: HTMLElement;
+  // The host section is built once and patched: routine room traffic must not
+  // recreate its controls (focus, a half-typed name and its caret survive).
+  private readonly host: HTMLElement;
+  private readonly listedBox: HTMLInputElement;
+  private readonly chatBox: HTMLInputElement;
+  private readonly playRow: HTMLElement;
+  private readonly playBtn: HTMLButtonElement;
+  private readonly awayList: HTMLUListElement;
+  private readonly releaseInput: HTMLInputElement;
+  private readonly report: HTMLElement;
+  private readonly reportLink: HTMLAnchorElement;
 
   constructor(private readonly d: RoomPanelDeps) {
     this.linkText = h('code', { class: 'po-invite-link' });
     this.facts = h('dl', { class: 'po-facts' });
     this.hostBox = h('div', { class: 'po-host-slot' });
     this.reportBox = h('div', { class: 'po-report-slot' });
+
+    const listed = this.toggle('listed', 'Listed publicly', 'Show this room in the lobby so anyone can join. Built-in puzzles only.', (on) =>
+      this.d.sendHost({ type: 'set_listed', listed: on }),
+    );
+    const chat = this.toggle('chat-enabled', 'Room chat', 'Let everyone chat. Public rooms start with chat off; pings always work.', (on) =>
+      this.d.sendHost({ type: 'set_chat_enabled', enabled: on }),
+    );
+    this.listedBox = listed.box;
+    this.chatBox = chat.box;
+    this.playBtn = button('Pause', () => this.togglePlayback(), { class: 'btn', 'data-act': 'playback' });
+    this.playRow = h('div', { class: 'actions' }, this.playBtn);
+    this.awayList = h('ul', { class: 'po-list' });
+    const inputId = uid('release');
+    this.releaseInput = h('input', { id: inputId, class: 'input', type: 'text', 'data-act': 'release-input', placeholder: 'Name', autocomplete: 'off', maxlength: '64' });
+    this.host = h(
+      'section',
+      { class: 'po-host', 'aria-label': 'Host controls' },
+      h('h3', { class: 'po-sub' }, 'Host'),
+      listed.row,
+      chat.row,
+      this.playRow,
+      h(
+        'div',
+        { class: 'actions' },
+        button(
+          'Restart puzzle…',
+          () =>
+            this.d.confirm({
+              title: 'Restart the puzzle?',
+              body: 'Every piece goes back to the tray and the solve clock and credits start over, for everyone.',
+              ok: 'Restart',
+              run: () => this.d.sendHost({ type: 'restart_puzzle' }),
+            }),
+          { class: 'btn', 'data-act': 'restart' },
+        ),
+      ),
+      h(
+        'div',
+        { class: 'po-release' },
+        h('h3', { class: 'po-sub' }, 'Release a name'),
+        h('p', { class: 'muted' }, 'Free an absent player’s name (and their holders) so they can rejoin from another device. Names also free up 10 minutes after their player leaves.'),
+        this.awayList,
+        h(
+          'div',
+          { class: 'po-inline' },
+          h('label', { class: 'visually-hidden', for: inputId }, 'Name to release'),
+          this.releaseInput,
+          button('Release', () => {
+            this.release(this.releaseInput.value);
+            this.releaseInput.value = '';
+          }, { class: 'btn', 'data-act': 'release-typed' }),
+        ),
+      ),
+    );
+    this.reportLink = h('a', { 'data-act': 'report', class: 'btn btn--quiet', rel: 'noopener' }, 'Report room…');
+    this.report = h('p', { class: 'po-report' }, this.reportLink, h('span', { class: 'muted' }, ` Email ${REPORT_ADDRESS} about abuse here; the room code is filled in.`));
+
     this.el = h(
       'div',
       { class: 'po-room' },
@@ -101,123 +170,65 @@ export class RoomPanel {
       fact('Chat', s.chat_enabled ? 'On' : 'Off');
     }
     this.renderHost(s);
-    this.reportBox.replaceChildren();
-    if (s?.listed) {
-      this.reportBox.append(
-        h(
-          'p',
-          { class: 'po-report' },
-          h('a', { href: reportMailto(code), 'data-act': 'report', class: 'btn btn--quiet', rel: 'noopener' }, 'Report room…'),
-          h('span', { class: 'muted' }, ` Email ${REPORT_ADDRESS} about abuse here; the room code is filled in.`),
-        ),
-      );
-    }
+    const listed = !!s?.listed;
+    this.reportLink.href = reportMailto(code);
+    if (listed && !this.report.isConnected) this.reportBox.append(this.report);
+    else if (!listed && this.report.parentNode) this.report.remove();
   }
 
   private renderHost(s: RoomSnapshot | null): void {
-    const focused = this.hostBox.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.act : undefined;
-    this.hostBox.replaceChildren();
-    if (!s || !this.d.isHost() || this.d.state.spectator) return;
-    const box = h('section', { class: 'po-host', 'aria-label': 'Host controls' }, h('h3', { class: 'po-sub' }, 'Host'));
-
-    box.append(
-      this.toggle('listed', 'Listed publicly', s.listed, 'Show this room in the lobby so anyone can join. Built-in puzzles only.', (on) =>
-        this.d.sendHost({ type: 'set_listed', listed: on }),
-      ),
-      this.toggle('chat-enabled', 'Room chat', s.chat_enabled, 'Let everyone chat. Public rooms start with chat off; pings always work.', (on) =>
-        this.d.sendHost({ type: 'set_chat_enabled', enabled: on }),
-      ),
-    );
-
-    const item = s.queue[s.current];
-    const duration = item?.duration_ms ?? 0;
-    if (duration > 0) {
-      const pb = s.playback;
-      box.append(
-        h(
-          'div',
-          { class: 'actions' },
-          button(pb.playing ? 'Pause' : 'Play', () => {
-            const cur = this.d.state.snapshot();
-            if (!cur) return;
-            const p = cur.playback;
-            const dur = cur.queue[cur.current]?.duration_ms ?? 0;
-            this.d.sendHost({
-              type: 'set_playback',
-              playing: !p.playing,
-              position_ms: Math.round(targetPositionMs(p, this.d.state.serverNow(), dur)),
-              rate: p.rate,
-              loop_start_ms: p.loop_start_ms,
-              loop_end_ms: p.loop_end_ms,
-            });
-          }, { class: 'btn', 'data-act': 'playback', 'aria-label': pb.playing ? 'Pause the video for everyone' : 'Play the video for everyone' }),
-        ),
-      );
+    const show = !!s && this.d.isHost() && !this.d.state.spectator;
+    if (!show || !s) {
+      if (this.host.parentNode) this.host.remove();
+      return;
     }
-
-    box.append(
-      h(
-        'div',
-        { class: 'actions' },
-        button(
-          'Restart puzzle…',
-          () =>
-            this.d.confirm({
-              title: 'Restart the puzzle?',
-              body: 'Every piece goes back to the tray and the solve clock and credits start over, for everyone.',
-              ok: 'Restart',
-              run: () => this.d.sendHost({ type: 'restart_puzzle' }),
-            }),
-          { class: 'btn', 'data-act': 'restart' },
-        ),
-      ),
-    );
-
-    // Names of absent players who still hold holders (desktop releasable_names), plus any typed name.
+    this.listedBox.checked = s.listed;
+    this.chatBox.checked = s.chat_enabled;
+    const duration = s.queue[s.current]?.duration_ms ?? 0;
+    this.playRow.hidden = duration <= 0;
+    const playing = s.playback.playing;
+    this.playBtn.textContent = playing ? 'Pause' : 'Play';
+    this.playBtn.setAttribute('aria-label', playing ? 'Pause the video for everyone' : 'Play the video for everyone');
+    // Names of absent players who still hold holders (desktop releasable_names).
     const me = this.d.state.name;
     const away = [...new Set(s.holders.filter((x) => x.owner_away_since_ms != null && x.owner !== me).map((x) => x.owner))].sort();
-    const rel = h('div', { class: 'po-release' }, h('h3', { class: 'po-sub' }, 'Release a name'));
-    rel.append(h('p', { class: 'muted' }, 'Free an absent player’s name (and their holders) so they can rejoin from another device. Names also free up 10 minutes after their player leaves.'));
-    if (away.length) {
-      rel.append(
-        h(
-          'ul',
-          { class: 'po-list' },
-          ...away.map((n) =>
-            h('li', { 'data-name': n }, h('span', {}, `${n} (away)`), button('Release name', () => this.release(n), { class: 'btn btn--quiet', 'data-act': 'release' })),
-          ),
-        ),
-      );
-    }
-    const inputId = uid('release');
-    const input = h('input', { id: inputId, class: 'input', type: 'text', 'data-act': 'release-input', placeholder: 'Name', autocomplete: 'off', maxlength: '64' });
-    rel.append(
-      h(
-        'div',
-        { class: 'po-inline' },
-        h('label', { class: 'visually-hidden', for: inputId }, 'Name to release'),
-        input,
-        button('Release', () => {
-          this.release(input.value);
-          input.value = '';
-        }, { class: 'btn', 'data-act': 'release-typed' }),
-      ),
+    patchRows(
+      this.awayList,
+      away.map((n) => ({
+        key: n,
+        sig: n,
+        build: () => h('li', { 'data-name': n }, h('span', {}, `${n} (away)`), button('Release name', () => this.release(n), { class: 'btn btn--quiet', 'data-act': 'release' })),
+      })),
     );
-    box.append(rel);
-    this.hostBox.append(box);
-    if (focused) box.querySelector<HTMLElement>(`[data-act="${focused}"]`)?.focus();
+    this.awayList.hidden = away.length === 0;
+    if (!this.host.parentNode) this.hostBox.append(this.host);
   }
 
-  private toggle(act: string, label: string, on: boolean, hint: string, change: (on: boolean) => void): HTMLElement {
+  private togglePlayback(): void {
+    const cur = this.d.state.snapshot();
+    if (!cur) return;
+    const p = cur.playback;
+    const dur = cur.queue[cur.current]?.duration_ms ?? 0;
+    this.d.sendHost({
+      type: 'set_playback',
+      playing: !p.playing,
+      position_ms: Math.round(targetPositionMs(p, this.d.state.serverNow(), dur)),
+      rate: p.rate,
+      loop_start_ms: p.loop_start_ms,
+      loop_end_ms: p.loop_end_ms,
+    });
+  }
+
+  /** A switch that always shows the room as the server says; a change asks the server. */
+  private toggle(act: string, label: string, hint: string, change: (on: boolean) => void): { row: HTMLElement; box: HTMLInputElement } {
     const id = uid(act);
     const box = h('input', { id, type: 'checkbox', 'data-act': act, 'aria-describedby': `${id}-hint` });
-    box.checked = on;
     box.addEventListener('change', () => {
       const want = box.checked;
-      box.checked = on; // shows the room as it is until the server's snapshot says otherwise
+      box.checked = !want; // the room as it is until the server's snapshot says otherwise
       change(want);
     });
-    return h('div', { class: 'check' }, box, h('label', { for: id }, label), h('span', { id: `${id}-hint`, class: 'visually-hidden' }, hint));
+    return { row: h('div', { class: 'check' }, box, h('label', { for: id }, label), h('span', { id: `${id}-hint`, class: 'visually-hidden' }, hint)), box };
   }
 
   private release(raw: string): void {

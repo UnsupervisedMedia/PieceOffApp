@@ -8,6 +8,7 @@ import { new_holder_rect } from '../../wasm/pieceoff_web_wasm.js';
 import { playerColor } from '../gl/overlays';
 import type { ClientMessage, PieceHolder, RoomSnapshot } from '../protocol';
 import { button, h } from './dom';
+import { patchRows } from './rows';
 
 /** Core MAX_HOLDERS_PER_PLAYER / MAX_HOLDERS_PER_ROOM (holders.rs). */
 export const MAX_HOLDERS_PER_PLAYER = 4;
@@ -71,26 +72,32 @@ export class HoldersPanel {
     const holders = s?.holders ?? [];
     const host = this.d.isHost();
     const me = this.d.state.name;
-    this.list.replaceChildren(
-      ...holders.map((x) => {
-        const dot = h('span', { class: 'po-dot', 'aria-hidden': 'true' });
-        dot.style.background = playerColor(x.owner);
+    patchRows(
+      this.list,
+      holders.map((x) => {
         const mine = x.owner === me;
-        const caption = mine ? (x.label || 'Holder') : `${x.label ? `${x.label} · ` : ''}${x.owner}${x.owner_away_since_ms != null ? ' (away)' : ''}`;
-        const li = h('li', { 'data-id': x.id }, dot, h('span', {}, caption));
-        if (mine || host) {
-          li.append(
-            button(mine ? 'Remove' : 'Clear', () => this.d.send({ type: 'delete_holder', holder_id: x.id }), {
-              class: 'btn btn--quiet',
-              'data-act': 'delete-holder',
-              title: mine ? 'Remove this holder; its pieces stay where they are' : 'Remove their holder; its pieces stay where they are',
-            }),
-          );
-        }
-        return li;
+        const sig = JSON.stringify([x.id, x.owner, x.label, x.owner_away_since_ms != null, mine, host]);
+        return { key: String(x.id), sig, build: () => this.row(x, mine, host) };
       }),
+      holders.length === 0 ? [h('li', { class: 'muted' }, 'No holders yet.')] : [],
     );
-    if (holders.length === 0) this.list.append(h('li', { class: 'muted' }, 'No holders yet.'));
+  }
+
+  private row(x: PieceHolder, mine: boolean, host: boolean): HTMLLIElement {
+    const dot = h('span', { class: 'po-dot', 'aria-hidden': 'true' });
+    dot.style.background = playerColor(x.owner);
+    const caption = mine ? (x.label || 'Holder') : `${x.label ? `${x.label} · ` : ''}${x.owner}${x.owner_away_since_ms != null ? ' (away)' : ''}`;
+    const li = h('li', { 'data-id': x.id }, dot, h('span', {}, caption));
+    if (mine || host) {
+      li.append(
+        button(mine ? 'Remove' : 'Clear', () => this.d.send({ type: 'delete_holder', holder_id: x.id }), {
+          class: 'btn btn--quiet',
+          'data-act': 'delete-holder',
+          title: mine ? 'Remove this holder; its pieces stay where they are' : 'Remove their holder; its pieces stay where they are',
+        }),
+      );
+    }
+    return li;
   }
 
   private create(): void {
