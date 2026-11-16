@@ -8,12 +8,17 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "node esbuild.config.mjs"
+    "build": "node esbuild.config.mjs",
+    "spike:build": "node dev/build.mjs",
+    "spike": "node dev/build.mjs && node dev/serve.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
     "jsdom": "31.0.1",
     "typescript": "5.9.3",
     "vitest": "5.1.0"
+  },
+  "dependencies": {
+    "earcut": "3.2.4"
   }
 }

@@ -12,5 +12,5 @@
     "isolatedModules": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "wasm/*.d.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "dev/**/*.ts", "wasm/*.d.ts", "vitest.config.ts"]
 }
