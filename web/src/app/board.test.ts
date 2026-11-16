@@ -381,6 +381,82 @@ describe('board', () => {
     expect([s.r.last(0)[1], s.r.last(0)[2]]).toEqual([600, 100]);
   });
 
+  it('window_blur_mid_drag_drops_the_piece_back_once', () => {
+    const s = setup();
+    const [x, y] = s.at(0);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 40, y);
+    window.dispatchEvent(new FocusEvent('blur'));
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
+    expect(s.drags()[2]).toEqual({ type: 'drag_end', piece_id: 0, x: 600, y: 100 });
+    expect(s.state.localDrag()?.ended ?? true).toBe(true);
+    // The button coming up later (or more moves) sends nothing more.
+    s.pointer('pointermove', 1, x + 80, y);
+    s.pointer('pointerup', 1, x + 80, y);
+    window.dispatchEvent(new FocusEvent('blur'));
+    expect(s.drags()).toHaveLength(3);
+  });
+
+  it('page_hidden_mid_drag_drops_the_piece_back_once', () => {
+    const s = setup();
+    const vis = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const [x, y] = s.at(0);
+    s.pointer('pointerdown', 1, x, y, { pointerType: 'touch' });
+    s.pointer('pointermove', 1, x + 40, y, { pointerType: 'touch' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
+    expect(s.drags()[2]).toEqual({ type: 'drag_end', piece_id: 0, x: 600, y: 100 });
+    expect(s.state.localDrag()?.ended ?? true).toBe(true);
+    s.pointer('pointerup', 1, x + 40, y, { pointerType: 'touch' });
+    expect(s.drags()).toHaveLength(3);
+    vis.mockRestore();
+  });
+
+  it('page_shown_again_or_blur_without_a_drag_sends_nothing', () => {
+    const s = setup();
+    window.dispatchEvent(new FocusEvent('blur'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(s.drags()).toEqual([]);
+    // visible: a live drag goes on
+    const [x, y] = s.at(0);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 40, y);
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece']);
+    s.pointer('pointerup', 1, x + 40, y);
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece', 'drag_end']);
+  });
+
+  it('an_input_losing_focus_mid_drag_does_not_end_it', () => {
+    const s = setup();
+    const input = document.createElement('input');
+    s.root.append(input);
+    input.focus();
+    const [x, y] = s.at(0);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 40, y);
+    input.blur();
+    // A blur event aimed at an element, even one that reaches window listeners.
+    input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece']);
+    expect(s.state.localDrag()).not.toBeNull();
+  });
+
+  it('destroy_removes_the_blur_and_visibility_listeners', () => {
+    const removeWin = vi.spyOn(window, 'removeEventListener');
+    const removeDoc = vi.spyOn(document, 'removeEventListener');
+    const s = setup();
+    s.h.destroy();
+    mounted = null;
+    expect(removeWin.mock.calls.filter(([t]) => t === 'blur').length).toBeGreaterThanOrEqual(1);
+    expect(removeDoc.mock.calls.some(([t]) => t === 'visibilitychange')).toBe(true);
+    // After destroy, nothing reacts.
+    const before = s.sent.length;
+    window.dispatchEvent(new FocusEvent('blur'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(s.sent.length).toBe(before);
+  });
+
   it('a_held_piece_is_always_dropped_unless_the_pickup_was_refused', () => {
     const s = setup();
     const [x, y] = s.at(1);

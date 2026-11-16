@@ -12,7 +12,7 @@
 //   selected ids, and the local prediction moves every loose piece of the
 //   selected groups, like the desktop. Moves go through RoomSocket, which caps
 //   them at 30/s and lets the drop carry the final spot.
-// - Cancel (second finger, pointercancel, destroy): the protocol has no
+// - Cancel (second finger, pointercancel, window blur, page hidden, destroy): the protocol has no
 //   drag-abort, and a lease must not stay held, so the client drops the piece
 //   where it started: drag_end(_selection) at the anchor's pre-drag position.
 //   Locally the piece goes back there at once and waits for the drop.
@@ -617,6 +617,19 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
   }) as EventListener);
   listen(glCanvas, 'pointerleave', hideCursor);
   listen(window, 'blur', hideCursor);
+  // Focus or the page going away mid-drag (alt-tab, app switch, screen lock)
+  // may never deliver the pointerup: end the drag now through the gesture
+  // machine's cancel, which drops the piece where it started. Only the
+  // window's own blur counts, never an element's inside the page.
+  const endDragOnLeave = () => {
+    if (drag) machine.reset();
+  };
+  listen(window, 'blur', ((e: Event) => {
+    if (!(e.target instanceof Element)) endDragOnLeave();
+  }) as EventListener);
+  listen(document, 'visibilitychange', () => {
+    if (document.visibilityState === 'hidden') endDragOnLeave();
+  });
   // A user gesture lets a refused autoplay start.
   listen(glCanvas, 'pointerdown', () => sync.nudge());
   listen(window, 'keydown', ((e: KeyboardEvent) => {

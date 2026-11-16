@@ -4,11 +4,18 @@
 // - Desktop: A creates a 12-piece room through the create form, B opens A's
 //   invite link, both list each other, B drags a piece home and it snaps (A
 //   sees it held, moved and placed), chat both ways, B reloads and resumes as
-//   the same name, host controls only on A, then 25 pick-up/drop rounds with
-//   interrupted gestures (pointercancel, window blur, reload mid-drag, network
-//   flap, socket cut mid-drag) each followed by "nobody holds a piece" on A's
-//   copy of the server state within 3 s, and last A kicks B (B gets the kicked
-//   screen and goes back to the lobby).
+//   the same name, host controls only on A, then 25 pick-up/drop rounds each
+//   followed by "nobody holds a piece" on A's copy of the server state within
+//   3 s, and last A kicks B (B gets the kicked screen and goes back to the lobby).
+//   Interruptions really covered there: pointercancel (piece goes back), window
+//   blur with the button still down (the lease must be gone before the mouse
+//   comes up; piece goes back), reload mid-drag, socket cut mid-drag (Playwright
+//   closes B's routed socket on both sides while offline). The second-finger
+//   cancel is covered by the phone test. Not covered: a real OS-level focus
+//   loss (headless has none; the blur event is synthetic), and a true transport
+//   outage: Chromium's offline emulation leaves an open loopback WebSocket
+//   working, so the 'network-flap-then-drop' round is a plain drop made while
+//   the context is flagged offline (it only checks the flap does no harm).
 // - Phone: B as an iPhone 13 (Chromium, touch) joins by typing the code:
 //   touch drag, a second finger mid-drag (cancel: the piece goes back and is
 //   let go), long-press select, pinch zoom.
@@ -350,7 +357,7 @@ test('desktop: join, drag and snap, chat, resume, host controls, leases, kick', 
     });
 
     await test.step('25 pick-ups and drops, some interrupted: no lease survives', async () => {
-      const kinds = ['drop', 'pointercancel', 'blur', 'reload', 'drop', 'offline', 'socket-cut'] as const;
+      const kinds = ['drop', 'pointercancel', 'blur', 'reload', 'drop', 'network-flap-then-drop', 'socket-cut'] as const;
       for (let i = 0; i < 25; i++) {
         const kind = kinds[i % kinds.length];
         const label = `round ${i + 1} (${kind})`;
@@ -382,21 +389,33 @@ test('desktop: join, drag and snap, chat, resume, host controls, leases, kick', 
               .toEqual([Math.round(origin.x), Math.round(origin.y)]);
             break;
           case 'blur':
-            // The window loses focus mid-drag (alt-tab), then the button comes up.
-            await b.evaluate(() => window.dispatchEvent(new Event('blur')));
-            await b.mouse.up();
+            // The window loses focus mid-drag (alt-tab) and the button-up may
+            // never come: the lease must go with the blur alone, the piece back
+            // where it was picked up.
+            await b.evaluate(() => window.dispatchEvent(new FocusEvent('blur')));
+            await noLease(a, `${label}, button still down`);
+            await expect
+              .poll(async () => {
+                const p = piece((await snap(a))!, grabbed);
+                return [Math.round(p.x), Math.round(p.y)];
+              })
+              .toEqual([Math.round(origin.x), Math.round(origin.y)]);
+            await b.mouse.up(); // cleanup only
             break;
           case 'reload':
             await b.reload();
             await b.mouse.up();
             await boardReady(b);
             break;
-          case 'offline':
-            // The network flaps mid-drag; the drop happens while offline.
+          case 'network-flap-then-drop':
+            // The context is flagged offline mid-drag and the drop happens then.
+            // Chromium keeps the open loopback socket working, so this is a drop
+            // during a flap; it must not disturb the connection.
             await B.ctx.setOffline(true);
             await b.mouse.move(at.x + sign * 70, at.y + sign * 40, { steps: 3 });
             await b.mouse.up();
             await B.ctx.setOffline(false);
+            await expect(b.locator('.po-board-net')).toHaveText('');
             break;
           case 'socket-cut':
             // The network goes and the socket dies mid-drag; the drop happens offline.
