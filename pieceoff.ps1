@@ -104,7 +104,15 @@ function Show-Status {
 function Start-PieceOff {
     Resolve-Binaries $true
     New-Item -ItemType Directory -Force -Path $RunDir, $DataDir | Out-Null
-    $bind = if ($env:PIECEOFF_BIND) { $env:PIECEOFF_BIND } else { "0.0.0.0:28878" }
+    if ($env:PIECEOFF_BIND) { $bind = $env:PIECEOFF_BIND }
+    else {
+        # First free port at or after 28878, so nobody has to know about PIECEOFF_BIND.
+        $busy = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object { $_.Port }
+        $free = 28878
+        while ($free -lt 28978 -and $busy -contains $free) { $free++ }
+        if ($free -ne 28878) { Write-Host "Port 28878 is in use; using $free for the local room server." }
+        $bind = "0.0.0.0:$free"
+    }
     if (!$env:PIECEOFF_SERVER_URL) {
         $port = $bind.Substring($bind.LastIndexOf(":") + 1)
         $env:PIECEOFF_SERVER_URL = "ws://127.0.0.1:$port/ws"
@@ -112,7 +120,9 @@ function Start-PieceOff {
     $env:PIECEOFF_BIND = $bind
     $env:PIECEOFF_DATA_DIR = $DataDir
     Write-Host "PieceOff data: $DataDir"
-    Start-ManagedProcess "room server" $script:ServerBin (Join-Path $RunDir "server.pid") (Join-Path $RunDir "server.log") $true
+    # Online rooms don't need the local server, so don't block the app on it.
+    try { Start-ManagedProcess "room server" $script:ServerBin (Join-Path $RunDir "server.pid") (Join-Path $RunDir "server.log") $true }
+    catch { Write-Host "Warning: local room server not running; online rooms still work, LAN hosting won't." -ForegroundColor Yellow }
     Start-ManagedProcess "desktop app" $script:AppBin (Join-Path $RunDir "app.pid") (Join-Path $RunDir "app.log") $false
     Write-Host "Open the app and create a room. Run '.\pieceoff.ps1 stop' to close PieceOff."
 }
