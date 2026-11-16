@@ -77,6 +77,29 @@ describe("resume over a live socket", () => {
     fresh.close();
   });
 
+  it("an invalid resume token displaces no one: a fresh identity, the old socket keeps its lease", async () => {
+    const { code, resume_token: hostToken } = await createRoom(port);
+    const host = await connect(port, code);
+    host.send(joinMessage(code, "Host", hostToken));
+    await host.next(ofType("welcome"), "host welcome");
+    const old = await connect(port, code);
+    old.send(joinMessage(code, "Bee"));
+    const first = await old.next(ofType("welcome"), "guest welcome");
+    old.send({ type: "drag_start", piece_id: 4 });
+    await old.next(ofType("pieces_changed"), "guest lease");
+    const forged = await connect(port, code);
+    forged.send(joinMessage(code, "Cy", `${first.resume_token}x`));
+    const welcome = await forged.next(ofType("welcome"), "forged token welcome", 5000);
+    assert.notEqual(welcome.client_id, first.client_id, "not the token's player");
+    assert.equal(welcome.snapshot.pieces.find((p) => p.id === 4).held_by, first.client_id, "the old lease is untouched");
+    // The old socket is still in the room and still plays.
+    old.send({ type: "drag_end", piece_id: 4, x: 310, y: 210 });
+    const drop = await old.next(ofType("pieces_changed"), "old socket still works");
+    assert.equal(drop.pieces.find((p) => p.id === 4).held_by, null);
+    assert.equal(old.closeInfo(), null, "old socket not closed");
+    for (const socket of [host, old, forged]) socket.close();
+  });
+
   it("the same player key under a new identity still replaces the old window", async () => {
     const { code, resume_token: hostToken } = await createRoom(port, { player_key: "host-key" });
     const host = await connect(port, code);
