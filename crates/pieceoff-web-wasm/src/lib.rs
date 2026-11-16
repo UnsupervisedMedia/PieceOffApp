@@ -89,9 +89,87 @@ pub fn piece_outlines(snapshot_json: &str) -> Result<Outlines, JsError> {
         .map_err(|e| JsError::new(&e))
 }
 
+/// Every `type` tag a serde internally tagged enum accepts, in declaration
+/// order. Serde keeps no public list of variants, but it names them all when
+/// refusing an unknown one, so this asks it to refuse one.
+fn serde_variant_tags<T: serde::de::DeserializeOwned>() -> Vec<String> {
+    let probe = r#"{"type":"\u0000"}"#;
+    let message = match serde_json::from_str::<T>(probe) {
+        Ok(_) => panic!("serde accepted the probe tag"),
+        Err(err) => err.to_string(),
+    };
+    let (_, expected) = message
+        .split_once("expected ")
+        .unwrap_or_else(|| panic!("unexpected serde error: {message}"));
+    // "`a`", "`a` or `b`" or "one of `a`, `b`, `c`"; a trailing
+    // " at line 1 column N" holds no backticks.
+    expected
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `type` tags of `ClientMessage`.
+pub fn client_message_types() -> Vec<String> {
+    serde_variant_tags::<pieceoff_core::ClientMessage>()
+}
+
+/// The `type` tags of `ServerMessage`.
+pub fn server_message_types() -> Vec<String> {
+    serde_variant_tags::<pieceoff_core::ServerMessage>()
+}
+
+#[derive(Serialize)]
+struct MessageTypes {
+    client: Vec<String>,
+    server: Vec<String>,
+}
+
+/// `{"client":[..],"server":[..]}`: every message `type` tag this core
+/// accepts, so the web client's tests can check its generated unions.
+#[wasm_bindgen]
+pub fn message_types_json() -> String {
+    let types = MessageTypes {
+        client: client_message_types(),
+        server: server_message_types(),
+    };
+    serde_json::to_string(&types).unwrap_or_else(|_| "{}".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variant_tags_come_from_serde() {
+        let client = client_message_types();
+        assert_eq!(client.first().map(String::as_str), Some("create_room"));
+        assert!(client.iter().any(|t| t == "release_name"));
+        assert!(client.iter().any(|t| t == "cursor_hidden"));
+        let server = server_message_types();
+        assert_eq!(server.first().map(String::as_str), Some("welcome"));
+        assert!(server.iter().any(|t| t == "chat"));
+        assert!(server.iter().any(|t| t == "kicked"));
+        for tag in client.iter().chain(&server) {
+            let probe = format!(r#"{{"type":"{tag}"}}"#);
+            let err = serde_json::from_str::<pieceoff_core::ClientMessage>(&probe)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            let err2 = serde_json::from_str::<pieceoff_core::ServerMessage>(&probe)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            // A real tag is never refused as an unknown variant by its enum.
+            assert!(
+                !(err.contains("unknown variant") && err2.contains("unknown variant")),
+                "{tag} is not a real tag"
+            );
+        }
+    }
+
     use pieceoff_core::{CutStyle, RoomSnapshot, piece_outline};
 
     fn snapshot(style: CutStyle) -> RoomSnapshot {

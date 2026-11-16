@@ -30,6 +30,7 @@ pub const MAX_HOLDER_LABEL_CHARS: usize = 24;
 const HOLDER_CLEARANCE_CELLS: f32 = 0.3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PieceHolder {
     pub id: u32,
     /// The owner's display name.

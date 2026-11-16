@@ -1,6 +1,7 @@
 #!/bin/sh
-# Gate for the browser play client in web/: typecheck, tests, build, and a
-# size budget (gzipped web/dist/play.js must stay at or under 400 KB).
+# Gate for the browser play client in web/: core wasm build (the tests load
+# it), typecheck, tests, build, and a size budget (gzipped web/dist/play.js
+# must stay at or under 400 KB).
 #
 #   scripts/web-check.sh
 set -eu
@@ -13,6 +14,8 @@ if [ ! -d node_modules ]; then
   echo "== web: npm ci"
   npm ci --no-audit --no-fund
 fi
+echo "== web: wasm"
+"$ROOT/web/build-wasm.sh"
 echo "== web: typecheck"
 npm run --silent typecheck
 echo "== web: test"

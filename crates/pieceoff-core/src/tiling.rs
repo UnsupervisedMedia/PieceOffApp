@@ -26,6 +26,7 @@ use crate::{KNOB_LEFT, catmull_rom};
 /// How a puzzle's picture is cut into pieces. Older rooms and packages have
 /// no cut style and load as `Jigsaw`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CutStyle {
     #[default]

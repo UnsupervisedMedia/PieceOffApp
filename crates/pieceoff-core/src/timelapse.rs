@@ -26,6 +26,7 @@ pub const MAX_ROOM_SPECTATORS: usize = 16;
 /// Where pieces came to rest during the current solve. Positions are board
 /// coordinates rounded to whole source pixels: `[piece id, x, y]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct Timelapse {
     /// Every piece's position when recording began.
@@ -38,6 +39,7 @@ pub struct Timelapse {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TimelapseFrame {
     /// The room's solve clock when this change landed, in milliseconds, so
     /// time the room stood empty is left out.
