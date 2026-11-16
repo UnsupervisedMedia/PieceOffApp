@@ -22,6 +22,9 @@
     // Hosted uploads stay off until abuse contact, takedown and a hash blocklist exist.
     "MEDIA_UPLOADS_ENABLED": "0",
     "SITE_ORIGIN": "https://pieceoff.app",
+    // Browser origins admitted to /ws and /api/rooms besides the Worker's own
+    // host (comma separated, exact origins). The site's web play client.
+    "ALLOWED_ORIGINS": "https://pieceoff.app",
     "TURNSTILE_HOSTNAME": "pieceoff.app",
     "LINK_URL": "https://pieceoff.app/link",
     "SHARE_URL": "https://pieceoff.app/join",

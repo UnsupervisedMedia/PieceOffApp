@@ -154,6 +154,8 @@ function createPreflight(request: Request, env: Env): Response {
   return new Response(null, {
     status: 204,
     headers: {
+      // Varies by Origin for every caller (only the site gets the CORS header).
+      vary: "Origin",
       ...socketRefusalCors(request, env),
       "access-control-allow-methods": "POST",
       "access-control-allow-headers": "x-turnstile-token, content-type",

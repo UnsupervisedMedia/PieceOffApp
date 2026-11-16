@@ -72,6 +72,31 @@ describe("POST /api/rooms CORS for the web client", () => {
     assert.equal(pre.headers.get("access-control-allow-headers"), "x-turnstile-token, content-type");
     const foreign = await fetch(`http://127.0.0.1:${port}/api/rooms`, { method: "OPTIONS", headers: { origin: OTHER } });
     assert.equal(foreign.headers.get(ACAO), null);
+    // The answer depends on Origin for every caller, so caches must key on it.
+    assert.equal(foreign.headers.get("vary"), "Origin");
+    assert.equal(pre.headers.get("vary"), "Origin");
+  });
+
+  it("the shipped wrangler.jsonc vars admit https://pieceoff.app to /api/rooms and /ws", async () => {
+    // No SITE_ORIGIN / ALLOWED_ORIGINS overrides: the checked-in vars apply.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pieceoff-createcors-"));
+    const port = await freePort();
+    const server = await startServer(port, dir);
+    cleanups.push(async () => {
+      await server.stop();
+      await rm(dir, { recursive: true, force: true });
+    });
+    const LIVE = "https://pieceoff.app";
+    const made = await post(port, LIVE);
+    assert.equal(made.status, 200, "the site may create rooms");
+    assert.equal(made.headers.get(ACAO), LIVE);
+    const { code } = await made.json();
+    const upgrade = await fetch(`http://127.0.0.1:${port}/ws?code=${code}`, { headers: { origin: LIVE } });
+    assert.notEqual(upgrade.status, 403, "the site's socket passes the origin check");
+    const ws = await connect(port, code, "", LIVE);
+    ws.close();
+    const evil = await post(port, "https://evil.example");
+    assert.equal(evil.status, 403, "other browser origins are still refused");
   });
 
   it("the web client's body creates a listed built-in room the creator joins as host", async () => {
@@ -107,10 +132,10 @@ describe("POST /api/rooms CORS for the web client", () => {
 
   it("refusals carry the site header too (400 and 429)", async () => {
     const port = await boot();
-    const bad = await post(port, SITE, webBody({ rows: 30, columns: 30 }));
+    const bad = await post(port, SITE, webBody({ rows: 40, columns: 40 }));
     assert.equal(bad.status, 400);
     assert.equal(bad.headers.get(ACAO), SITE);
-    assert.match((await bad.json()).error, /400 pieces/);
+    assert.match((await bad.json()).error, /1000 pieces/);
     let limited = null;
     for (let i = 0; i < 20 && limited === null; i++) {
       const r = await post(port, SITE);

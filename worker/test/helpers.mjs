@@ -58,11 +58,14 @@ export async function startServer(port, persistDir, vars = {}) {
 }
 
 /** A WebSocket with an inbox, so tests can wait for specific frames. */
-export async function connect(port, code, query = "") {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${code}${query}`);
+export async function connect(port, code, query = "", origin = null) {
+  const url = `ws://127.0.0.1:${port}/ws?code=${code}${query}`;
+  // undici's WebSocket takes extra headers (a browser always sends Origin).
+  const ws = origin === null ? new WebSocket(url) : new WebSocket(url, { headers: { origin } });
   const inbox = [];
   const waiters = [];
   let closed = false;
+  let closeInfo = null;
   const pump = () => {
     for (const waiter of [...waiters]) {
       const index = inbox.findIndex(waiter.predicate);
@@ -78,8 +81,9 @@ export async function connect(port, code, query = "") {
     inbox.push(JSON.parse(event.data));
     pump();
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (event) => {
     closed = true;
+    closeInfo = { code: event.code, reason: event.reason };
   });
   await new Promise((resolve, reject) => {
     ws.addEventListener("open", resolve, { once: true });
@@ -104,6 +108,8 @@ export async function connect(port, code, query = "") {
     // until the process exits, so a received close frame counts as closed.
     isClosed: () => closed || ws.readyState >= WebSocket.CLOSING,
     close: () => ws.close(),
+    /** The close frame's code and reason once the socket closed, else null. */
+    closeInfo: () => closeInfo,
     waitClosed: async () => {
       for (let i = 0; i < 80 && !(closed || ws.readyState >= WebSocket.CLOSING); i++) await delay(100);
       return closed || ws.readyState >= WebSocket.CLOSING;
