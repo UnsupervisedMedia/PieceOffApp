@@ -40,7 +40,10 @@ pub use timelapse::{
     MAX_ROOM_SPECTATORS, MAX_TIMELAPSE_POSITIONS, StoredRoom, Timelapse, TimelapseFrame,
 };
 
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
+/// The most pieces one room may hold, and the most rows or columns.
+pub const MAX_PIECES: u32 = 1000;
+pub const MAX_GRID_SIDE: u16 = 50;
 /// Longest chat line, in characters, after the server tidies it.
 pub const MAX_CHAT_CHARS: usize = 300;
 pub const MAX_QUEUE_ITEMS: usize = 64;
@@ -82,6 +85,22 @@ pub struct Piece {
     pub y: f32,
     pub placed: bool,
     pub held_by: Option<String>,
+    /// Clockwise quarter turns, 0..=3 (protocol v16). Only rooms with
+    /// rotation on ever leave 0; a group's members always share a value.
+    #[serde(default)]
+    pub rotation: u8,
+}
+
+/// Optional challenge settings chosen by the host when the room is created
+/// (protocol v16). Both off by default; fixed for the life of the room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Difficulty {
+    /// Pieces start turned and must be turned upright before they fit.
+    #[serde(default)]
+    pub rotation: bool,
+    /// No reference image, ghost, still-frame assist or edge filter.
+    #[serde(default)]
+    pub no_hints: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -196,6 +215,9 @@ pub struct RoomSnapshot {
     /// classic jigsaw grid with their contours unchanged.
     #[serde(default)]
     pub cut_style: CutStyle,
+    /// Challenge settings (protocol v16). Older snapshots load with none.
+    #[serde(default)]
+    pub difficulty: Difficulty,
     /// Listed in the public lobby (protocol v15). Only rooms whose every
     /// queue item is built-in may be listed; older snapshots load unlisted.
     #[serde(default)]
@@ -381,6 +403,28 @@ impl RoomSnapshot {
                 self.rows,
                 self.columns,
                 0,
+                self.difficulty.rotation,
+            );
+        }
+        self
+    }
+
+    /// Set the challenge options of a freshly created room, scattering the
+    /// pieces at random quarter turns when rotation is on.
+    pub fn with_difficulty(mut self, difficulty: Difficulty) -> Self {
+        if difficulty != self.difficulty {
+            self.difficulty = difficulty;
+            self.pieces = scattered_pieces(
+                self.cut_style,
+                &self.id,
+                &self.invite_code,
+                &self.media_sha256,
+                self.width,
+                self.height,
+                self.rows,
+                self.columns,
+                0,
+                difficulty.rotation,
             );
         }
         self
@@ -523,6 +567,12 @@ impl RoomSnapshot {
         // a player is present.
         self.stats.running_since_ms = None;
         self.protocol_version = PROTOCOL_VERSION;
+        let rotation_on = self.difficulty.rotation;
+        for piece in &mut self.pieces {
+            if !rotation_on || piece.rotation > 3 {
+                piece.rotation = 0;
+            }
+        }
         self.mark_builtins_available();
         if self.listed && !self.only_builtin_media() {
             self.listed = false;
@@ -549,11 +599,13 @@ impl RoomSnapshot {
                 "Media dimensions must be at most {MAX_MEDIA_DIMENSION} pixels per side and {MAX_MEDIA_PIXELS} pixels total"
             ));
         }
-        if !(2..=30).contains(&rows) || !(2..=30).contains(&columns) {
-            return Err("Choose between 2 and 30 rows and columns".into());
+        if !(2..=MAX_GRID_SIDE).contains(&rows) || !(2..=MAX_GRID_SIDE).contains(&columns) {
+            return Err(format!(
+                "Choose between 2 and {MAX_GRID_SIDE} rows and columns"
+            ));
         }
-        if rows as u32 * columns as u32 > 400 {
-            return Err("A room can contain at most 400 pieces".into());
+        if rows as u32 * columns as u32 > MAX_PIECES {
+            return Err(format!("A room can contain at most {MAX_PIECES} pieces"));
         }
 
         let pieces = scattered_pieces(
@@ -566,6 +618,7 @@ impl RoomSnapshot {
             rows,
             columns,
             0,
+            false,
         );
 
         let queue = vec![MediaItem {
@@ -605,6 +658,7 @@ impl RoomSnapshot {
             stats: SolveStats::default(),
             holders: Vec::new(),
             cut_style: CutStyle::Jigsaw,
+            difficulty: Difficulty::default(),
             listed: false,
             chat_enabled: true,
         };
@@ -635,11 +689,13 @@ impl RoomSnapshot {
                 "Media dimensions must be at most {MAX_MEDIA_DIMENSION} pixels per side and {MAX_MEDIA_PIXELS} pixels total"
             ));
         }
-        if !(2..=30).contains(&self.rows)
-            || !(2..=30).contains(&self.columns)
-            || self.rows as u32 * self.columns as u32 > 400
+        if !(2..=MAX_GRID_SIDE).contains(&self.rows)
+            || !(2..=MAX_GRID_SIDE).contains(&self.columns)
+            || self.rows as u32 * self.columns as u32 > MAX_PIECES
         {
-            return Err("Puzzle grid must contain between 4 and 400 pieces".into());
+            return Err(format!(
+                "Puzzle grid must contain between 4 and {MAX_PIECES} pieces"
+            ));
         }
         let piece_count = self.rows as usize * self.columns as usize;
         if self.pieces.len() != piece_count {
@@ -717,6 +773,7 @@ fn scattered_pieces(
     rows: u16,
     columns: u16,
     shuffle_seed: u32,
+    rotate: bool,
 ) -> Vec<Piece> {
     let count = rows as usize * columns as usize;
     let tray = styled_tray_layout(style, width, height, rows, columns);
@@ -755,6 +812,14 @@ fn scattered_pieces(
         for column in 0..columns {
             let id = row as u32 * columns as u32 + column as u32;
             let (x, y) = tray_slot_position(&tray, cell_w, cell_h, shuffled[id as usize]);
+            let rotation = if rotate {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                ((random >> 8) % 4) as u8
+            } else {
+                0
+            };
             pieces.push(Piece {
                 id,
                 group_id: id,
@@ -764,6 +829,7 @@ fn scattered_pieces(
                 y,
                 placed: false,
                 held_by: None,
+                rotation,
             });
         }
     }
@@ -1001,6 +1067,9 @@ pub enum ClientMessage {
         /// every queue item is built-in; servers without a lobby refuse it.
         #[serde(default)]
         listed: bool,
+        /// Harder-play options (protocol v16); older clients send none.
+        #[serde(default)]
+        difficulty: Difficulty,
     },
     JoinRoom {
         invite_code: String,
@@ -1013,6 +1082,10 @@ pub enum ClientMessage {
         /// This device's private player key; empty from older clients.
         #[serde(default)]
         player_key: String,
+        /// The newest protocol this client speaks (0 from clients before
+        /// v16); rooms with rotation refuse older ones.
+        #[serde(default)]
+        client_protocol: u16,
     },
     DragStart {
         piece_id: u32,
@@ -1034,6 +1107,12 @@ pub enum ClientMessage {
         anchor_piece_id: u32,
         x: f32,
         y: f32,
+    },
+    /// Turn the held selection a quarter turn about the anchor piece:
+    /// +1 clockwise, -1 counter-clockwise (protocol v16, rotation rooms).
+    RotateSelection {
+        anchor_piece_id: u32,
+        quarter_turns: i8,
     },
     DragEndSelection {
         anchor_piece_id: u32,
@@ -1335,8 +1414,8 @@ impl RoomRuntime {
         client_id: &str,
         piece_ids: &[u32],
     ) -> Result<(Vec<Piece>, u64), String> {
-        if piece_ids.is_empty() || piece_ids.len() > 400 {
-            return Err("Select between 1 and 400 loose pieces".into());
+        if piece_ids.is_empty() || piece_ids.len() > MAX_PIECES as usize {
+            return Err(format!("Select between 1 and {MAX_PIECES} loose pieces"));
         }
         if self.drag_groups.contains_key(client_id) {
             return Err("Finish the current piece drag first".into());
@@ -1500,6 +1579,81 @@ impl RoomRuntime {
 
     /// Host-only: scatter every piece back into the tray with a fresh shuffle
     /// and drop all drag leases. `shuffle_seed` varies the arrangement between restarts.
+    /// Turn the held selection a quarter turn about the anchor piece's cell
+    /// centre (rotation rooms only). Every held piece turns rigidly, so groups
+    /// stay assembled; the result is kept on the table like a move.
+    pub fn rotate_selection(
+        &mut self,
+        client_id: &str,
+        anchor_piece_id: u32,
+        quarter_turns: i8,
+    ) -> Result<(Vec<Piece>, u64), String> {
+        if quarter_turns != 1 && quarter_turns != -1 {
+            return Err("Turn a quarter turn at a time".into());
+        }
+        let snapshot = self.snapshot.as_mut().ok_or("Room is not initialized")?;
+        if !snapshot.difficulty.rotation {
+            return Err("Rotation is off in this room".into());
+        }
+        // Whatever this player holds, whether picked singly or as a selection.
+        let group_ids: Vec<u32> = snapshot
+            .pieces
+            .iter()
+            .filter(|piece| piece.held_by.as_deref() == Some(client_id))
+            .map(|piece| piece.group_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if group_ids.is_empty() {
+            return Err("You do not hold a piece selection".into());
+        }
+        let anchor = snapshot
+            .piece(anchor_piece_id)
+            .ok_or("Unknown anchor piece")?
+            .clone();
+        if !group_ids.contains(&anchor.group_id) || anchor.held_by.as_deref() != Some(client_id) {
+            return Err("The anchor piece is not part of your selection".into());
+        }
+        let half_w = snapshot.cell_width() / 2.0;
+        let half_h = snapshot.cell_height() / 2.0;
+        let (pivot_x, pivot_y) = (anchor.x + half_w, anchor.y + half_h);
+        let turn = |x: f32, y: f32| {
+            let (dx, dy) = (x + half_w - pivot_x, y + half_h - pivot_y);
+            // Screen coordinates (y down): clockwise maps right to down.
+            let (rx, ry) = if quarter_turns > 0 {
+                (-dy, dx)
+            } else {
+                (dy, -dx)
+            };
+            (pivot_x + rx - half_w, pivot_y + ry - half_h)
+        };
+        let moved: Vec<(u32, f32, f32)> = snapshot
+            .pieces
+            .iter()
+            .filter(|piece| group_ids.contains(&piece.group_id))
+            .map(|piece| {
+                let (x, y) = turn(piece.x, piece.y);
+                (piece.id, x, y)
+            })
+            .collect();
+        let (dx, dy) = snapshot.clamp_move(moved.iter().map(|(_, x, y)| (*x, *y)), 0.0, 0.0);
+        for (id, x, y) in moved {
+            if let Some(piece) = snapshot.piece_mut(id) {
+                piece.x = x + dx;
+                piece.y = y + dy;
+                piece.rotation = (piece.rotation as i8 + quarter_turns).rem_euclid(4) as u8;
+            }
+        }
+        snapshot.revision += 1;
+        let pieces = snapshot
+            .pieces
+            .iter()
+            .filter(|piece| group_ids.contains(&piece.group_id))
+            .cloned()
+            .collect();
+        Ok((pieces, snapshot.revision))
+    }
+
     pub fn restart(
         &mut self,
         client_id: &str,
@@ -1521,6 +1675,7 @@ impl RoomRuntime {
             snapshot.rows,
             snapshot.columns,
             shuffle_seed | 1,
+            snapshot.difficulty.rotation,
         );
         snapshot.stats = SolveStats::default();
         snapshot.holders.clear();
@@ -1558,6 +1713,9 @@ impl RoomRuntime {
             .collect();
         if movable.is_empty() {
             return Err("There are no loose pieces to arrange".into());
+        }
+        if arrangement == TrayArrangement::EdgesFirst && snapshot.difficulty.no_hints {
+            return Err("Sorting edges first is off in a no-hints room".into());
         }
         match arrangement {
             TrayArrangement::EdgesFirst => movable.sort_by_key(|id| {
@@ -1707,7 +1865,15 @@ impl RoomRuntime {
             }
         }
 
-        if release {
+        // Pieces only fit when upright; a turned group just drops where released.
+        let upright = active.rotation == 0;
+        if release && !upright {
+            for piece in &mut snapshot.pieces {
+                if piece.group_id == group_id {
+                    piece.held_by = None;
+                }
+            }
+        } else if release {
             let moved = snapshot.piece(piece_id).unwrap().clone();
             let target_x = moved.column as f32 * cell_w;
             let target_y = moved.row as f32 * cell_h;
@@ -2102,7 +2268,7 @@ fn find_neighbor_merge(
             let Some(fixed) = snapshot.piece_at(row, column) else {
                 continue;
             };
-            if fixed.group_id == moving_group || fixed.held_by.is_some() {
+            if fixed.group_id == moving_group || fixed.held_by.is_some() || fixed.rotation != 0 {
                 continue;
             }
             let home_dx = (f32::from(moving.column) - f32::from(fixed.column)) * cell_w;
@@ -3496,5 +3662,305 @@ mod cut_style_tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    // --- difficulty: rotation, no hints, bigger boards (protocol v16) ---
+
+    fn hard_room(rotation: bool, no_hints: bool) -> RoomRuntime {
+        let snapshot = RoomSnapshot::create(
+            "id".into(),
+            "invite".into(),
+            "test".into(),
+            "hash".into(),
+            "png".into(),
+            800,
+            600,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap()
+        .with_difficulty(Difficulty { rotation, no_hints });
+        RoomRuntime {
+            snapshot: Some(snapshot),
+            names: HashMap::from([("host".into(), "Host".into())]),
+            host_id: Some("host".into()),
+            ..RoomRuntime::default()
+        }
+    }
+
+    #[test]
+    fn rotation_scatter_is_deterministic_and_off_by_default() {
+        let plain = hard_room(false, false);
+        assert!(
+            plain
+                .snapshot
+                .unwrap()
+                .pieces
+                .iter()
+                .all(|p| p.rotation == 0)
+        );
+        let a = hard_room(true, false).snapshot.unwrap();
+        let b = hard_room(true, false).snapshot.unwrap();
+        assert_eq!(a.pieces, b.pieces);
+        assert!(a.pieces.iter().any(|p| p.rotation != 0));
+        assert!(a.pieces.iter().all(|p| p.rotation <= 3));
+        // Positions are the same whether or not pieces are turned.
+        let plain = hard_room(false, false).snapshot.unwrap();
+        for (x, y) in plain.pieces.iter().zip(&a.pieces) {
+            assert_eq!((x.x, x.y), (y.x, y.y));
+        }
+    }
+
+    #[test]
+    fn four_quarter_turns_return_every_piece_home() {
+        let mut room = hard_room(true, false);
+        let id = 5;
+        room.acquire("host", id).unwrap();
+        let before = room.snapshot.as_ref().unwrap().piece(id).unwrap().clone();
+        for _ in 0..4 {
+            room.rotate_selection("host", id, 1).unwrap();
+        }
+        let after = room.snapshot.as_ref().unwrap().piece(id).unwrap();
+        assert_eq!(after.rotation, before.rotation);
+        assert!((after.x - before.x).abs() < 0.01 && (after.y - before.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotating_turns_the_anchor_in_place_and_clockwise_then_back() {
+        let mut room = hard_room(true, false);
+        room.acquire("host", 3).unwrap();
+        let before = room.snapshot.as_ref().unwrap().piece(3).unwrap().clone();
+        room.rotate_selection("host", 3, 1).unwrap();
+        let turned = room.snapshot.as_ref().unwrap().piece(3).unwrap().clone();
+        assert_eq!(turned.rotation, (before.rotation + 1) % 4);
+        // The anchor is the pivot, so it does not move.
+        assert!((turned.x - before.x).abs() < 0.01 && (turned.y - before.y).abs() < 0.01);
+        room.rotate_selection("host", 3, -1).unwrap();
+        assert_eq!(
+            room.snapshot.as_ref().unwrap().piece(3).unwrap().rotation,
+            before.rotation
+        );
+    }
+
+    #[test]
+    fn a_selection_turns_rigidly_about_the_anchor() {
+        let mut room = hard_room(true, false);
+        let (a, b) = (0u32, 1u32);
+        let (ids, _) = room.acquire_selection("host", &[a, b]).unwrap().into();
+        let _ = ids;
+        let snap = room.snapshot.as_ref().unwrap();
+        let (pa, pb) = (
+            snap.piece(a).unwrap().clone(),
+            snap.piece(b).unwrap().clone(),
+        );
+        let dist = (pa.x - pb.x).hypot(pa.y - pb.y);
+        room.rotate_selection("host", a, 1).unwrap();
+        let snap = room.snapshot.as_ref().unwrap();
+        let (qa, qb) = (snap.piece(a).unwrap(), snap.piece(b).unwrap());
+        assert!(((qa.x - qb.x).hypot(qa.y - qb.y) - dist).abs() < 0.01);
+        assert_eq!(qa.rotation, (pa.rotation + 1) % 4);
+        assert_eq!(qb.rotation, (pb.rotation + 1) % 4);
+    }
+
+    #[test]
+    fn rotation_needs_a_lease_the_mode_and_a_single_turn() {
+        let mut room = hard_room(true, false);
+        assert!(room.rotate_selection("host", 0, 1).is_err(), "no lease");
+        room.acquire("host", 0).unwrap();
+        assert!(room.rotate_selection("host", 0, 2).is_err());
+        assert!(room.rotate_selection("host", 0, 0).is_err());
+        assert!(
+            room.rotate_selection("host", 1, 1).is_err(),
+            "anchor not held"
+        );
+        let mut off = hard_room(false, false);
+        off.acquire("host", 0).unwrap();
+        assert!(off.rotate_selection("host", 0, 1).is_err());
+    }
+
+    #[test]
+    fn a_turned_piece_does_not_snap_but_an_upright_one_does() {
+        let mut room = hard_room(true, false);
+        let id = 0;
+        room.acquire("host", id).unwrap();
+        let (cell_w, cell_h) = {
+            let s = room.snapshot.as_mut().unwrap();
+            let piece = s.piece_mut(id).unwrap();
+            piece.rotation = 1;
+            (s.cell_width(), s.cell_height())
+        };
+        let _ = (cell_w, cell_h);
+        // Released exactly on its home slot, but turned: it stays loose.
+        let (pieces, _) = room.move_piece("host", id, 0.0, 0.0, true).unwrap();
+        let piece = pieces.iter().find(|p| p.id == id).unwrap();
+        assert!(!piece.placed && piece.held_by.is_none());
+        // Upright on its home slot: it places.
+        room.acquire("host", id).unwrap();
+        room.snapshot
+            .as_mut()
+            .unwrap()
+            .piece_mut(id)
+            .unwrap()
+            .rotation = 0;
+        let (pieces, _) = room.move_piece("host", id, 0.0, 0.0, true).unwrap();
+        assert!(pieces.iter().find(|p| p.id == id).unwrap().placed);
+    }
+
+    #[test]
+    fn turned_neighbours_do_not_merge() {
+        let mut room = hard_room(true, false);
+        {
+            let s = room.snapshot.as_mut().unwrap();
+            s.pieces.iter_mut().for_each(|p| p.rotation = 0);
+            let w = s.cell_width();
+            // Piece 1 sits turned somewhere; piece 0 dropped at exactly its
+            // neighbour offset must still not join it.
+            let (x1, y1) = (s.pieces[1].x, s.pieces[1].y);
+            s.pieces[1].rotation = 2;
+            s.pieces[0].x = x1 - w;
+            s.pieces[0].y = y1;
+        }
+        room.acquire("host", 0).unwrap();
+        let (x, y) = {
+            let p = room.snapshot.as_ref().unwrap().piece(0).unwrap();
+            (p.x, p.y)
+        };
+        let (pieces, _) = room.move_piece("host", 0, x, y, true).unwrap();
+        let moved = pieces.iter().find(|p| p.id == 0).unwrap();
+        assert_ne!(moved.group_id, 1);
+        assert_eq!(pieces.len(), 1);
+    }
+
+    #[test]
+    fn no_hints_refuses_edges_first_but_not_shuffle() {
+        let mut room = hard_room(false, true);
+        assert!(room.rearrange_tray(TrayArrangement::EdgesFirst, 1).is_err());
+        assert!(room.rearrange_tray(TrayArrangement::Shuffle, 1).is_ok());
+        let mut open = hard_room(false, false);
+        assert!(open.rearrange_tray(TrayArrangement::EdgesFirst, 1).is_ok());
+    }
+
+    #[test]
+    fn restart_rescatters_with_the_rooms_rotation_setting() {
+        let mut room = hard_room(true, false);
+        let (pieces, _) = room.restart("host", 7).unwrap();
+        assert!(pieces.iter().any(|p| p.rotation != 0));
+        let mut plain = hard_room(false, false);
+        let (pieces, _) = plain.restart("host", 7).unwrap();
+        assert!(pieces.iter().all(|p| p.rotation == 0));
+    }
+
+    #[test]
+    fn older_snapshots_load_without_rotation_or_difficulty() {
+        let snapshot = hard_room(true, true).snapshot.unwrap();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        value.as_object_mut().unwrap().remove("difficulty");
+        for piece in value["pieces"].as_array_mut().unwrap() {
+            piece.as_object_mut().unwrap().remove("rotation");
+        }
+        let mut old: RoomSnapshot = serde_json::from_value(value).unwrap();
+        old.migrate();
+        assert_eq!(old.difficulty, Difficulty::default());
+        assert!(old.pieces.iter().all(|p| p.rotation == 0));
+        assert_eq!(old.protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn migrate_clamps_bad_rotation_and_strips_it_when_the_mode_is_off() {
+        let mut snapshot = hard_room(true, false).snapshot.unwrap();
+        snapshot.pieces[0].rotation = 9;
+        snapshot.migrate();
+        assert_eq!(snapshot.pieces[0].rotation, 0);
+        let mut off = hard_room(false, false).snapshot.unwrap();
+        off.pieces[1].rotation = 2;
+        off.migrate();
+        assert_eq!(off.pieces[1].rotation, 0);
+    }
+
+    #[test]
+    fn rehost_carries_difficulty_and_rotation() {
+        let snapshot = RoomSnapshot::create(
+            "id".into(),
+            "invite".into(),
+            "t".into(),
+            "a".repeat(64),
+            "png".into(),
+            800,
+            600,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap()
+        .with_difficulty(Difficulty {
+            rotation: true,
+            no_hints: true,
+        });
+        let turned: Vec<u8> = snapshot.pieces.iter().map(|p| p.rotation).collect();
+        let rehosted = snapshot
+            .rehost("n".into(), "NEW".into(), "h".into())
+            .unwrap();
+        assert!(rehosted.difficulty.rotation && rehosted.difficulty.no_hints);
+        assert_eq!(
+            rehosted
+                .pieces
+                .iter()
+                .map(|p| p.rotation)
+                .collect::<Vec<_>>(),
+            turned
+        );
+    }
+
+    #[test]
+    fn rotation_rooms_refuse_clients_older_than_v16() {
+        let room = hard_room(true, false);
+        assert!(room.require_client_protocol(0).is_err());
+        assert!(room.require_client_protocol(15).is_err());
+        assert!(room.require_client_protocol(16).is_ok());
+        assert!(hard_room(false, false).require_client_protocol(0).is_ok());
+    }
+
+    fn big(rows: u16, columns: u16) -> Result<RoomSnapshot, String> {
+        RoomSnapshot::create(
+            "id".into(),
+            "invite".into(),
+            "t".into(),
+            "a".repeat(64),
+            "png".into(),
+            3840,
+            2160,
+            rows,
+            columns,
+            "host".into(),
+        )
+    }
+
+    #[test]
+    fn the_piece_cap_is_a_thousand_and_fifty_a_side() {
+        assert!(big(25, 40).is_ok(), "1000 pieces");
+        assert!(big(26, 40).is_err(), "1040 pieces");
+        assert!(big(2, 51).is_err(), "51 columns");
+        assert!(big(20, 50).is_ok(), "1000 pieces, 50 wide");
+    }
+
+    #[test]
+    fn a_thousand_piece_snapshot_fits_the_default_message_limit() {
+        let snapshot = big(25, 40).unwrap().with_difficulty(Difficulty {
+            rotation: true,
+            no_hints: false,
+        });
+        let welcome = ServerMessage::Welcome {
+            client_id: "c".into(),
+            name: "n".into(),
+            peers: Vec::new(),
+            snapshot,
+            media_upload_token: None,
+            spectator: false,
+            spectators: Vec::new(),
+            server_now_ms: 0,
+        };
+        let size = serde_json::to_string(&welcome).unwrap().len();
+        assert!(size < 700 * 1024, "{size} bytes");
     }
 }

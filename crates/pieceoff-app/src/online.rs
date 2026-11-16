@@ -1293,6 +1293,7 @@ mod tests {
             "wss://h/ws?protocol=15&code=ABCD2345"
         );
         let join = ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: "ABCD2345".into(),
             name: "P".into(),
             media_sha256: String::new(),

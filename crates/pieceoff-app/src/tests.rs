@@ -21,6 +21,7 @@ fn focus_view_centers_and_fits_the_requested_content_region() {
 #[test]
 fn tray_filters_separate_edge_and_interior_pieces() {
     let edge = Piece {
+        rotation: 0,
         id: 0,
         group_id: 0,
         row: 0,
@@ -3196,6 +3197,7 @@ fn piece_mesh_samples_the_cover_fitted_uv_rect() {
     use crate::board::{cover_uv_rect, piece_mesh};
     let uv = cover_uv_rect(64.0, 48.0, 160.0, 90.0);
     let piece = pieceoff_core::Piece {
+        rotation: 0,
         id: 0,
         group_id: 0,
         row: 0,

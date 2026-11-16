@@ -1195,6 +1195,7 @@ impl PieceOffApp {
             } else if reconnect_at <= Instant::now() && self.network.is_none() {
                 self.reconnect_at = None;
                 let message = ClientMessage::JoinRoom {
+                    client_protocol: 0,
                     invite_code: self.invite_code.clone(),
                     name: self.player_name.clone(),
                     media_sha256: self.media_hash.clone(),

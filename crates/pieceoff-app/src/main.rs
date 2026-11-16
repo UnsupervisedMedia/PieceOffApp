@@ -905,6 +905,7 @@ impl PieceOffApp {
     pub(crate) fn create_request(&self) -> ClientMessage {
         let title = clean_room_title(&self.title);
         ClientMessage::CreateRoom {
+            difficulty: Default::default(),
             name: self.player_name.clone(),
             title: title.clone(),
             media_sha256: self.media_hash.clone(),
@@ -1068,6 +1069,7 @@ impl PieceOffApp {
             }
         }
         let message = ClientMessage::JoinRoom {
+            client_protocol: 0,
             invite_code: self.invite_code.clone(),
             name: self.player_name.clone(),
             media_sha256: self.media_hash.clone(),
