@@ -5250,6 +5250,108 @@ mod hardening_tests {
     }
 
     #[tokio::test]
+    async fn rotation_rooms_turn_pieces_for_everyone_and_refuse_old_clients() {
+        let config = test_config();
+        let state = AppState::from_config(&config);
+        let (room, code, _, _, _) = connect_room(
+            &state,
+            "host",
+            ClientMessage::CreateRoom {
+                difficulty: pieceoff_core::Difficulty {
+                    rotation: true,
+                    no_hints: false,
+                },
+                name: "Host".into(),
+                title: "Turned".into(),
+                media_sha256: "e".repeat(64),
+                media_extension: "png".into(),
+                width: 64,
+                height: 48,
+                rows: 2,
+                columns: 2,
+                initial_snapshot: None,
+                duration_ms: 0,
+                player_key: String::new(),
+                cut_style: Default::default(),
+                listed: false,
+            },
+        )
+        .await
+        .unwrap();
+        let join = |protocol: u16, spectator: bool| ClientMessage::JoinRoom {
+            client_protocol: protocol,
+            invite_code: code.clone(),
+            name: "Guest".into(),
+            media_sha256: "e".repeat(64),
+            media_extension: "png".into(),
+            spectator,
+            player_key: String::new(),
+        };
+        let refused = connect_room(&state, "old", join(15, false)).await.err().unwrap();
+        assert!(refused.contains("Update PieceOff"), "{refused}");
+        let refused_spectator = connect_room(&state, "old-watcher", join(0, true))
+            .await
+            .err()
+            .unwrap();
+        assert!(refused_spectator.contains("Update PieceOff"));
+        connect_room(&state, "guest", join(pieceoff_core::PROTOCOL_VERSION, false))
+            .await
+            .unwrap();
+
+        let mut events = room.events.subscribe();
+        let before = room
+            .runtime
+            .lock()
+            .await
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .piece(0)
+            .unwrap()
+            .rotation;
+        dispatch(&room, "guest", ClientMessage::DragStart { piece_id: 0 })
+            .await
+            .unwrap();
+        dispatch(
+            &room,
+            "guest",
+            ClientMessage::RotateSelection {
+                anchor_piece_id: 0,
+                quarter_turns: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut saw_turn = false;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await
+        {
+            if let ServerMessage::PiecesChanged { pieces, .. } = event
+                && pieces
+                    .iter()
+                    .any(|piece| piece.id == 0 && piece.rotation == (before + 1) % 4)
+            {
+                saw_turn = true;
+            }
+        }
+        assert!(saw_turn, "every player is told about the turn");
+        // Someone who does not hold the piece cannot turn it.
+        assert!(
+            dispatch(
+                &room,
+                "host",
+                ClientMessage::RotateSelection {
+                    anchor_piece_id: 0,
+                    quarter_turns: 1,
+                },
+            )
+            .await
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[tokio::test]
     async fn holders_reserve_pieces_survive_a_restart_and_are_released_after_the_grace() {
         let config = test_config();
         let state = AppState::from_config(&config);

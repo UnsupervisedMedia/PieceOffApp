@@ -773,16 +773,18 @@ fn reconnect_clears_stale_drag_and_pan_gestures() {
 
 #[test]
 fn grid_dimension_controls_respect_the_server_piece_limit() {
-    for other in 2..=30 {
+    let side = pieceoff_core::MAX_GRID_SIDE;
+    for other in 2..=side {
         let max = max_grid_dimension_for_other(other);
-        assert!((2..=30).contains(&max));
+        assert!((2..=side).contains(&max));
         assert!(max * other <= MAX_PUZZLE_PIECES);
-        if max < 30 {
+        if max < side {
             assert!((max + 1) * other > MAX_PUZZLE_PIECES);
         }
     }
-    assert_eq!(max_grid_dimension_for_other(2), 30);
-    assert_eq!(max_grid_dimension_for_other(30), 13);
+    assert_eq!(MAX_PUZZLE_PIECES, 1000);
+    assert_eq!(max_grid_dimension_for_other(2), side);
+    assert_eq!(max_grid_dimension_for_other(50), 20);
 }
 
 #[test]
@@ -3003,8 +3005,9 @@ fn creating_a_room_sends_the_chosen_cut_style_and_a_capped_grid() {
         for (_, count) in crate::ui::PIECE_PRESETS {
             for media_aspect in [aspect, 1.0, 0.5625, 2.4] {
                 let (rows, columns) = crate::ui::grid_for_style(count, media_aspect, style);
-                assert!(u32::from(rows) * u32::from(columns) <= 400);
-                assert!((2..=30).contains(&rows) && (2..=30).contains(&columns));
+                assert!(u32::from(rows) * u32::from(columns) <= pieceoff_core::MAX_PIECES);
+                let side = 2..=pieceoff_core::MAX_GRID_SIDE;
+                assert!(side.contains(&rows) && side.contains(&columns));
             }
         }
         (app.rows, app.columns) = crate::ui::grid_for_style(48, aspect, CutStyle::Jigsaw);
@@ -3128,13 +3131,21 @@ fn the_timelapse_joins_hexagon_neighbours_by_position() {
 fn large_board_frame_cost() {
     for style in CutStyle::ALL {
         println!("{style:?}");
-        board_frame_cost(style);
+        board_frame_cost(style, 20, 20);
     }
 }
 
-fn board_frame_cost(style: CutStyle) {
+/// The 1000-piece cap's cost gate: the same report at 25 x 40 pieces (see
+/// the harder-modes spec; target is under 8 ms of build per frame).
+#[test]
+#[ignore = "timing report, not a pass/fail check"]
+fn thousand_piece_board_frame_cost() {
+    board_frame_cost(CutStyle::Jigsaw, 25, 40);
+}
+
+fn board_frame_cost(style: CutStyle, rows: u16, columns: u16) {
     let started = Instant::now();
-    let mut rig = DragRig::styled(20, 20, style);
+    let mut rig = DragRig::styled(rows, columns, style);
     println!("rig + first frame: {:?}", started.elapsed());
     for (label, command) in [
         ("whole table", ViewCommand::Fit),
@@ -4832,7 +4843,7 @@ fn http_stub(
     (format!("ws://{address}/ws"), handle)
 }
 
-const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":15,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
+const HOSTED_INFO: &str = r#"{"service":"pieceoff-rooms","protocol":16,"hosted":true,"link_url":"https://pieceoff.app/link","share_url":"https://pieceoff.app/join","features":["device_keys","lobby"]}"#;
 const TEST_DEVICE_KEY: &str = "pok_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 
 #[test]
@@ -5383,4 +5394,67 @@ fn chat_off_and_report_links() {
     );
     assert!(link.contains("ABCD23x"), "{link}");
     assert!(!link.contains(' ') && !link.contains('/'), "{link}");
+}
+
+#[test]
+fn creating_a_room_sends_the_chosen_difficulty_and_a_package_keeps_its_own() {
+    let mut app = PieceOffApp {
+        media_hash: "a".repeat(64),
+        media_extension: "png".into(),
+        ..PieceOffApp::default()
+    };
+    let ClientMessage::CreateRoom { difficulty, .. } = app.create_request() else {
+        panic!("not a create request");
+    };
+    assert_eq!(difficulty, pieceoff_core::Difficulty::default());
+    app.difficulty = pieceoff_core::Difficulty {
+        rotation: true,
+        no_hints: true,
+    };
+    let ClientMessage::CreateRoom { difficulty, .. } = app.create_request() else {
+        panic!("not a create request");
+    };
+    assert!(difficulty.rotation && difficulty.no_hints);
+    // A reopened package keeps what it was made with, whatever is ticked.
+    app.pending_snapshot = Some(
+        RoomSnapshot::create(
+            "room".into(),
+            "PKG001".into(),
+            "t".into(),
+            "a".repeat(64),
+            "png".into(),
+            800,
+            600,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap()
+        .with_difficulty(pieceoff_core::Difficulty {
+            rotation: true,
+            no_hints: false,
+        }),
+    );
+    let ClientMessage::CreateRoom { difficulty, .. } = app.create_request() else {
+        panic!("not a create request");
+    };
+    assert!(difficulty.rotation && !difficulty.no_hints);
+}
+
+#[test]
+fn rotate_keys_default_to_e_and_q_and_do_not_collide() {
+    use crate::controls::Action;
+    let controls = crate::controls::Controls::default();
+    let bound = |action: Action| controls.bindings_for(action).to_vec();
+    assert_eq!(bound(Action::RotateCw).len(), 1);
+    assert_eq!(bound(Action::RotateCcw).len(), 1);
+    let mut seen = std::collections::HashSet::new();
+    for action in Action::ALL {
+        for binding in bound(action) {
+            assert!(
+                seen.insert(binding.to_setting()),
+                "{action:?} shares a default key"
+            );
+        }
+    }
 }

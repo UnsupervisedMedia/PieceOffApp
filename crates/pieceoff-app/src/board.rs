@@ -184,11 +184,17 @@ fn piece_at(
             .map(|&index| &snapshot.pieces[index])
             .filter(|piece| !piece.placed && piece_visible_for_filter(filter, piece, snapshot))
     };
+    let (cell_w, cell_h) = (snapshot.cell_width(), snapshot.cell_height());
     let exact = candidates().find(|piece| {
         let Some(shape) = shapes.get(&piece.id) else {
             return false;
         };
-        let local = Pos2::new(at.x - piece.x, at.y - piece.y);
+        let local = unrotate_local(
+            Pos2::new(at.x - piece.x, at.y - piece.y),
+            piece.rotation,
+            cell_w,
+            cell_h,
+        );
         shape.bounds.contains(local) && point_in_polygon(local, &shape.outline)
     });
     if let Some(piece) = exact {
@@ -202,7 +208,12 @@ fn piece_at(
     candidates()
         .filter_map(|piece| {
             let shape = shapes.get(&piece.id)?;
-            let local = Pos2::new(at.x - piece.x, at.y - piece.y);
+            let local = unrotate_local(
+                Pos2::new(at.x - piece.x, at.y - piece.y),
+                piece.rotation,
+                cell_w,
+                cell_h,
+            );
             if !shape.bounds.expand(margin).contains(local) {
                 return None;
             }
@@ -264,9 +275,14 @@ fn pieces_touching(
                 },
                 |shape| shape.bounds,
             );
-            bounds
-                .translate(Vec2::new(piece.x, piece.y))
-                .intersects(area)
+            rotated_bounds(
+                bounds,
+                piece.rotation,
+                snapshot.cell_width(),
+                snapshot.cell_height(),
+            )
+            .translate(Vec2::new(piece.x, piece.y))
+            .intersects(area)
         })
         .map(|piece| piece.id)
         .collect()
@@ -380,6 +396,57 @@ impl PieceOffApp {
             .then(|| Duration::from_millis(stats.elapsed_at(server_clock_ms())))
     }
 
+    /// Turn the held selection (mid-drag), or the selected / hovered piece
+    /// when idle, a quarter turn. The server validates and broadcasts; a drag
+    /// also turns its remembered origins at once so it stays smooth.
+    fn apply_rotate(&mut self, snapshot: &mut RoomSnapshot, hovered: Option<u32>, turns: i8) {
+        let (cell_w, cell_h) = (snapshot.cell_width(), snapshot.cell_height());
+        if let Some(drag) = self.dragging.as_mut() {
+            drag.origins = rotate_origins(&drag.origins, drag.anchor_piece_id, turns, cell_w, cell_h);
+            let anchor_piece_id = drag.anchor_piece_id;
+            let held: Vec<u32> = drag.origins.iter().map(|(id, _, _)| *id).collect();
+            for id in held {
+                if let Some(piece) = snapshot.piece_mut(id) {
+                    piece.rotation = (piece.rotation as i8 + turns).rem_euclid(4) as u8;
+                }
+            }
+            self.send(ClientMessage::RotateSelection {
+                anchor_piece_id,
+                quarter_turns: turns,
+            });
+            return;
+        }
+        let mut ids: Vec<u32> = if self.selected_pieces.is_empty() {
+            hovered.into_iter().collect()
+        } else {
+            self.selected_pieces.iter().copied().collect()
+        };
+        ids.sort_unstable();
+        ids.retain(|id| {
+            snapshot
+                .piece(*id)
+                .is_some_and(|piece| !piece.placed && piece.held_by.is_none())
+        });
+        let Some(&anchor_piece_id) = ids.first() else {
+            return;
+        };
+        let (x, y) = snapshot
+            .piece(anchor_piece_id)
+            .map_or((0.0, 0.0), |piece| (piece.x, piece.y));
+        // Pick up, turn about the anchor, put down in place: the server
+        // answers with the turned pieces (and snaps them if now upright).
+        self.send(ClientMessage::DragStartSelection { piece_ids: ids });
+        self.send(ClientMessage::RotateSelection {
+            anchor_piece_id,
+            quarter_turns: turns,
+        });
+        self.send(ClientMessage::DragEndSelection {
+            anchor_piece_id,
+            x,
+            y,
+        });
+    }
+
     fn render_room(
         &mut self,
         ui: &mut egui::Ui,
@@ -387,9 +454,12 @@ impl PieceOffApp {
         mode: BoardMode,
     ) -> Option<BoardAction> {
         let interactive = mode == BoardMode::Play;
+        let no_hints = snapshot.difficulty.no_hints;
+        // The still-frame assist is a hint: a no-hints room never shows it.
         let Some(texture_id) = self
             .still_assist_texture
             .as_ref()
+            .filter(|_| !no_hints)
             .or(self.texture.as_ref())
             .map(|texture| texture.id())
         else {
@@ -406,7 +476,7 @@ impl PieceOffApp {
         let available = ui.available_size().max(Vec2::splat(1.0));
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let canvas = response.rect;
-        if self.show_reference && !self.is_video {
+        if self.show_reference && !self.is_video && !no_hints {
             let image_rect = fit_media_rect(
                 canvas,
                 Vec2::new(snapshot.width as f32, snapshot.height as f32),
@@ -573,7 +643,7 @@ impl PieceOffApp {
             Stroke::new(1.0_f32, Color32::from_white_alpha(22)),
             egui::StrokeKind::Outside,
         );
-        if self.settings.show_ghost {
+        if self.settings.show_ghost && !no_hints {
             // A faint, live ghost of the media marks where the picture goes.
             painter.image(
                 texture_id,
@@ -962,9 +1032,10 @@ impl PieceOffApp {
                 let Some(shape) = self.shape_cache.get(&piece.id) else {
                     continue;
                 };
+                let bounds = rotated_bounds(shape.bounds, piece.rotation, cw, ch);
                 let on_screen = Rect::from_min_max(
-                    view.to_screen(piece.x + shape.bounds.min.x, piece.y + shape.bounds.min.y),
-                    view.to_screen(piece.x + shape.bounds.max.x, piece.y + shape.bounds.max.y),
+                    view.to_screen(piece.x + bounds.min.x, piece.y + bounds.min.y),
+                    view.to_screen(piece.x + bounds.max.x, piece.y + bounds.max.y),
                 );
                 if !clip.intersects(on_screen.expand(12.0)) {
                     continue;
@@ -1125,14 +1196,26 @@ impl PieceOffApp {
                 u64::from(1_000 - into_second).max(50),
             ));
         }
+        if let Some(turns) = self.pending_rotate.take()
+            && interactive
+            && snapshot.difficulty.rotation
+        {
+            self.apply_rotate(snapshot, hovered_piece, turns);
+        }
+        let challenge = match (snapshot.difficulty.rotation, no_hints) {
+            (true, true) => Some("Rotation · No hints"),
+            (true, false) => Some("Rotation · turn pieces upright with E / Q"),
+            (false, true) => Some("No hints"),
+            (false, false) => None,
+        };
         let banner = match mode {
             BoardMode::Replay => Some(("Timelapse replay · the live room carries on", ACCENT)),
             BoardMode::Watch => Some(("Watching · only players move pieces", ACCENT)),
-            BoardMode::Play if self.still_assist_texture.is_some() => Some((
+            BoardMode::Play if self.still_assist_texture.is_some() && !no_hints => Some((
                 "Still-frame assist · playback continues",
                 Color32::LIGHT_YELLOW,
             )),
-            BoardMode::Play => None,
+            BoardMode::Play => challenge.map(|text| (text, ACCENT)),
         };
         if let Some((text, color)) = banner {
             paint_pill(
@@ -1474,6 +1557,67 @@ pub(crate) fn cover_uv_rect(board_w: f32, board_h: f32, media_w: f32, media_h: f
     }
 }
 
+/// Rotate a piece-local point clockwise by `quarter_turns` about the centre of
+/// the piece's cell. The server pivots on the same centre (see
+/// `RoomRuntime::rotate_selection`), so what is drawn is what is validated.
+pub(crate) fn rotate_local(point: [f32; 2], quarter_turns: u8, cell_w: f32, cell_h: f32) -> [f32; 2] {
+    let (cx, cy) = (cell_w / 2.0, cell_h / 2.0);
+    let (mut dx, mut dy) = (point[0] - cx, point[1] - cy);
+    for _ in 0..quarter_turns % 4 {
+        (dx, dy) = (-dy, dx);
+    }
+    [cx + dx, cy + dy]
+}
+
+/// The inverse of `rotate_local`, for mapping a pointer into an unrotated
+/// outline.
+pub(crate) fn unrotate_local(point: Pos2, quarter_turns: u8, cell_w: f32, cell_h: f32) -> Pos2 {
+    let [x, y] = rotate_local([point.x, point.y], (4 - quarter_turns % 4) % 4, cell_w, cell_h);
+    Pos2::new(x, y)
+}
+
+/// Bounds of `bounds` (piece-local) after the piece is turned.
+pub(crate) fn rotated_bounds(bounds: Rect, quarter_turns: u8, cell_w: f32, cell_h: f32) -> Rect {
+    if quarter_turns % 4 == 0 {
+        return bounds;
+    }
+    let mut out = Rect::NOTHING;
+    for corner in [
+        [bounds.min.x, bounds.min.y],
+        [bounds.max.x, bounds.min.y],
+        [bounds.max.x, bounds.max.y],
+        [bounds.min.x, bounds.max.y],
+    ] {
+        let [x, y] = rotate_local(corner, quarter_turns, cell_w, cell_h);
+        out.extend_with(Pos2::new(x, y));
+    }
+    out
+}
+
+/// Turn a held selection's remembered origins about the anchor's cell centre,
+/// exactly as the server will, so the next drag frame starts from the turned
+/// layout. Returns the new origins.
+pub(crate) fn rotate_origins(
+    origins: &[(u32, f32, f32)],
+    anchor_id: u32,
+    quarter_turns: i8,
+    cell_w: f32,
+    cell_h: f32,
+) -> Vec<(u32, f32, f32)> {
+    let Some(&(_, ax, ay)) = origins.iter().find(|(id, _, _)| *id == anchor_id) else {
+        return origins.to_vec();
+    };
+    let (px, py) = (ax + cell_w / 2.0, ay + cell_h / 2.0);
+    origins
+        .iter()
+        .map(|&(id, x, y)| {
+            let (dx, dy) = (x + cell_w / 2.0 - px, y + cell_h / 2.0 - py);
+            let (rx, ry) = if quarter_turns > 0 { (-dy, dx) } else { (dy, -dx) };
+            (id, px + rx - cell_w / 2.0, py + ry - cell_h / 2.0)
+        })
+        .collect()
+}
+
 // A mesh vertex needs source, destination, and grid geometry together.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn piece_mesh(
@@ -1494,10 +1638,12 @@ pub(crate) fn piece_mesh(
     for point in outline {
         let source_x = piece.column as f32 * cell_w + point[0];
         let source_y = piece.row as f32 * cell_h + point[1];
+        // The picture turns with the piece: only the position is rotated.
+        let drawn = rotate_local(*point, piece.rotation, cell_w, cell_h);
         mesh.vertices.push(Vertex {
             pos: Pos2::new(
-                board.min.x + (piece.x + point[0]) * scale,
-                board.min.y + (piece.y + point[1]) * scale,
+                board.min.x + (piece.x + drawn[0]) * scale,
+                board.min.y + (piece.y + drawn[1]) * scale,
             ),
             uv: Pos2::new(
                 uv.min.x + (source_x / image_w) * (uv.max.x - uv.min.x),
@@ -1603,4 +1749,185 @@ pub(crate) fn point_in_polygon(point: Pos2, polygon: &[[f32; 2]]) -> bool {
         previous = current;
     }
     inside
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use pieceoff_core::{Difficulty, RoomRuntime, RoomSnapshot, piece_outline};
+    use std::collections::HashMap;
+
+    fn snapshot(rotation: bool) -> RoomSnapshot {
+        RoomSnapshot::create(
+            "room".into(),
+            "ROT001".into(),
+            "t".into(),
+            "a".repeat(64),
+            "png".into(),
+            800,
+            600,
+            3,
+            4,
+            "host".into(),
+        )
+        .unwrap()
+        .with_difficulty(Difficulty {
+            rotation,
+            no_hints: false,
+        })
+    }
+
+    #[test]
+    fn rotate_and_unrotate_are_inverse_and_four_turns_is_identity() {
+        let (w, h) = (200.0, 100.0);
+        let p = [37.0, 81.0];
+        for turns in 0..4u8 {
+            let r = rotate_local(p, turns, w, h);
+            let back = unrotate_local(Pos2::new(r[0], r[1]), turns, w, h);
+            assert!((back.x - p[0]).abs() < 1e-3 && (back.y - p[1]).abs() < 1e-3);
+        }
+        let full = rotate_local(rotate_local(p, 2, w, h), 2, w, h);
+        assert!((full[0] - p[0]).abs() < 1e-3 && (full[1] - p[1]).abs() < 1e-3);
+        // The cell centre is the fixed point.
+        let c = rotate_local([w / 2.0, h / 2.0], 1, w, h);
+        assert!((c[0] - w / 2.0).abs() < 1e-3 && (c[1] - h / 2.0).abs() < 1e-3);
+        // Clockwise on screen: the cell's right-middle goes to bottom-middle.
+        let right = rotate_local([w, h / 2.0], 1, 100.0, 100.0);
+        assert!((right[0] - 50.0).abs() < 1e-3 && right[1] > 50.0);
+    }
+
+    #[test]
+    fn rotated_bounds_swap_width_and_height_about_the_centre() {
+        let b = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0));
+        let r = rotated_bounds(b, 1, 100.0, 50.0);
+        assert!((r.width() - 50.0).abs() < 1e-3 && (r.height() - 100.0).abs() < 1e-3);
+        assert!((r.center().x - 50.0).abs() < 1e-3 && (r.center().y - 25.0).abs() < 1e-3);
+        assert_eq!(rotated_bounds(b, 0, 100.0, 50.0), b);
+    }
+
+    #[test]
+    fn client_drag_rotation_matches_what_the_server_computes() {
+        let mut room = RoomRuntime::from_snapshot(snapshot(true));
+        room.acquire_selection("host", &[0, 1, 5]).unwrap();
+        let snap = room.snapshot.as_ref().unwrap();
+        let (cw, ch) = (snap.cell_width(), snap.cell_height());
+        let origins: Vec<_> = [0u32, 1, 5]
+            .iter()
+            .map(|id| {
+                let p = snap.piece(*id).unwrap();
+                (*id, p.x, p.y)
+            })
+            .collect();
+        for turns in [1i8, 1, -1, -1, -1] {
+            let predicted = rotate_origins(
+                &room
+                    .snapshot
+                    .as_ref()
+                    .map(|s| {
+                        [0u32, 1, 5]
+                            .iter()
+                            .map(|id| {
+                                let p = s.piece(*id).unwrap();
+                                (*id, p.x, p.y)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap(),
+                1,
+                turns,
+                cw,
+                ch,
+            );
+            room.rotate_selection("host", 1, turns).unwrap();
+            let snap = room.snapshot.as_ref().unwrap();
+            for (id, x, y) in predicted {
+                let p = snap.piece(id).unwrap();
+                assert!(
+                    (p.x - x).abs() < 0.05 && (p.y - y).abs() < 0.05,
+                    "piece {id}: client ({x}, {y}) vs server ({}, {})",
+                    p.x,
+                    p.y
+                );
+            }
+        }
+        let _ = origins;
+    }
+
+    #[test]
+    fn a_turned_piece_is_picked_where_it_is_drawn_not_where_it_would_be_upright() {
+        let mut snap = snapshot(true);
+        let (cw, ch) = (snap.cell_width(), snap.cell_height());
+        let id = 5;
+        let shapes: HashMap<u32, CachedPieceShape> = snap
+            .pieces
+            .iter()
+            .map(|p| (p.id, CachedPieceShape::new(piece_outline(&snap, p))))
+            .collect();
+        // Put the piece on its own, far from the rest, turned a quarter.
+        {
+            let piece = snap.piece_mut(id).unwrap();
+            piece.x = -5000.0;
+            piece.y = -5000.0;
+            piece.rotation = 1;
+        }
+        let order: Vec<usize> = (0..snap.pieces.len()).collect();
+        let piece = snap.piece(id).unwrap().clone();
+        let shape = &shapes[&id];
+        // A point just inside the unrotated outline's right edge region...
+        let local = shape.outline[shape.outline.len() / 7];
+        let drawn = rotate_local(local, 1, cw, ch);
+        let at = Pos2::new(piece.x + drawn[0], piece.y + drawn[1]);
+        // Nudge toward the cell centre so we are strictly inside the shape.
+        let centre = Pos2::new(piece.x + cw / 2.0, piece.y + ch / 2.0);
+        let at = at + (centre - at) * 0.1;
+        assert_eq!(
+            piece_at(&snap, &order, &shapes, PieceFilter::All, at, 0.0),
+            Some(id)
+        );
+        // A point on the far side of the cell from the drawn outline misses.
+        let outside = Pos2::new(piece.x - cw, piece.y - ch);
+        assert_eq!(
+            piece_at(&snap, &order, &shapes, PieceFilter::All, outside, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn the_mesh_turns_positions_but_not_the_picture() {
+        let piece = Piece {
+            id: 0,
+            group_id: 0,
+            row: 0,
+            column: 0,
+            x: 0.0,
+            y: 0.0,
+            placed: false,
+            held_by: None,
+            rotation: 1,
+        };
+        let mesh = |rotation: u8| {
+            let mut piece = piece.clone();
+            piece.rotation = rotation;
+            piece_mesh(
+                egui::TextureId::default(),
+                &piece,
+                &[],
+                &[[0.0, 0.0], [100.0, 0.0]],
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0)),
+                1.0,
+                100.0,
+                100.0,
+                200.0,
+                100.0,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            )
+        };
+        let (upright, turned) = (mesh(0), mesh(1));
+        for (a, b) in upright.vertices.iter().zip(&turned.vertices) {
+            assert_eq!(a.uv, b.uv, "texture coordinates must not move");
+        }
+        // The top-left corner of a clockwise-turned square lands top-right.
+        assert!((turned.vertices[0].pos.x - 100.0).abs() < 1e-3);
+        assert!(turned.vertices[0].pos.y.abs() < 1e-3);
+    }
 }
