@@ -40,8 +40,9 @@ describe("/ws refusal CORS", () => {
     const foreign = await lookup(port, OTHER);
     assert.equal(foreign.status, 503);
     assert.equal(foreign.headers.get(ACAO), null);
-    // Other paused routes are unchanged.
-    const api = await fetch(`http://127.0.0.1:${port}/api/rooms`, { method: "POST", body: "{}", headers: { origin: SITE } });
+    // Paused room creation is readable by the site too (create-cors.test.mjs);
+    // other paused API routes are unchanged.
+    const api = await fetch(`http://127.0.0.1:${port}/api/links`, { method: "POST", body: "{}", headers: { origin: SITE } });
     assert.equal(api.status, 503);
     assert.equal(api.headers.get(ACAO), null);
   });

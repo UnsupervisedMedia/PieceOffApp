@@ -136,6 +136,32 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   return json({ error: "Could not pick a free room code. Please try again." }, 503);
 }
 
+/**
+ * Browser room creation (`POST /api/rooms` from the site's web client): the
+ * site's origin may read every answer, refusals included, so the client can
+ * tell 429 / 403 / 503 / 507 apart. Only that origin, never `*`.
+ */
+function withSiteCors(response: Response, request: Request, env: Env): Response {
+  const cors = socketRefusalCors(request, env);
+  if (Object.keys(cors).length === 0) return response;
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+/** Preflight for the web client's create call (it sends `x-turnstile-token`). */
+function createPreflight(request: Request, env: Env): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      ...socketRefusalCors(request, env),
+      "access-control-allow-methods": "POST",
+      "access-control-allow-headers": "x-turnstile-token, content-type",
+      "access-control-max-age": "600",
+    },
+  });
+}
+
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -145,15 +171,16 @@ async function route(request: Request, env: Env): Promise<Response> {
   // all new hosted play (lobby reads, linking, creating and joining) without a
   // deploy (a secret, unlike a var, survives Git deploys). Nothing below
   // wakes a Durable Object while it is off.
+  if (path === "/api/rooms" && request.method === "OPTIONS") return createPreflight(request, env);
   if (env.ONLINE_PLAY_ENABLED === "0") {
-    if (path === "/api/lobby" && request.method === "GET") return json({ rooms: [] });
+    if (path === "/api/lobby" && request.method === "GET") return json({ rooms: [] }, 200, socketRefusalCors(request, env));
     if ((path.startsWith("/api/") && !path.startsWith("/api/admin/")) || path === "/ws") {
-      const cors = path === "/ws" ? socketRefusalCors(request, env) : {};
+      const cors = path === "/ws" || path === "/api/rooms" ? socketRefusalCors(request, env) : {};
       return json({ error: "PieceOff Online is paused right now. Please try again later." }, 503, cors);
     }
   }
   if (path === "/api/lobby" && request.method === "GET") return getLobby(request, env);
-  if (path === "/api/rooms" && request.method === "POST") return createRoom(request, env);
+  if (path === "/api/rooms" && request.method === "POST") return withSiteCors(await createRoom(request, env), request, env);
 
   const approve = path.match(/^\/api\/links\/([^/]+)\/approve$/);
   if (approve) {
