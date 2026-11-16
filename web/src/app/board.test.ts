@@ -9,7 +9,6 @@ import type { ClientMessage, Piece, RoomSnapshot, ServerMessage } from '../proto
 import { initWasm } from '../test-wasm';
 import { formatClock, mountBoard, type BoardHandle, type RendererLike } from './board';
 import { BUILTIN_MEDIA } from './create';
-import { HAS_ROTATION } from './rotation';
 
 let V: number;
 beforeAll(async () => {
@@ -675,16 +674,100 @@ describe('board', () => {
     expect(turns.every((b) => b.hidden)).toBe(true); // this room does not turn its pieces
   });
 
-  it.skipIf(!HAS_ROTATION)('rotation_button_sends_rotate_selection', () => {
-    const s = setup({ snap: { difficulty: { rotation: true, no_hints: false } } as unknown as Partial<RoomSnapshot> });
-    const [x, y] = s.at(0);
-    s.pointer('pointerdown', 1, x, y, { pointerType: 'touch' });
-    s.pointer('pointermove', 1, x + 30, y, { pointerType: 'touch' });
-    const right = s.root.querySelector<HTMLButtonElement>('.po-board-turn[data-turn="1"]')!;
-    expect(right.hidden).toBe(false);
-    right.click();
-    const rot = s.drags().filter((m) => (m.type as string) === 'rotate_selection');
-    expect(rot).toEqual([{ type: 'rotate_selection', anchor_piece_id: 0, quarter_turns: 1 }]);
+  describe('turned pieces (rotation rooms, protocol v16)', () => {
+    const ROT = { difficulty: { rotation: true, no_hints: false } };
+    /** Pick up piece 0 (and its group-mate 1) and let the server grant it. */
+    const holdGroup = (s: Setup, pointerType = 'mouse') => {
+      const [x, y] = s.at(0);
+      s.pointer('pointerdown', 1, x, y, { pointerType });
+      s.pointer('pointermove', 1, x + 30, y, { pointerType });
+      const me = s.state.clientId!;
+      s.receive({ type: 'pieces_changed', revision: 5, pieces: s.snap.pieces.slice(0, 2).map((p) => ({ ...p, held_by: me })) });
+      return [x + 30, y] as const;
+    };
+    const grouped = (): Partial<RoomSnapshot> => {
+      const p = spreadPieces();
+      p[1] = { ...p[1]!, group_id: 0, x: p[0]!.x + 240, y: p[0]!.y };
+      return { ...ROT, pieces: p };
+    };
+    const rotations = (s: Setup) => s.drags().filter((m) => m.type === 'rotate_selection');
+
+    it('turn_buttons_show_once_the_server_grants_the_piece', () => {
+      const s = setup({ snap: ROT });
+      const [x, y] = s.at(0);
+      s.pointer('pointerdown', 1, x, y, { pointerType: 'touch' });
+      s.pointer('pointermove', 1, x + 30, y, { pointerType: 'touch' });
+      const right = s.root.querySelector<HTMLButtonElement>('.po-board-turn[data-turn="1"]')!;
+      // Not before the grant: a refused pickup would answer the turn with "You do not hold ...".
+      expect(right.hidden).toBe(true);
+      right.click();
+      expect(rotations(s)).toEqual([]);
+      s.receive({ type: 'pieces_changed', revision: 5, pieces: [{ ...s.snap.pieces[0]!, held_by: s.state.clientId }] });
+      expect(right.hidden).toBe(false);
+      right.click();
+      expect(rotations(s)).toEqual([{ type: 'rotate_selection', anchor_piece_id: 0, quarter_turns: 1 }]);
+      s.pointer('pointerup', 1, x + 30, y, { pointerType: 'touch' });
+      expect(right.hidden).toBe(true);
+    });
+
+    it('a_turn_draws_the_held_group_turned_at_once', () => {
+      const s = setup({ snap: grouped() });
+      holdGroup(s);
+      s.root.querySelector<HTMLButtonElement>('.po-board-turn[data-turn="1"]')!.click();
+      const a = s.r.last(0);
+      const b = s.r.last(1);
+      expect(a[3]).toBe(1);
+      expect(b[3]).toBe(1);
+      // Piece 1 was one cell (240) to the right of the anchor; clockwise it is one cell below.
+      expect(b[1]).toBeCloseTo(a[1], 3);
+      expect(b[2]).toBeCloseTo(a[2] + 240, 3);
+      // Left turns back.
+      s.root.querySelector<HTMLButtonElement>('.po-board-turn[data-turn="-1"]')!.click();
+      expect(s.r.last(1)[2]).toBeCloseTo(s.r.last(0)[2], 3);
+      expect(rotations(s).map((m) => (m as { quarter_turns: number }).quarter_turns)).toEqual([1, -1]);
+    });
+
+    it('keys_E_and_Q_turn_the_held_piece_like_the_desktop', () => {
+      const s = setup({ snap: ROT });
+      const key = (k: string, target: EventTarget = window) =>
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      key('e');
+      expect(rotations(s)).toEqual([]); // nothing held
+      holdGroup(s);
+      key('e');
+      key('Q');
+      const input = document.createElement('input');
+      document.body.append(input);
+      key('e', input); // typing in chat does not turn
+      expect(rotations(s).map((m) => (m as { quarter_turns: number }).quarter_turns)).toEqual([1, -1]);
+    });
+
+    it('the_wheel_turns_a_held_piece_instead_of_zooming', () => {
+      const s = setup({ snap: ROT });
+      const wheel = (deltaY: number) =>
+        s.gl.dispatchEvent(new WheelEvent('wheel', { deltaY, deltaMode: 0, bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      holdGroup(s);
+      const scale = s.h.camera.scale;
+      wheel(100); // one notch toward the user: clockwise
+      wheel(20);
+      wheel(-20); // a trackpad's small deltas add up
+      wheel(-60);
+      expect(rotations(s).map((m) => (m as { quarter_turns: number }).quarter_turns)).toEqual([1, -1]);
+      expect(s.h.camera.scale).toBe(scale);
+      // Not holding: the wheel zooms again.
+      const [x, y] = s.at(0);
+      s.pointer('pointerup', 1, x, y);
+      wheel(100);
+      expect(s.h.camera.scale).not.toBe(scale);
+      expect(rotations(s)).toHaveLength(2);
+    });
+
+    it('no_turning_where_the_room_does_not_turn_pieces', () => {
+      const s = setup();
+      holdGroup(s);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', bubbles: true }));
+      expect(rotations(s)).toEqual([]);
+    });
   });
 
   it('destroy_cleans_everything', () => {

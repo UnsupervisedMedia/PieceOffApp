@@ -231,6 +231,58 @@ pub fn message_types_json() -> String {
     serde_json::to_string(&types).unwrap_or_else(|_| "{}".into())
 }
 
+/// Core's own limits for what a browser may ask a room for, so the web
+/// client's create form and checks never restate a rule (protocol v16: 1000
+/// pieces, 50 per side).
+#[derive(Debug, PartialEq, Serialize)]
+struct CoreLimits {
+    max_pieces: u32,
+    /// Core accepts `2..=max_grid_side` rows and columns.
+    min_grid_side: u16,
+    max_grid_side: u16,
+    /// Cell width over height that makes each cut style's pieces regular.
+    cell_aspect: CellAspects,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct CellAspects {
+    jigsaw: f32,
+    hexagon: f32,
+    triangle: f32,
+}
+
+fn core_limits() -> CoreLimits {
+    use pieceoff_core::CutStyle;
+    CoreLimits {
+        max_pieces: pieceoff_core::MAX_PIECES,
+        min_grid_side: 2,
+        max_grid_side: pieceoff_core::MAX_GRID_SIDE,
+        cell_aspect: CellAspects {
+            jigsaw: CutStyle::Jigsaw.cell_aspect(),
+            hexagon: CutStyle::Hexagon.cell_aspect(),
+            triangle: CutStyle::Triangle.cell_aspect(),
+        },
+    }
+}
+
+/// `{"max_pieces":..,"min_grid_side":..,"max_grid_side":..,"cell_aspect":{..}}`.
+#[wasm_bindgen]
+pub fn core_limits_json() -> String {
+    serde_json::to_string(&core_limits()).unwrap_or_else(|_| "{}".into())
+}
+
+/// Core's `clean_name` (what the room will call this player).
+#[wasm_bindgen]
+pub fn clean_name(name: &str) -> String {
+    pieceoff_core::clean_name(name)
+}
+
+/// Core's `clean_title`.
+#[wasm_bindgen]
+pub fn clean_title(title: &str) -> String {
+    pieceoff_core::clean_title(title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +443,25 @@ mod tests {
             );
         }
         assert!(new_holder_rect_from_json("{", 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn core_limits_come_from_core() {
+        let limits = core_limits();
+        assert_eq!(limits.max_pieces, pieceoff_core::MAX_PIECES);
+        assert_eq!(limits.max_grid_side, pieceoff_core::MAX_GRID_SIDE);
+        let json = core_limits_json();
+        assert!(
+            json.contains(&format!("\"max_pieces\":{}", pieceoff_core::MAX_PIECES)),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn clean_name_and_title_are_core_s() {
+        assert_eq!(clean_name("\nAlice\0"), "Alice");
+        assert_eq!(clean_name(" "), "Guest");
+        assert_eq!(clean_title(""), "Untitled puzzle");
     }
 
     #[test]

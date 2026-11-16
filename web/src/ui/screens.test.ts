@@ -147,7 +147,7 @@ describe('screens', () => {
     expect(imgs[0]!.getAttribute('src')).toMatch(/^\/play-app\/builtin\/[0-9a-f]{64}\.jpg$/);
     const counts = [...f.el.querySelectorAll<HTMLInputElement>('input[name=pieces]')].map((i) => Number(i.value));
     expect(counts).toEqual(PIECE_PRESETS.map((p) => p.count));
-    expect(Math.max(...counts)).toBe(400);
+    expect(Math.max(...counts)).toBe(1000);
     expect(f.el.querySelectorAll('input[name=cut]')).toHaveLength(3);
 
     // No token, no create.
@@ -160,8 +160,28 @@ describe('screens', () => {
     puzzles[3]!.checked = true;
     f.el.dispatchEvent(new Event('submit', { cancelable: true }));
     expect(submit).toHaveBeenCalledWith(
-      expect.objectContaining({ sha: puzzles[3]!.value, title: 'Dune Light', pieces: 48, cutStyle: 'jigsaw', listed: true, name: 'Ann' }),
+      expect.objectContaining({
+        sha: puzzles[3]!.value,
+        title: 'Dune Light',
+        pieces: 48,
+        cutStyle: 'jigsaw',
+        difficulty: { rotation: false, no_hints: false },
+        listed: true,
+        name: 'Ann',
+      }),
     );
+    // The desktop's "Harder" options.
+    f.el.querySelector<HTMLInputElement>('input[name=rotation]')!.checked = true;
+    f.el.querySelector<HTMLInputElement>('input[name=no_hints]')!.checked = true;
+    f.el.dispatchEvent(new Event('submit', { cancelable: true }));
+    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ difficulty: { rotation: true, no_hints: true } }));
+    // Over 400 pieces: the large-board note shows.
+    const note = [...f.el.querySelectorAll('p')].find((p) => p.textContent?.startsWith('Large boards'))!;
+    expect(note.hidden).toBe(true);
+    const mega = f.el.querySelector<HTMLInputElement>('input[name=pieces][value="1000"]')!;
+    mega.checked = true;
+    mega.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(note.hidden).toBe(false);
     f.setBusy(true);
     expect(btn.disabled).toBe(true);
     f.setBusy(false);

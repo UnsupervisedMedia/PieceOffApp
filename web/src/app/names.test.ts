@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { beforeAll, describe, expect, it } from 'vitest';
+import { clean_name } from '../../wasm/pieceoff_web_wasm.js';
 import { initWasm } from '../test-wasm';
 import {
   MAX_NAME_CHARS,
@@ -90,5 +91,13 @@ describe('names', () => {
     expect(loadName(s)).toBe('');
     saveName(s, 'Ann');
     expect(loadName(s)).toBe('Ann');
+  });
+});
+
+describe('cleanName parity', () => {
+  it('is core\'s clean_name, including whitespace JS and Rust disagree on', () => {
+    for (const n of ['', ' ', 'Ann', ' \uFEFFAnn ', 'a\u0000b', '\u2028Bo\u3000', '\u180eCy', 'x'.repeat(40), '😀'.repeat(30), MAX_NAME_CHARS + '']) {
+      expect(cleanName(n), JSON.stringify(n)).toBe(clean_name(n));
+    }
   });
 });

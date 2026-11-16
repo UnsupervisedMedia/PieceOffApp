@@ -2,13 +2,18 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { builtin_media_json } from '../../wasm/pieceoff_web_wasm.js';
+import { builtin_media_json, clean_title, core_limits_json } from '../../wasm/pieceoff_web_wasm.js';
 import { initWasm } from '../test-wasm';
 import {
   BUILTIN_MEDIA,
   CreateError,
+  CELL_ASPECT,
   MAX_PIECES,
+  MAX_SIDE,
+  MIN_SIDE,
   PIECE_PRESETS,
+  cleanTitle,
+  validGrid,
   createRoom,
   gridForPieceCount,
   type CreateErrorKind,
@@ -97,7 +102,8 @@ describe('create room', () => {
     const f = fetchReturning(200, {});
     const ff = f as unknown as typeof fetch;
     await expect(createRoom({ ...base, name: 'pornstar', fetch: ff })).rejects.toMatchObject({ kind: 'name-not-allowed' });
-    await expect(createRoom({ ...base, rows: 21, columns: 20, fetch: ff })).rejects.toMatchObject({ kind: 'invalid-grid' });
+    await expect(createRoom({ ...base, rows: 41, columns: 25, fetch: ff })).rejects.toMatchObject({ kind: 'invalid-grid' });
+    await expect(createRoom({ ...base, rows: 51, columns: 2, fetch: ff })).rejects.toMatchObject({ kind: 'invalid-grid' });
     await expect(createRoom({ ...base, rows: 1, columns: 8, fetch: ff })).rejects.toMatchObject({ kind: 'invalid-grid' });
     await expect(createRoom({ ...base, rows: 2.5, columns: 8, fetch: ff })).rejects.toMatchObject({ kind: 'invalid-grid' });
     await expect(createRoom({ ...base, turnstileToken: '', fetch: ff })).rejects.toMatchObject({ kind: 'verification' });
@@ -179,19 +185,53 @@ describe('create room', () => {
     }
   });
 
-  it('piece_presets_respect_the_400_limit', () => {
-    expect(MAX_PIECES).toBe(400);
-    expect(PIECE_PRESETS.map((p) => p.count)).toContain(400);
+  it('create_sends_the_chosen_difficulty', async () => {
+    const f = fetchReturning(200, { code: 'ABCD2345', client_id: 'cid-1', resume_token: 'secret-1' });
+    await createRoom({ ...base, difficulty: { rotation: true, no_hints: true }, fetch: f as unknown as typeof fetch });
+    expect(JSON.parse(f.mock.calls[0]![1]!.body as string).difficulty).toEqual({ rotation: true, no_hints: true });
+    const g = fetchReturning(200, { code: 'ABCD2345', client_id: 'cid-1', resume_token: 'secret-1' });
+    await createRoom({ ...base, difficulty: { rotation: true, no_hints: false }, fetch: g as unknown as typeof fetch });
+    expect(JSON.parse(g.mock.calls[0]![1]!.body as string).difficulty).toEqual({ rotation: true, no_hints: false });
+  });
+
+  it('limits_and_cell_aspects_are_core_s', () => {
+    const core = JSON.parse(core_limits_json()) as {
+      max_pieces: number; min_grid_side: number; max_grid_side: number; cell_aspect: Record<string, number>;
+    };
+    expect(MAX_PIECES).toBe(core.max_pieces);
+    expect(MIN_SIDE).toBe(core.min_grid_side);
+    expect(MAX_SIDE).toBe(core.max_grid_side);
+    for (const style of ['jigsaw', 'hexagon', 'triangle'] as const) {
+      expect(CELL_ASPECT[style]).toBeCloseTo(core.cell_aspect[style]!, 6);
+    }
+    expect(core.max_pieces).toBe(1000); // protocol v16
+  });
+
+  it('piece_presets_are_the_desktop_s_and_respect_core_limits', () => {
+    // The desktop's create dialog (crates/pieceoff-app/src/ui.rs PIECE_PRESETS).
+    const ui = readFileSync(new URL('../../../crates/pieceoff-app/src/ui.rs', import.meta.url), 'utf8');
+    const block = ui.slice(ui.indexOf('PIECE_PRESETS'), ui.indexOf('];', ui.indexOf('PIECE_PRESETS')));
+    const desktop = [...block.matchAll(/\("([^"]+)", (\d+)\)/g)].map((m) => ({ label: m[1], count: Number(m[2]) }));
+    expect(desktop.length).toBeGreaterThan(4);
+    expect(PIECE_PRESETS).toEqual(desktop);
     for (const { count } of PIECE_PRESETS) {
       for (const style of ['jigsaw', 'hexagon', 'triangle'] as const) {
         const { rows, columns } = gridForPieceCount(count, 480 / 320, style);
-        expect(rows * columns).toBeLessThanOrEqual(400);
-        expect(rows).toBeGreaterThanOrEqual(2);
-        expect(columns).toBeLessThanOrEqual(30);
+        expect(rows * columns).toBeLessThanOrEqual(MAX_PIECES);
+        expect(validGrid(rows, columns)).toBe(true);
       }
     }
+    // The largest preset really is about 1000 pieces (sides up to core's 50).
+    const mega = gridForPieceCount(1000, 480 / 320, 'jigsaw');
+    expect(mega.rows * mega.columns).toBeGreaterThan(950);
     // Same answers as the desktop's grid_for_piece_count tests.
     expect(gridForPieceCount(12, 4 / 3, 'jigsaw')).toEqual({ rows: 3, columns: 4 });
+  });
+
+  it('clean_title_is_core_s', () => {
+    for (const t of ['', '   ', 'Tidal Glass', ' \uFEFFx ', 'a\u0000b\u0085c', '\u2028 x \u3000', 'é'.repeat(100), '😀'.repeat(90)]) {
+      expect(cleanTitle(t), JSON.stringify(t)).toBe(clean_title(t));
+    }
   });
 });
 

@@ -160,6 +160,64 @@ describe('RoomState local drag overlay', () => {
     expect(rs.snapshot()!.pieces[0]!.x).toBe(snap.pieces[0]!.x);
   });
 
+  it('turnDrag turns the held group about the anchor cell centre at once, like core rotate_selection', () => {
+    const { rs } = joined();
+    const snap = rs.snapshot()!;
+    const a = snap.pieces[0]!;
+    rs.applyServer({
+      type: 'pieces_changed',
+      pieces: [
+        { ...a, group_id: 0, held_by: 'me' },
+        { ...snap.pieces[1]!, group_id: 0, x: a.x + 50, y: a.y + 10, held_by: 'me' },
+      ],
+      revision: 2,
+    });
+    rs.beginDrag(0);
+    rs.dragTo(100, 100);
+    rs.turnDrag(1);
+    let view = rs.pieces();
+    expect(view[0]).toMatchObject({ x: 100, y: 100, rotation: 1 }); // the anchor is the pivot
+    // Offset (50, 10) turned clockwise (screen axes, y down) is (-10, 50).
+    expect(view[1]).toMatchObject({ x: 90, y: 150, rotation: 1 });
+    rs.turnDrag(-1);
+    view = rs.pieces();
+    expect(view[1]).toMatchObject({ x: 150, y: 110, rotation: 0 });
+    expect(rs.snapshot()!.pieces[1]!.rotation).toBe(0); // the authoritative copy waits for the server
+  });
+
+  it('a turn is kept over older echoes and adopts the server layout once it agrees', () => {
+    const { rs } = joined();
+    const snap = rs.snapshot()!;
+    const a = { ...snap.pieces[0]!, group_id: 0, held_by: 'me' };
+    const b = { ...snap.pieces[1]!, group_id: 0, x: a.x + 50, y: a.y + 10, held_by: 'me' };
+    rs.applyServer({ type: 'pieces_changed', pieces: [a, b], revision: 2 });
+    rs.beginDrag(0);
+    rs.dragTo(100, 100);
+    rs.turnDrag(1);
+    // A move echo the server sent before it saw the turn: still upright there.
+    rs.applyServer({ type: 'pieces_changed', pieces: [{ ...a, x: 7, y: 7 }, { ...b, x: 57, y: 17 }], revision: 3 });
+    expect(rs.pieces()[1]).toMatchObject({ x: 90, y: 150, rotation: 1 });
+    // The server's turn (its anchor may sit elsewhere, e.g. clamped): its layout wins, placed at our anchor.
+    rs.applyServer({
+      type: 'pieces_changed',
+      pieces: [{ ...a, x: 20, y: 20, rotation: 1 }, { ...b, x: 9, y: 71, rotation: 1 }],
+      revision: 4,
+    });
+    expect(rs.pieces()[0]).toMatchObject({ x: 100, y: 100, rotation: 1 });
+    expect(rs.pieces()[1]).toMatchObject({ x: 89, y: 151, rotation: 1 });
+    expect(rs.localDrag()?.confirmed).toBe(true);
+  });
+
+  it('turnDrag does nothing without a live drag', () => {
+    const { rs } = joined();
+    rs.turnDrag(1);
+    expect(rs.pieces().every((p) => p.rotation === 0)).toBe(true);
+    rs.beginDrag(0);
+    rs.endDrag();
+    rs.turnDrag(1);
+    expect(rs.pieces()[0]!.rotation).toBe(0);
+  });
+
   it('is kept while the server says we hold it, cleared when it releases', () => {
     const { rs } = joined();
     rs.beginDrag(2);

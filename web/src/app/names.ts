@@ -9,10 +9,9 @@
 // - Resume tokens are secrets that prove "I am this player" (for the creator:
 //   "I am the host"). They live in sessionStorage, keyed by room code: a reload
 //   of this tab resumes, a new tab or a closed browser does not.
-import { public_name_allowed } from '../../wasm/pieceoff_web_wasm.js';
+import { clean_name, public_name_allowed } from '../../wasm/pieceoff_web_wasm.js';
 
 export const MAX_NAME_CHARS = 24;
-const GUEST = 'Guest';
 
 const KEY_PLAYER = 'pieceoff.web.playerKey';
 const KEY_NAME = 'pieceoff.web.name';
@@ -74,13 +73,9 @@ function write(s: Storage | null, k: string, v: string | null): void {
   }
 }
 
-const CONTROL = /\p{Cc}/gu;
-
-/** Core's `clean_name`, character for character. */
+/** Core's `clean_name`, through the wasm (JS and Rust trim different whitespace). */
 export function cleanName(name: string): string {
-  const kept = [...String(name).replace(CONTROL, '')].slice(0, MAX_NAME_CHARS).join('');
-  const t = kept.trim();
-  return t === '' ? GUEST : t;
+  return clean_name(String(name));
 }
 
 /** Whether `name` may be used: listed rooms run core's public-name filter; invite rooms do not ask. */

@@ -1,9 +1,10 @@
 // Create a room: one of the eight built-in puzzles, a piece count, a cut style,
-// listed or invite-only, the host's name, and the Turnstile check.
-import { BUILTIN_MEDIA, CUT_STYLES, PIECE_PRESETS } from '../app/create';
+// the v16 difficulty options (turned pieces, no hints), listed or invite-only,
+// the host's name, and the Turnstile check.
+import { BUILTIN_MEDIA, CUT_STYLES, LARGE_BOARD, PIECE_PRESETS } from '../app/create';
 import { MAX_NAME_CHARS } from '../app/names';
 import { builtinAssets } from '../media/builtin';
-import type { CutStyle } from '../protocol';
+import type { CutStyle, Difficulty } from '../protocol';
 import { button, h, uid } from './dom';
 
 export interface CreateValues {
@@ -11,6 +12,7 @@ export interface CreateValues {
   title: string;
   pieces: number;
   cutStyle: CutStyle;
+  difficulty: Difficulty;
   listed: boolean;
   name: string;
 }
@@ -85,6 +87,32 @@ export class CreateForm {
       );
     }
 
+    // The desktop's "Harder" options (ui.rs), same labels and hover text.
+    const check = (name: string, label: string, hint: string) => {
+      const id = uid(name);
+      return h(
+        'div',
+        { class: 'check' },
+        h('input', { type: 'checkbox', id, name }),
+        h('label', { for: id, title: hint }, label),
+      );
+    };
+    const harder = h(
+      'fieldset',
+      { class: 'harder' },
+      h('legend', {}, 'Harder'),
+      check('rotation', 'Rotate pieces', 'Pieces start turned. Turn them upright (E / Q) before they fit. Players on older versions cannot join.'),
+      check(
+        'no_hints',
+        'No hints',
+        'No reference image, board ghost, still-frame assist, edge filter or edges-first tidy. Played on trust: a modified client could still show them.',
+      ),
+    );
+    const largeNote = h('p', { class: 'muted', hidden: true }, 'Large boards need a fast device, and are slower to join.');
+    const syncLarge = () => {
+      largeNote.hidden = Number(new FormData(this.el).get('pieces')) <= LARGE_BOARD;
+    };
+
     const listedId = uid('listed');
     const listed = h(
       'div',
@@ -119,7 +147,9 @@ export class CreateForm {
       o.note ? h('p', {}, o.note) : null,
       puzzles,
       pieces,
+      largeNote,
       cuts,
+      harder,
       listed,
       h('label', { for: nameId }, 'Your name'),
       nameInput,
@@ -128,6 +158,8 @@ export class CreateForm {
       this.error,
       h('div', { class: 'actions' }, this.submitBtn, button('Back', o.back)),
     );
+
+    this.el.addEventListener('change', syncLarge);
 
     this.el.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -145,6 +177,7 @@ export class CreateForm {
         title: BUILTIN_MEDIA.find((m) => m.sha256 === sha)?.title ?? '',
         pieces: Number(data.get('pieces')),
         cutStyle: (String(data.get('cut')) as CutStyle) || 'jigsaw',
+        difficulty: { rotation: data.get('rotation') !== null, no_hints: data.get('no_hints') !== null },
         listed: data.get('listed') !== null,
         name,
       });

@@ -30,6 +30,8 @@ export interface RemoteCursor {
 
 interface Overlay extends LocalDrag {
   offsets: Map<number, { dx: number; dy: number }>;
+  /** Drawn quarter turns of the held pieces (ahead of the server after a local turn). */
+  rotations: Map<number, number>;
 }
 
 export class RoomState {
@@ -175,9 +177,12 @@ export class RoomState {
     const ids = pieceIds ?? snap.pieces.filter((p) => p.group_id === anchor.group_id).map((p) => p.id);
     if (!ids.includes(anchorId)) ids.push(anchorId);
     const offsets = new Map<number, { dx: number; dy: number }>();
+    const rotations = new Map<number, number>();
     for (const id of ids) {
       const p = this.piece(id);
-      if (p) offsets.set(id, { dx: p.x - anchor.x, dy: p.y - anchor.y });
+      if (!p) continue;
+      offsets.set(id, { dx: p.x - anchor.x, dy: p.y - anchor.y });
+      rotations.set(id, p.rotation);
     }
     this.drag = {
       anchorId,
@@ -187,6 +192,7 @@ export class RoomState {
       confirmed: false,
       ended: false,
       offsets,
+      rotations,
     };
     this.emit(null);
   }
@@ -195,6 +201,23 @@ export class RoomState {
     if (!this.drag || this.drag.ended) return;
     this.drag.x = x;
     this.drag.y = y;
+    this.emit(null);
+  }
+
+  /** `rotate_selection` was sent: turn the held pieces a quarter turn about
+   *  the anchor's cell centre now, as core's `rotate_selection` will (and the
+   *  desktop's `rotate_origins` does), so the drag stays smooth. The server's
+   *  answer then confirms it (see `settleDrag`). */
+  turnDrag(turns: 1 | -1): void {
+    const d = this.drag;
+    const snap = this.snap;
+    if (!d || d.ended || !snap) return;
+    // Offsets are between top-left corners of equal cells, so turning them
+    // about the anchor's centre is turning the vector itself.
+    for (const [id, o] of d.offsets) {
+      d.offsets.set(id, turns > 0 ? { dx: -o.dy, dy: o.dx } : { dx: o.dy, dy: -o.dx });
+      d.rotations.set(id, (((d.rotations.get(id) ?? 0) + turns) % 4 + 4) % 4);
+    }
     this.emit(null);
   }
 
@@ -224,7 +247,7 @@ export class RoomState {
     if (!d) return snap.pieces;
     return snap.pieces.map((p) => {
       const off = d.offsets.get(p.id);
-      return off ? { ...p, x: d.x + off.dx, y: d.y + off.dy } : p;
+      return off ? { ...p, x: d.x + off.dx, y: d.y + off.dy, rotation: d.rotations.get(p.id) ?? p.rotation } : p;
     });
   }
 
@@ -250,8 +273,19 @@ export class RoomState {
     if (!d) return;
     const anchor = changed.find((p) => p.id === d.anchorId);
     if (!anchor) return;
-    if (anchor.held_by !== null && anchor.held_by === this.clientId) d.confirmed = true;
-    else if (anchor.held_by !== null || d.confirmed) this.drag = null;
+    if (anchor.held_by !== null && anchor.held_by === this.clientId) {
+      d.confirmed = true;
+      // Once the server's turn matches ours, take its layout of the held
+      // pieces (a turn may have been clamped); until then an older echo would
+      // undo a turn it has not seen yet.
+      if (anchor.rotation === d.rotations.get(d.anchorId)) {
+        for (const p of changed) {
+          if (!d.offsets.has(p.id)) continue;
+          d.offsets.set(p.id, { dx: p.x - anchor.x, dy: p.y - anchor.y });
+          d.rotations.set(p.id, p.rotation);
+        }
+      }
+    } else if (anchor.held_by !== null || d.confirmed) this.drag = null;
   }
 
   private emit(m: ServerMessage | null): void {

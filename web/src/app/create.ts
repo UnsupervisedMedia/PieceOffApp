@@ -3,9 +3,10 @@
 // `x-turnstile-token` (worker/src/index.ts). Built-in puzzles only, checked
 // here before any request; one request per call, never retried (the Worker
 // rate-limits creation per address and caps rooms per day).
-import type { ClientMessage, CutStyle } from '../protocol';
+import type { ClientMessage, CutStyle, Difficulty } from '../protocol';
 import { PUBLIC_NAME_REFUSED, parseCode } from './join';
 import { cleanName, nameAllowed, playerKey, browserStorage } from './names';
+import { clean_title } from '../../wasm/pieceoff_web_wasm.js';
 
 /** The bundled loops as the desktop app sends them: the canonical `.webp`
  *  (whose sha256 the core lists), its canvas size and its summed frame
@@ -39,17 +40,24 @@ export function builtinMedia(sha: string): BuiltinMedia | null {
 
 // ---- piece counts (desktop ui.rs PIECE_PRESETS / grid_for_piece_count) ----
 
-/** Core's limit (lib.rs: "A room can contain at most 400 pieces"). */
-export const MAX_PIECES = 400;
+// Core's limits (lib.rs MAX_PIECES, MAX_GRID_SIDE; protocol v16). Constants
+// here so the form can be built before the wasm is ready; create.test.ts pins
+// them to the wasm's `core_limits_json()`, and the server checks anyway.
+export const MAX_PIECES = 1000;
 export const MIN_SIDE = 2;
-export const MAX_SIDE = 30;
+export const MAX_SIDE = 50;
+/** Above this many pieces the desktop warns that large boards need a fast computer (ui.rs). */
+export const LARGE_BOARD = 400;
 
+/** The desktop's presets (create.test.ts reads ui.rs to keep them equal). */
 export const PIECE_PRESETS: ReadonlyArray<{ label: string; count: number }> = [
   { label: 'Easy', count: 12 },
   { label: 'Medium', count: 48 },
   { label: 'Hard', count: 108 },
   { label: 'Expert', count: 192 },
-  { label: 'Marathon', count: MAX_PIECES },
+  { label: 'Brutal', count: 400 },
+  { label: 'Insane', count: 600 },
+  { label: 'Mega', count: MAX_PIECES },
 ];
 
 export const CUT_STYLES: ReadonlyArray<{ value: CutStyle; label: string; hint: string }> = [
@@ -58,8 +66,8 @@ export const CUT_STYLES: ReadonlyArray<{ value: CutStyle; label: string; hint: s
   { value: 'triangle', label: 'Triangles', hint: 'Triangles with small knobs; up to three neighbours each' },
 ];
 
-/** Cell width over height that makes each style's pieces regular (core tiling.rs cell_aspect). */
-const CELL_ASPECT: Record<CutStyle, number> = { jigsaw: 1, hexagon: 2 / Math.sqrt(3), triangle: 1 / Math.sqrt(3) };
+/** Cell width over height that makes each style's pieces regular (core tiling.rs cell_aspect; pinned by a test). */
+export const CELL_ASPECT: Record<CutStyle, number> = { jigsaw: 1, hexagon: 2 / Math.sqrt(3), triangle: 1 / Math.sqrt(3) };
 
 /** Rows and columns giving about `target` near-regular pieces for media of `aspect` (width / height). */
 export function gridForPieceCount(target: number, aspect: number, style: CutStyle = 'jigsaw'): { rows: number; columns: number } {
@@ -81,10 +89,9 @@ export function validGrid(rows: number, columns: number): boolean {
   return side(rows) && side(columns) && rows * columns <= MAX_PIECES;
 }
 
-/** Core's `clean_title`. */
+/** Core's `clean_title` (through the wasm: JS and Rust trim different whitespace). */
 export function cleanTitle(title: string): string {
-  const kept = [...String(title).replace(/\p{Cc}/gu, '')].slice(0, 80).join('').trim();
-  return kept === '' ? 'Untitled puzzle' : kept;
+  return clean_title(String(title));
 }
 
 // ---- errors ----------------------------------------------------------------
@@ -162,6 +169,8 @@ export interface CreateRoomDeps {
   name: string;
   listed: boolean;
   cutStyle?: CutStyle;
+  /** Protocol v16 challenge options; both off by default. */
+  difficulty?: Difficulty;
   /** Defaults to this browser's stored key. */
   playerKey?: string;
   fetch?: typeof fetch;
@@ -201,7 +210,7 @@ export async function createRoom(deps: CreateRoomDeps): Promise<CreatedRoom> {
     player_key: deps.playerKey ?? playerKey(browserStorage()),
     cut_style: deps.cutStyle ?? 'jigsaw',
     listed: deps.listed,
-    difficulty: { rotation: false, no_hints: false },
+    difficulty: { rotation: deps.difficulty?.rotation === true, no_hints: deps.difficulty?.no_hints === true },
   };
 
   const f = deps.fetch ?? fetch;

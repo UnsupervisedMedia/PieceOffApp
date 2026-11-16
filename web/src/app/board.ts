@@ -26,6 +26,12 @@
 //   dropped connection or a reconnect's welcome ends a drag without a drop:
 //   the server released the lease when the socket closed.
 //   Server errors show verbatim in a short toast.
+// - Turned pieces (rotation rooms, v16): while a granted piece is held, the
+//   turn buttons, E / Q and the wheel turn it a quarter turn (rotate_selection),
+//   as on the desktop; the local overlay turns at once (RoomState.turnDrag).
+//   Turns wait for the grant, so a refused pickup is never answered with a
+//   second "You do not hold a piece selection". The web client has no hint
+//   UI (reference image, ghost, edge filter), so no-hints rooms need nothing.
 // - Placed pieces and pieces someone else holds are not grabbable: pressing
 //   them pans (touch) or rubber-bands (mouse) instead of asking for a refusal.
 // - Cursors: own pointer sent as `cursor` while over the table (RoomSocket
@@ -56,7 +62,14 @@ import { SolveClock } from '../ui/clock';
 import { button, h } from '../ui/dom';
 import { mountToolbar } from '../ui/toolbar';
 import type { BoardModule } from './loadBoard';
-import { HAS_ROTATION, pieceRotation, roomRotates, rotateMessage } from './rotation';
+
+/** Wheel travel (CSS px) per quarter turn of a held piece: one mouse notch
+ *  (about 100 px) is one turn; trackpad deltas add up. Toward the user
+ *  (deltaY > 0) turns clockwise, as on the desktop. */
+export const WHEEL_PX_PER_TURN = 50;
+
+const typing = (t: EventTarget | null): boolean =>
+  t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
 
 /** How long a server error stays on screen. */
 export const TOAST_MS = 4000;
@@ -335,7 +348,7 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       if (p.placed) flags |= FLAG_PLACED;
       if (p.held_by !== null || dragging?.has(p.id)) flags |= FLAG_HELD;
       if (selection.has(p.id)) flags |= FLAG_SELECTED;
-      const rot = pieceRotation(p);
+      const rot = p.rotation & 3;
       if (px[i] !== p.x || py[i] !== p.y || pr[i] !== rot || pf[i] !== flags) {
         px[i] = p.x;
         py[i] = p.y;
@@ -458,7 +471,7 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       const g = geoms[i];
       g.x = p.x;
       g.y = p.y;
-      g.rotation = pieceRotation(p);
+      g.rotation = p.rotation & 3;
       g.depth = renderer.pieceDepth(p.id);
       list.push(g);
     }
@@ -492,15 +505,20 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     updateTurnButtons();
   };
 
+  /** A held, granted, live drag in a room that turns its pieces. */
+  const canTurn = (): boolean => {
+    const d = drag;
+    return !!d && !d.dead && !d.paused && d.confirmed && !!state.localDrag() && state.snapshot()?.difficulty.rotation === true;
+  };
+
   const turn = (turns: 1 | -1) => {
     const d = drag;
-    if (!d || d.dead || d.paused || !state.localDrag()) return;
-    const m = rotateMessage(d.anchor, turns);
-    if (m) socket.send(m);
+    if (!d || !canTurn()) return;
+    if (socket.send({ type: 'rotate_selection', anchor_piece_id: d.anchor, quarter_turns: turns })) state.turnDrag(turns);
   };
 
   const updateTurnButtons = () => {
-    const show = HAS_ROTATION && roomRotates(state.snapshot()) && !!drag && !drag.dead && !drag.paused && !!state.localDrag();
+    const show = canTurn();
     turnLeft.hidden = !show;
     turnRight.hidden = !show;
   };
@@ -637,7 +655,32 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       selection.clear();
       pushPieces();
     }
+    // Desktop controls.rs: E turns clockwise, Q counter-clockwise.
+    const k = e.key.toLowerCase();
+    if ((k === 'e' || k === 'q') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented && !typing(e.target) && canTurn()) {
+      e.preventDefault();
+      turn(k === 'e' ? 1 : -1);
+    }
   }) as EventListener);
+  // While a piece is held in a rotation room the wheel turns it instead of
+  // zooming (desktop board.rs, WHEEL_POINTS_PER_TURN). Captured on the stage,
+  // before the canvas's own wheel handler zooms.
+  let wheelCarry = 0;
+  listen(stage, 'wheel', ((e: WheelEvent) => {
+    if (!canTurn()) {
+      wheelCarry = 0;
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? Math.max(1, camera.viewH) : 1);
+    wheelCarry += px;
+    if (Math.abs(wheelCarry) >= WHEEL_PX_PER_TURN) {
+      const t: 1 | -1 = wheelCarry > 0 ? 1 : -1;
+      wheelCarry = 0;
+      turn(t);
+    }
+  }) as EventListener, { capture: true, passive: false });
 
   // ---- size ----
   const resize = () => {
@@ -687,6 +730,7 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
       } else if (m.type === 'pieces_changed' && m.pieces.some((p) => p.id === d.anchor && p.held_by !== null && p.held_by === state.clientId)) {
         d.confirmed = true;
         if (d.paused || !state.localDrag()) revive(d);
+        else updateTurnButtons();
       } else if (m.type === 'error' && !d.confirmed) {
         if (quiet) {
           // Not about this drag: undo RoomState's revert.

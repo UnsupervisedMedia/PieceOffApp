@@ -174,6 +174,7 @@ export function startApp(d: AppDeps): App {
           name: v.name,
           listed: v.listed,
           cutStyle: v.cutStyle,
+          difficulty: v.difficulty,
           playerKey: playerKey(storage),
           fetch: f,
         }).then(
