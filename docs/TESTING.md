@@ -204,7 +204,7 @@ cost (`cargo test --release -p pieceoff-app thousand_piece_board_frame_cost --
 --ignored --nocapture`). Still by hand, on two machines:
 
 - Create a room with **Rotate pieces**: pieces arrive turned; E / Q turns the
-  piece under the pointer or the selection, also while dragging; a turned piece
+  piece under the pointer or the selection, also while dragging, and the mouse wheel turns a piece you are holding (even with the view locked); a turned piece
   dropped on its slot does not snap, an upright one does; both players see turns.
 - **No hints** room: no reference image, ghost, still-frame assist, edge filter
   or edges-first tidy in the menus or by key.
