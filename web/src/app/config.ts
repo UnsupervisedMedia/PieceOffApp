@@ -18,6 +18,9 @@ export interface WebConfig {
   assetBase: string;
   /** Public site origin that serves `/join?c=CODE` invite links, no trailing slash. */
   site: string;
+  /** Test only (web/e2e): expose the read-only `window.__pieceoffTest` probe on the
+   *  board. Off unless the page sets exactly `testHooks: true`; never set on the site. */
+  testHooks: boolean;
 }
 
 export const DEFAULT_CONFIG: Readonly<WebConfig> = Object.freeze({
@@ -25,6 +28,7 @@ export const DEFAULT_CONFIG: Readonly<WebConfig> = Object.freeze({
   turnstileSiteKey: '0x4AAAAAAF7xNWih_NrGxdF_',
   assetBase: '/play-app/',
   site: 'https://pieceoff.app',
+  testHooks: false,
 });
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -75,6 +79,7 @@ export function readConfig(win: { PIECEOFF_WEB_CONFIG?: unknown } = globalThis a
     turnstileSiteKey: cleanKey(o.turnstileSiteKey) ?? DEFAULT_CONFIG.turnstileSiteKey,
     assetBase: cleanBase(o.assetBase) ?? DEFAULT_CONFIG.assetBase,
     site: cleanSite(o.site) ?? DEFAULT_CONFIG.site,
+    testHooks: o.testHooks === true,
   };
 }
 

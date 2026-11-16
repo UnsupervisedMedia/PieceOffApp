@@ -794,10 +794,50 @@ export const mountJoined: BoardModule['mountBoard'] = (root, joined, leave, conf
     spectator: joined.welcome.spectator,
   });
   const toolbar = mountToolbar(board, { state: joined.room, socket: joined.socket, site: config.site, leave });
+  const unhook = config.testHooks ? installTestProbe(board, joined.room) : null;
   return {
     destroy() {
+      unhook?.();
       toolbar.destroy();
       board.destroy();
     },
   };
 };
+
+/** What `window.__pieceoffTest` offers (web/e2e only, config `testHooks: true`).
+ *  Read-only: every answer is a copy, and nothing here can change the room. */
+export interface TestProbe {
+  /** A copy of the server's snapshot as this client last applied it (no local drag overlay). */
+  snapshot(): RoomSnapshot | null;
+  /** This connection's id (what `held_by` names). */
+  clientId(): string | null;
+  /** A table point in page CSS px (for `page.mouse` / touch input). */
+  toPage(tx: number, ty: number): [number, number];
+  /** The camera's current mapping, `screen = table * scale + offset`. */
+  camera(): { scale: number; ox: number; oy: number };
+  /** Selected piece ids, sorted (a copy). */
+  selection(): number[];
+}
+
+function installTestProbe(board: BoardHandle, state: RoomState): () => void {
+  const canvas = board.el.querySelector<HTMLCanvasElement>('canvas.po-board-gl');
+  const probe: TestProbe = Object.freeze({
+    snapshot: () => {
+      const s = state.snapshot();
+      return s ? (JSON.parse(JSON.stringify(s)) as RoomSnapshot) : null;
+    },
+    clientId: () => state.clientId,
+    toPage: (tx: number, ty: number): [number, number] => {
+      const r = canvas?.getBoundingClientRect();
+      const [sx, sy] = board.camera.toScreen(tx, ty);
+      return [(r?.left ?? 0) + sx, (r?.top ?? 0) + sy];
+    },
+    camera: () => ({ scale: board.camera.scale, ox: board.camera.ox, oy: board.camera.oy }),
+    selection: () => [...board.selection].sort((a, b) => a - b),
+  });
+  const w = window as unknown as { __pieceoffTest?: TestProbe };
+  w.__pieceoffTest = probe;
+  return () => {
+    if (w.__pieceoffTest === probe) delete w.__pieceoffTest;
+  };
+}

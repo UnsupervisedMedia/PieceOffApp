@@ -5,6 +5,7 @@
 //                 Safari will not play an mp4 served without byte ranges)
 //   /play-app/... the lobby app build (web/dist, `npm run build`), with
 //                 /play-app/builtin/ from web/public/builtin; open /dev/play.html
+// web/e2e/serve.mjs reuses the file handler (`serveFile`) for the e2e test.
 import { createServer } from 'node:http';
 import { createReadStream, statSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
@@ -41,21 +42,14 @@ function resolve(url) {
   return null;
 }
 
-createServer((req, res) => {
-  const url = (req.url ?? '/').split('?')[0];
-  if (url === '/' || url === '/dev' || url === '/dev/') {
-    res.writeHead(302, { Location: '/dev/spike.html' + ((req.url ?? '').includes('?') ? '?' + req.url.split('?')[1] : '') });
-    return res.end();
-  }
+/** Serve `url` (no query) from ROOTS, with byte ranges; false when nothing matches. */
+export function serveFile(req, res, url) {
   const path = resolve(url);
   let st;
   try {
     st = path && statSync(path);
   } catch {}
-  if (!st || !st.isFile()) {
-    res.writeHead(404);
-    return res.end('not found');
-  }
+  if (!st || !st.isFile()) return false;
   const headers = {
     'Content-Type': TYPES[extname(path)] ?? 'application/octet-stream',
     'Cache-Control': 'no-store',
@@ -68,15 +62,30 @@ createServer((req, res) => {
     end = Math.min(end, st.size - 1);
     if (start < 0 || start > end) {
       res.writeHead(416, { 'Content-Range': `bytes */${st.size}` });
-      return res.end();
+      res.end();
+      return true;
     }
     res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
-    if (req.method === 'HEAD') return res.end();
-    return createReadStream(path, { start, end }).pipe(res);
+    if (req.method === 'HEAD') res.end();
+    else createReadStream(path, { start, end }).pipe(res);
+    return true;
   }
   res.writeHead(200, { ...headers, 'Content-Length': st.size });
-  if (req.method === 'HEAD') return res.end();
-  createReadStream(path).pipe(res);
+  if (req.method === 'HEAD') res.end();
+  else createReadStream(path).pipe(res);
+  return true;
+}
+
+const main = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (main) createServer((req, res) => {
+  const url = (req.url ?? '/').split('?')[0];
+  if (url === '/' || url === '/dev' || url === '/dev/') {
+    res.writeHead(302, { Location: '/dev/spike.html' + ((req.url ?? '').includes('?') ? '?' + req.url.split('?')[1] : '') });
+    return res.end();
+  }
+  if (serveFile(req, res, url)) return;
+  res.writeHead(404);
+  res.end('not found');
 }).listen(PORT, '0.0.0.0', () => {
   const q = '?pieces=400';
   console.log(`spike: http://127.0.0.1:${PORT}/dev/spike.html${q}`);

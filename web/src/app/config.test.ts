@@ -8,6 +8,7 @@ describe('config', () => {
       turnstileSiteKey: '0x4AAAAAAF7xNWih_NrGxdF_',
       assetBase: '/play-app/',
       site: 'https://pieceoff.app',
+      testHooks: false,
     });
     expect(DEFAULT_CONFIG.api).toBe('https://rooms.pieceoff.app');
   });
@@ -16,7 +17,7 @@ describe('config', () => {
     const c = readConfig({
       PIECEOFF_WEB_CONFIG: { api: 'http://127.0.0.1:8787/', turnstileSiteKey: 'site-key', assetBase: '/assets', site: 'http://localhost:4321/' },
     });
-    expect(c).toEqual({ api: 'http://127.0.0.1:8787', turnstileSiteKey: 'site-key', assetBase: '/assets/', site: 'http://localhost:4321' });
+    expect(c).toEqual({ api: 'http://127.0.0.1:8787', turnstileSiteKey: 'site-key', assetBase: '/assets/', site: 'http://localhost:4321', testHooks: false });
   });
 
   it('ignores_unusable_values', () => {
@@ -32,6 +33,13 @@ describe('config', () => {
       expect(readConfig({ PIECEOFF_WEB_CONFIG: { site } }).site).toBe(DEFAULT_CONFIG.site);
     }
     expect(readConfig({ PIECEOFF_WEB_CONFIG: { site: 'https://staging.pieceoff.app' } }).site).toBe('https://staging.pieceoff.app');
+  });
+
+  it('test_hooks_need_exactly_true', () => {
+    expect(readConfig({ PIECEOFF_WEB_CONFIG: { testHooks: true } }).testHooks).toBe(true);
+    for (const testHooks of [1, 'true', 'yes', {}, null, false]) {
+      expect(readConfig({ PIECEOFF_WEB_CONFIG: { testHooks } }).testHooks).toBe(false);
+    }
   });
 
   it('ws_url_follows_the_api_scheme', () => {
