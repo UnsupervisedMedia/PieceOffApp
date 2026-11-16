@@ -147,6 +147,8 @@ impl PieceOffApp {
         let mut remove = None;
         let mut swap = None;
         let mut add = false;
+        let mut release = false;
+        let mut restore = None;
         let mut repeat = snapshot.repeat;
         let mut locked = snapshot.video_lock;
         egui::Window::new("Videos")
@@ -207,8 +209,31 @@ impl PieceOffApp {
                                 }
                             });
                             ui.end_row();
+                            if item.released() && is_host {
+                                ui.label("");
+                                if ui
+                                    .button("Bring back the video")
+                                    .on_hover_text("Upload the original video again; the picture is replaced.")
+                                    .clicked()
+                                {
+                                    restore = Some(index);
+                                }
+                                ui.end_row();
+                            }
                         }
                     });
+                if self.can_release_video() {
+                    ui.add_space(6.0);
+                    if ui
+                        .button("Keep a picture, free the video")
+                        .on_hover_text(
+                            "Replace the finished video with a still of the completed puzzle and delete the video from the server.",
+                        )
+                        .clicked()
+                    {
+                        release = true;
+                    }
+                }
                 ui.add_space(6.0);
                 if self.custom_media_blocked() {
                     self.add_builtin_menu(ui, can_edit);
@@ -252,6 +277,12 @@ impl PieceOffApp {
         }
         if locked != snapshot.video_lock {
             self.send(ClientMessage::SetVideoLock { locked });
+        }
+        if release {
+            self.release_video_to_still();
+        }
+        if let Some(index) = restore {
+            self.restore_released_video(index);
         }
         if add {
             if let Some(path) = rfd::FileDialog::new()

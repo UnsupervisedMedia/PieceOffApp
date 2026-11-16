@@ -16,9 +16,10 @@ use config::Config;
 use futures_util::StreamExt;
 use limits::{RateLimiter, TokenBucket, client_address, origin_allowed};
 use pieceoff_core::{
-    CHAT_OFF, ChatLine, ClientMessage, MediaItem, PROTOCOL_VERSION, REMOVED_BY_HOST,
-    REPLACED_BY_NEW_CONNECTION, RoomRuntime, RoomSnapshot, SceneBounds, ServerMessage, StoredRoom,
-    clean_chat_text, clean_media_extension, clean_name, valid_media_dimensions, valid_sha256,
+    CHAT_OFF, ChatLine, ClientMessage, MAX_STILL_BYTES, MediaItem, PROTOCOL_VERSION,
+    REMOVED_BY_HOST, REPLACED_BY_NEW_CONNECTION, RoomRuntime, RoomSnapshot, SceneBounds,
+    ServerMessage, StoredRoom, clean_chat_text, clean_media_extension, clean_name, still_magic_ok,
+    valid_media_dimensions, valid_sha256, valid_still_extension,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -197,6 +198,10 @@ struct RoomRecord {
     chat_budget: std::sync::Mutex<TokenBucket>,
     persist_lock: Mutex<()>,
     media_upload_token: Mutex<Option<String>>,
+    /// Stills uploaded under this room's token (by hash). A release may only
+    /// adopt one of these, never a file another room stored. Not persisted:
+    /// after a restart the host uploads the still again (a no-op if stored).
+    accepted_stills: std::sync::Mutex<HashSet<String>>,
     last_activity: Arc<Mutex<SystemTime>>,
     /// Held while a chat line is both recorded and broadcast, and while a
     /// joiner subscribes and copies the history, so each line reaches a
@@ -218,6 +223,7 @@ impl RoomRecord {
             chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(media_upload_token),
+            accepted_stills: std::sync::Mutex::new(HashSet::new()),
             last_activity: Arc::new(Mutex::new(SystemTime::now())),
             chat: std::sync::Mutex::new(ChatLog::default()),
             replaced: broadcast::channel(16).0,
@@ -234,6 +240,7 @@ impl RoomRecord {
             chat_budget: std::sync::Mutex::new(room_chat_budget()),
             persist_lock: Mutex::new(()),
             media_upload_token: Mutex::new(None),
+            accepted_stills: std::sync::Mutex::new(HashSet::new()),
             last_activity: Arc::new(Mutex::new(last_activity)),
             chat: std::sync::Mutex::new(ChatLog::default()),
             replaced: broadcast::channel(16).0,
@@ -560,6 +567,11 @@ struct MediaQuery {
     /// body the server will not read.
     #[serde(default)]
     probe: Option<u8>,
+    /// `still=<ext>` uploads a completion still (protocol v17) for a finished
+    /// puzzle instead of a queued item: at most `MAX_STILL_BYTES`, an image
+    /// extension, checked against its magic bytes.
+    #[serde(default)]
+    still: Option<String>,
 }
 
 const ROOM_NOT_FOUND: &str = "Room code not found";
@@ -708,9 +720,12 @@ async fn upload_media(
     if !valid_sha256(&sha256) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let Some(token) = query.token else {
+    let Some(token) = query.token.clone() else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if let Some(extension) = query.still.clone() {
+        return upload_still(&state, &sha256, &extension, &token, body).await;
+    }
     let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
     let mut target = None;
     for room in rooms {
@@ -857,6 +872,196 @@ async fn upload_media(
     drop(reservation);
     mark_item_available(&state, &room, &sha256).await;
     StatusCode::CREATED.into_response()
+}
+
+/// Lower-case hex of a digest, built from a constant table so the result is
+/// made of known characters whatever the input was. Used to name files from
+/// content hashes without trusting the string a client sent.
+fn hex_from_table(digest: &[u8]) -> String {
+    const HEX: [char; 16] = [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    ];
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        name.push(HEX[usize::from(byte >> 4)]);
+        name.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    name
+}
+
+/// A completion still: held to its own small cap and checked by magic bytes,
+/// then stored under its hash. It is not queued; `ReleaseToStill` adopts it.
+async fn upload_still(
+    state: &AppState,
+    sha256: &str,
+    extension: &str,
+    token: &str,
+    body: Body,
+) -> Response {
+    let Some(extension) = valid_still_extension(extension) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    // Checked here, not only by the caller: the hash names a file on disk.
+    if !valid_sha256(sha256) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
+    let mut target = None;
+    for room in rooms {
+        if room.media_upload_token.lock().await.as_deref() == Some(token)
+            && room
+                .runtime
+                .lock()
+                .await
+                .snapshot
+                .as_ref()
+                .is_some_and(RoomSnapshot::completed)
+        {
+            target = Some(room);
+            break;
+        }
+    }
+    let Some(room) = target else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if body
+        .size_hint()
+        .exact()
+        .is_some_and(|length| length > MAX_STILL_BYTES)
+    {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_STILL_BYTES as usize).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    // From here on the file is named by the hash we computed, which equals
+    // the one the client declared.
+    let digest = hex_from_table(&Sha256::digest(&bytes));
+    if digest != sha256 {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    }
+    let sha256 = digest.as_str();
+    if !still_magic_ok(extension, &bytes) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    let directory = state.data_dir.join("media");
+    if tokio_fs::create_dir_all(&directory).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let Ok(used) = media_storage_used_bytes(&directory).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let reserved = state.media_reserved.lock().map_or(u64::MAX, |held| *held);
+    if used
+        .saturating_add(reserved)
+        .saturating_add(bytes.len() as u64)
+        > state.media_quota_bytes
+    {
+        return StatusCode::INSUFFICIENT_STORAGE.into_response();
+    }
+    let path = media_path(&state.data_dir, sha256, extension);
+    let temporary = directory.join(format!(".{sha256}.{}.part", Uuid::new_v4()));
+    if tokio_fs::write(&temporary, &bytes).await.is_err() {
+        let _ = tokio_fs::remove_file(&temporary).await;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    {
+        let _install = state.media_install_lock.lock().await;
+        let linked = tokio_fs::hard_link(&temporary, &path).await;
+        let _ = tokio_fs::remove_file(&temporary).await;
+        if let Err(error) = linked
+            && error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    if let Ok(mut accepted) = room.accepted_stills.lock() {
+        accepted.insert(sha256.to_owned());
+    }
+    StatusCode::CREATED.into_response()
+}
+
+/// The host swaps a finished video for its stored still, then frees the
+/// video's space unless another room still queues it.
+// Mirrors the wire message, like `set_playback`.
+#[allow(clippy::too_many_arguments)]
+async fn release_still(
+    state: &AppState,
+    room: &Arc<RoomRecord>,
+    client_id: &str,
+    index: usize,
+    sha256: &str,
+    extension: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let extension = valid_still_extension(extension)
+        .ok_or("A completion still must be a JPEG, PNG or WebP image")?;
+    if !valid_sha256(sha256) {
+        return Err("Invalid completion still".into());
+    }
+    // It must be a still this room uploaded, not a file another room stored.
+    let uploaded_here = room
+        .accepted_stills
+        .lock()
+        .is_ok_and(|accepted| accepted.contains(&sha256.to_ascii_lowercase()));
+    if !uploaded_here {
+        return Err("Upload the still before releasing the video".into());
+    }
+    // The still must already be stored: the video is only deleted after.
+    let path = media_path(&state.data_dir, sha256, extension);
+    let stored = tokio_fs::metadata(&path)
+        .await
+        .map_err(|_| "Upload the still before releasing the video".to_string())?;
+    if !stored.is_file() || stored.len() == 0 || stored.len() > MAX_STILL_BYTES {
+        return Err("The stored still is not usable".into());
+    }
+    let mut head = [0u8; 12];
+    let read = {
+        use tokio::io::AsyncReadExt;
+        let mut file = tokio_fs::File::open(&path)
+            .await
+            .map_err(|_| "Upload the still before releasing the video".to_string())?;
+        file.read(&mut head).await.unwrap_or(0)
+    };
+    if !still_magic_ok(extension, &head[..read]) {
+        return Err("The stored still is not a valid image".into());
+    }
+    let freed = {
+        let mut runtime = room.runtime.lock().await;
+        let (snapshot, freed) = runtime.release_to_still(
+            client_id,
+            index,
+            &sha256.to_ascii_lowercase(),
+            extension,
+            width,
+            height,
+        )?;
+        let _ = room.events.send(ServerMessage::Snapshot { snapshot });
+        freed
+    };
+    persist_room(state, room).await;
+    delete_media_if_unreferenced(state, &freed.0, &freed.1).await;
+    Ok(())
+}
+
+/// Delete a stored file unless some room still names it. Frees quota when a
+/// video is released; shared files (the same video in two rooms) stay.
+async fn delete_media_if_unreferenced(state: &AppState, sha256: &str, extension: &str) {
+    let rooms: Vec<Arc<RoomRecord>> = state.rooms.read().await.values().cloned().collect();
+    let _install = state.media_install_lock.lock().await;
+    for room in rooms {
+        if let Some(snapshot) = &room.runtime.lock().await.snapshot
+            && (snapshot
+                .queue
+                .iter()
+                .any(|item| item.sha256 == sha256 && item.extension == extension)
+                || (snapshot.media_sha256 == sha256 && snapshot.media_extension == extension))
+        {
+            return;
+        }
+    }
+    let _ = tokio_fs::remove_file(media_path(&state.data_dir, sha256, extension)).await;
 }
 
 async fn media_storage_used_bytes(directory: &Path) -> std::io::Result<u64> {
@@ -1338,8 +1543,19 @@ async fn handle_socket(
                         }
                         None => {}
                     }
+                    if let ClientMessage::ReleaseToStill { index, sha256, extension, width, height } = &message {
+                        if spectator {
+                            let _ = send(&mut socket, &ServerMessage::Error { message: "Spectators cannot change the room".into() }).await;
+                            continue;
+                        }
+                        if let Err(message) = release_still(&state, &room, &client_id, *index, sha256, extension, *width, *height).await {
+                            let _ = send(&mut socket, &ServerMessage::Error { message }).await;
+                        }
+                        continue;
+                    }
                     let queued_sha = match &message {
-                        ClientMessage::QueueAdd { sha256, .. } => Some(sha256.to_ascii_lowercase()),
+                        ClientMessage::QueueAdd { sha256, .. }
+                        | ClientMessage::RestoreVideo { sha256, .. } => Some(sha256.to_ascii_lowercase()),
                         _ => None,
                     };
                     match dispatch(&room, &client_id, message).await {
@@ -2977,6 +3193,7 @@ mod tests {
             State(state.clone()),
             AxumPath(hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("upload-secret".into()),
                 probe: Some(1),
@@ -2995,6 +3212,7 @@ mod tests {
             State(state.clone()),
             AxumPath(hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("upload-secret".into()),
                 probe: None,
@@ -3011,6 +3229,7 @@ mod tests {
             State(state.clone()),
             AxumPath(hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("upload-secret".into()),
                 probe: Some(1),
@@ -3029,6 +3248,7 @@ mod tests {
             State(state.clone()),
             AxumPath(hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: Some("ABC123".into()),
                 token: None,
                 probe: None,
@@ -3046,6 +3266,7 @@ mod tests {
             State(state),
             AxumPath(hash),
             Query(MediaQuery {
+                still: None,
                 code: Some("WRONG1".into()),
                 token: None,
                 probe: None,
@@ -3055,6 +3276,226 @@ mod tests {
         .await;
         assert_eq!(denied.status(), StatusCode::NOT_FOUND);
         fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    async fn room_with_finished_video(
+        state: &AppState,
+        code: &str,
+        video: &str,
+        finished: bool,
+    ) -> Arc<RoomRecord> {
+        let mut snapshot = RoomSnapshot::create(
+            format!("room-{code}"),
+            code.into(),
+            "Finished".into(),
+            video.into(),
+            "mp4".into(),
+            32,
+            24,
+            2,
+            2,
+            "host".into(),
+        )
+        .unwrap();
+        snapshot.queue[0].available = true;
+        snapshot.sync_current_mirror();
+        for piece in &mut snapshot.pieces {
+            piece.placed = finished;
+        }
+        let room = Arc::new(RoomRecord::new(Some(format!("secret-{code}"))));
+        {
+            let mut runtime = room.runtime.lock().await;
+            runtime.host_id = Some("host".into());
+            runtime.names.insert("host".into(), "Host".into());
+            runtime.snapshot = Some(snapshot);
+        }
+        state.rooms.write().await.insert(code.into(), room.clone());
+        room
+    }
+
+    async fn put_still(
+        state: &AppState,
+        token: &str,
+        hash: &str,
+        extension: &str,
+        bytes: Vec<u8>,
+    ) -> StatusCode {
+        upload_media(
+            State(state.clone()),
+            AxumPath(hash.to_owned()),
+            Query(MediaQuery {
+                still: Some(extension.into()),
+                code: None,
+                token: Some(token.into()),
+                probe: None,
+            }),
+            Body::from(bytes),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn a_finished_video_is_released_to_a_stored_still_and_its_space_is_freed() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-still-{}", Uuid::new_v4()));
+        let state = AppState::new(data_dir.clone());
+        let video_bytes = b"pretend video bytes".to_vec();
+        let video = hex(Sha256::digest(&video_bytes));
+        let still_bytes = [
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..],
+            b"image data",
+        ]
+        .concat();
+        let still = hex(Sha256::digest(&still_bytes));
+        fs::create_dir_all(data_dir.join("media")).unwrap();
+        fs::write(media_path(&data_dir, &video, "mp4"), &video_bytes).unwrap();
+
+        // Unfinished puzzle: no still is accepted yet.
+        let open = room_with_finished_video(&state, "OPEN01", &video, false).await;
+        assert_eq!(
+            put_still(&state, "secret-OPEN01", &still, "png", still_bytes.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        drop(open);
+        // That room also queued the video and would keep it; close it.
+        state.rooms.write().await.remove("OPEN01");
+
+        let room = room_with_finished_video(&state, "DONE01", &video, true).await;
+        // Releasing before the still is stored is refused and keeps the video.
+        let early = release_still(&state, &room, "host", 0, &still, "png", 32, 24).await;
+        assert!(early.unwrap_err().contains("Upload the still"));
+        assert!(media_path(&data_dir, &video, "mp4").is_file());
+
+        // The still is held to its hash, its format and its size.
+        assert_eq!(
+            put_still(
+                &state,
+                "secret-DONE01",
+                &"0".repeat(64),
+                "png",
+                still_bytes.clone()
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let not_an_image = b"definitely not a png".to_vec();
+        assert_eq!(
+            put_still(
+                &state,
+                "secret-DONE01",
+                &hex(Sha256::digest(&not_an_image)),
+                "png",
+                not_an_image
+            )
+            .await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            put_still(&state, "secret-DONE01", &still, "gif", still_bytes.clone()).await,
+            StatusCode::BAD_REQUEST
+        );
+        let huge = vec![0u8; (pieceoff_core::MAX_STILL_BYTES + 1) as usize];
+        assert_eq!(
+            put_still(
+                &state,
+                "secret-DONE01",
+                &hex(Sha256::digest(&huge)),
+                "png",
+                huge
+            )
+            .await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            put_still(&state, "wrong-token", &still, "png", still_bytes.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            put_still(&state, "secret-DONE01", &still, "png", still_bytes.clone()).await,
+            StatusCode::CREATED
+        );
+
+        let mut events = room.events.subscribe();
+        release_still(&state, &room, "host", 0, &still, "png", 32, 24)
+            .await
+            .unwrap();
+        let snapshot = room.runtime.lock().await.snapshot.clone().unwrap();
+        assert_eq!(snapshot.queue[0].sha256, still);
+        assert_eq!(snapshot.queue[0].seed_sha256, video);
+        assert!(snapshot.queue[0].available);
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            ServerMessage::Snapshot { .. }
+        ));
+        assert!(
+            !media_path(&data_dir, &video, "mp4").exists(),
+            "the video's space is freed"
+        );
+        assert!(media_path(&data_dir, &still, "png").is_file());
+        let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_room_cannot_adopt_a_still_another_room_stored_and_only_the_host_releases() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-bound-{}", Uuid::new_v4()));
+        let state = AppState::new(data_dir.clone());
+        let video_a = "a1".repeat(32);
+        let video_b = "b2".repeat(32);
+        let still_bytes = [&[0xff, 0xd8, 0xff][..], b"jpeg-ish"].concat();
+        let still = hex(Sha256::digest(&still_bytes));
+        fs::create_dir_all(data_dir.join("media")).unwrap();
+        fs::write(media_path(&data_dir, &video_a, "mp4"), b"a").unwrap();
+        fs::write(media_path(&data_dir, &video_b, "mp4"), b"b").unwrap();
+        let first = room_with_finished_video(&state, "AAA111", &video_a, true).await;
+        let second = room_with_finished_video(&state, "BBB222", &video_b, true).await;
+        assert_eq!(
+            put_still(&state, "secret-AAA111", &still, "jpg", still_bytes).await,
+            StatusCode::CREATED
+        );
+        // The file is on disk, but room B never uploaded it.
+        let adopted = release_still(&state, &second, "host", 0, &still, "jpg", 32, 24).await;
+        assert!(adopted.is_err());
+        assert!(media_path(&data_dir, &video_b, "mp4").is_file());
+        // A player who is not the host cannot release room A's video either.
+        first
+            .runtime
+            .lock()
+            .await
+            .names
+            .insert("guest".into(), "Guest".into());
+        let by_guest = release_still(&state, &first, "guest", 0, &still, "jpg", 32, 24).await;
+        assert!(by_guest.is_err());
+        assert!(media_path(&data_dir, &video_a, "mp4").is_file());
+        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24)
+            .await
+            .unwrap();
+        let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_released_video_another_room_still_queues_is_kept() {
+        let data_dir = std::env::temp_dir().join(format!("pieceoff-shared-{}", Uuid::new_v4()));
+        let state = AppState::new(data_dir.clone());
+        let video_bytes = b"shared video".to_vec();
+        let video = hex(Sha256::digest(&video_bytes));
+        let still_bytes = [&[0xff, 0xd8, 0xff][..], b"jpeg-ish"].concat();
+        let still = hex(Sha256::digest(&still_bytes));
+        fs::create_dir_all(data_dir.join("media")).unwrap();
+        fs::write(media_path(&data_dir, &video, "mp4"), &video_bytes).unwrap();
+        let first = room_with_finished_video(&state, "ONE001", &video, true).await;
+        let _second = room_with_finished_video(&state, "TWO002", &video, false).await;
+        assert_eq!(
+            put_still(&state, "secret-ONE001", &still, "jpg", still_bytes).await,
+            StatusCode::CREATED
+        );
+        release_still(&state, &first, "host", 0, &still, "jpg", 32, 24)
+            .await
+            .unwrap();
+        assert!(
+            media_path(&data_dir, &video, "mp4").is_file(),
+            "the other room still needs the video"
+        );
+        let _ = fs::remove_dir_all(&data_dir);
     }
 
     #[tokio::test]
@@ -3084,6 +3525,7 @@ mod tests {
             State(state.clone()),
             AxumPath(expected.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("wrong-token".into()),
                 probe: None,
@@ -3097,6 +3539,7 @@ mod tests {
             State(state.clone()),
             AxumPath(expected.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("upload-secret".into()),
                 probe: None,
@@ -3144,6 +3587,7 @@ mod tests {
             State(state.clone()),
             AxumPath(first_hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("first-token".into()),
                 probe: None,
@@ -3154,6 +3598,7 @@ mod tests {
             State(state.clone()),
             AxumPath(second_hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("second-token".into()),
                 probe: None,
@@ -3764,6 +4209,10 @@ mod tests {
             .unwrap(),
         );
         let item = |sha: &str, width: u32| pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: sha.into(),
             extension: "png".into(),
             title: "x".into(),
@@ -3802,6 +4251,10 @@ mod tests {
         )
         .unwrap();
         snapshot.queue.push(pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: hash_b.clone(),
             extension: "png".into(),
             title: "B".into(),
@@ -3900,6 +4353,7 @@ mod tests {
             State(state.clone()),
             AxumPath(slow_hash.clone()),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("slow-token".into()),
                 probe: None,
@@ -3914,6 +4368,7 @@ mod tests {
                 State(state.clone()),
                 AxumPath(quick_hash.clone()),
                 Query(MediaQuery {
+                    still: None,
                     code: None,
                     token: Some("quick-token".into()),
                     probe: None,
@@ -3961,6 +4416,7 @@ mod tests {
             State(state.clone()),
             AxumPath(hash),
             Query(MediaQuery {
+                still: None,
                 code: None,
                 token: Some("cap-token".into()),
                 probe: None,
@@ -4016,6 +4472,7 @@ mod tests {
                     State(state),
                     AxumPath(hash),
                     Query(MediaQuery {
+                        still: None,
                         code: Some("RANGE1".into()),
                         token: None,
                         probe: None,
@@ -4073,6 +4530,10 @@ mod tests {
         snapshot.queue[0].available = true;
         snapshot.queue[0].duration_ms = 100;
         snapshot.queue.push(pieceoff_core::MediaItem {
+            seed_sha256: String::new(),
+            still_sha256: String::new(),
+            owner: String::new(),
+            source: Default::default(),
             sha256: "b2".repeat(32),
             extension: "png".into(),
             title: "B".into(),

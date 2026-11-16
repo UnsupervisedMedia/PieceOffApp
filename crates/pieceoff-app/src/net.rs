@@ -300,6 +300,7 @@ impl PieceOffApp {
                     self.media_ready =
                         self.media_path.is_some() && self.media_hash == snapshot.media_sha256;
                     let is_host = media_upload_token.is_some();
+                    self.host_upload_token = media_upload_token;
                     // Built-in items are available at once: nothing to upload.
                     let uploads_pending = snapshot.queue.iter().any(|item| !item.available);
                     self.media_uploading = is_host && uploads_pending;
@@ -491,8 +492,11 @@ impl PieceOffApp {
                     self.sync_decoder_playback(ctx);
                 }
                 ServerMessage::MediaUploadToken {
-                    client_id, sha256, ..
+                    client_id,
+                    sha256,
+                    token,
                 } if self.client_id.as_deref() == Some(client_id.as_str()) => {
+                    self.host_upload_token = Some(token);
                     self.media_uploading = true;
                     // A token for a video we just queued is not a host change.
                     let queued_by_us = sha256.as_ref().is_some_and(|sha256| {
