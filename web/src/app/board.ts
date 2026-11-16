@@ -16,8 +16,12 @@
 //   drag-abort, and a lease must not stay held, so the client drops the piece
 //   where it started: drag_end(_selection) at the anchor's pre-drag position.
 //   Locally the piece goes back there at once and waits for the drop.
-// - A refused pick-up arrives as an `error` (RoomState drops the unconfirmed
-//   overlay, so the piece snaps back); the rest of that gesture sends nothing.
+// - A refused pick-up arrives as an `error` before the server has confirmed the
+//   lease (RoomState drops the unconfirmed overlay, so the piece snaps back);
+//   the rest of that gesture sends nothing. A dropped connection (or a
+//   reconnect's welcome) ends it the same way: the server already expired the
+//   lease. In every other case the release always sends the drop, even if the
+//   local overlay went away meanwhile, so a lease is never left held.
 //   Server errors show verbatim in a short toast.
 // - Placed pieces and pieces someone else holds are not grabbable: pressing
 //   them pans (touch) or rubber-bands (mouse) instead of asking for a refusal.
@@ -418,6 +422,9 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     oy: number;
     x: number;
     y: number;
+    /** The server said we hold the anchor. */
+    confirmed: boolean;
+    /** Refused, or the connection went: send nothing more for this drag. */
     dead: boolean;
   }
   let drag: Drag | null = null;
@@ -457,10 +464,9 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     const d = drag;
     drag = null;
     if (!d || d.dead) return updateTurnButtons();
-    if (!state.localDrag()) return updateTurnButtons(); // refused or dropped meanwhile
     if (cancelled) {
       // No drag-abort in the protocol: put it down where it started.
-      state.dragTo(d.ox, d.oy);
+      if (state.localDrag()) state.dragTo(d.ox, d.oy);
       sendDrop(d, d.ox, d.oy);
     } else {
       sendDrop(d, d.x, d.y);
@@ -511,21 +517,16 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
         } else {
           ok = socket.send({ type: 'drag_start', piece_id: id });
         }
-        drag = { anchor: id, multi, dx: tx - p.x, dy: ty - p.y, ox: p.x, oy: p.y, x: p.x, y: p.y, dead: !ok };
+        drag = { anchor: id, multi, dx: tx - p.x, dy: ty - p.y, ox: p.x, oy: p.y, x: p.x, y: p.y, confirmed: false, dead: !ok };
         if (ok) state.beginDrag(id, ids);
         updateTurnButtons();
       },
       dragMove(tx, ty) {
         const d = drag;
         if (!d || d.dead) return;
-        if (!state.localDrag()) {
-          d.dead = true; // refused (error) or the connection dropped
-          updateTurnButtons();
-          return;
-        }
         d.x = tx - d.dx;
         d.y = ty - d.dy;
-        state.dragTo(d.x, d.y);
+        if (state.localDrag()) state.dragTo(d.x, d.y);
         socket.send(
           d.multi
             ? { type: 'move_selection', anchor_piece_id: d.anchor, x: d.x, y: d.y }
@@ -637,6 +638,15 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
     }
     pushPieces();
     if (!m) return;
+    const d = drag;
+    if (d && !d.dead) {
+      if (m.type === 'pieces_changed' && m.pieces.some((p) => p.id === d.anchor && p.held_by !== null && p.held_by === state.clientId)) {
+        d.confirmed = true;
+      } else if ((m.type === 'error' && !d.confirmed) || m.type === 'welcome') {
+        d.dead = true; // refused, or a reconnect: the old lease is gone
+        updateTurnButtons();
+      }
+    }
     switch (m.type) {
       case 'welcome':
       case 'snapshot':
@@ -667,6 +677,7 @@ export function mountBoard(root: HTMLElement, deps: BoardDeps): BoardHandle {
   cleanups.push(state.onChange(onMessage));
   cleanups.push(
     socket.onState((st) => {
+      if (st !== 'open' && drag) drag.dead = true; // the server expires our leases
       netEl.textContent = st === 'open' ? '' : st === 'fatal' ? 'Disconnected' : 'Reconnecting…';
       overlays.requestDraw('over');
     }),

@@ -150,6 +150,7 @@ interface Setup {
   at(id: number): [number, number];
   pointer(type: string, id: number, x: number, y: number, o?: Partial<PointerEventInit>): void;
   drags(): ClientMessage[];
+  setSocketState(st: 'open' | 'reconnecting'): void;
 }
 
 const DRAG_TYPES = new Set(['drag_start', 'drag_start_selection', 'move_piece', 'move_selection', 'drag_end', 'drag_end_selection', 'rotate_selection']);
@@ -205,6 +206,9 @@ function setup(o: { snap?: Partial<RoomSnapshot>; spectator?: boolean; welcomeOv
       }));
     },
     drags: () => sent.filter((m) => DRAG_TYPES.has(m.type)),
+    setSocketState: (st) => {
+      for (const cb of [...stateCbs]) cb(st as 'open');
+    },
   };
   return s;
 }
@@ -314,6 +318,34 @@ describe('board', () => {
     expect(d[2]).toEqual({ type: 'drag_end', piece_id: 0, x: 600, y: 100 });
     expect(s.state.localDrag()?.ended).toBe(true);
     expect([s.r.last(0)[1], s.r.last(0)[2]]).toEqual([600, 100]);
+  });
+
+  it('a_held_piece_is_always_dropped_unless_the_pickup_was_refused', () => {
+    const s = setup();
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    // The server confirms the lease; then the local overlay goes away for some
+    // other reason. The lease must still be released by a drop.
+    s.receive({ type: 'pieces_changed', revision: 2, pieces: [{ ...s.snap.pieces[1], held_by: 'me' }] });
+    s.receive({ type: 'error', message: 'You are sending chat messages too quickly. Wait a moment.' });
+    s.state.cancelDrag();
+    s.pointer('pointermove', 1, x + 40, y);
+    s.pointer('pointerup', 1, x + 40, y);
+    const d = s.drags();
+    expect(d[d.length - 1].type).toBe('drag_end');
+  });
+
+  it('a_dropped_connection_ends_the_drag_without_sending', () => {
+    const s = setup();
+    const [x, y] = s.at(1);
+    s.pointer('pointerdown', 1, x, y);
+    s.pointer('pointermove', 1, x + 20, y);
+    s.state.connectionLost();
+    s.setSocketState('reconnecting');
+    s.pointer('pointermove', 1, x + 40, y);
+    s.pointer('pointerup', 1, x + 40, y);
+    expect(s.drags().map((m) => m.type)).toEqual(['drag_start', 'move_piece']);
   });
 
   it('renderer_context_loss_keeps_state_and_input_alive', () => {
